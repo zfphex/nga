@@ -1,0 +1,8 @@
+[package]
+name = "nga"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+minmetal = { version = "0.1.0", path = "../minmetal" }
+minwin = { version = "0.1.0", path = "../minwin" }
