@@ -1010,16 +1010,22 @@ pub struct Compute<'a> {
     pub encoder: M4ComputeCommandEncoder,
     pub table: &'a M4ArgumentTable,
     pub command_buffer: &'a M4CommandBuffer,
+    pub arena: &'a Arena,
 }
 
 impl<'a> Compute<'a> {
-    pub fn new(command_buffer: &'a M4CommandBuffer, table: &'a M4ArgumentTable) -> Option<Self> {
+    pub fn new(
+        command_buffer: &'a M4CommandBuffer,
+        table: &'a M4ArgumentTable,
+        arena: &'a Arena,
+    ) -> Option<Self> {
         let encoder = command_buffer.compute_command_encoder()?;
         encoder.set_argument_table(Some(table));
         Some(Self {
             encoder,
             table,
             command_buffer,
+            arena,
         })
     }
 
@@ -1078,6 +1084,155 @@ impl<'a> Compute<'a> {
 
     pub fn wait_fence(&self, fence: &Fence, before: Stages) {
         self.encoder.wait_for_fence(fence, before);
+    }
+
+    pub fn copy_buffer(
+        &self,
+        source: &Buffer,
+        source_offset: usize,
+        destination: &Buffer,
+        destination_offset: usize,
+        size: usize,
+    ) {
+        self.encoder.copy_buffer_to_buffer(
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            size,
+        );
+    }
+
+    pub fn fill_buffer(&self, buffer: &Buffer, offset: usize, size: usize, value: u8) {
+        self.encoder
+            .fill_buffer(buffer, minmetal::Range::new(offset, size), value);
+    }
+
+    pub fn copy_texture(&self, source: &Texture, destination: &Texture) {
+        self.encoder.copy_textures(source, destination);
+    }
+
+    pub fn copy_texture_region(
+        &self,
+        source: &Texture,
+        source_slice: usize,
+        source_level: usize,
+        source_origin: Origin,
+        size: Size,
+        destination: &Texture,
+        destination_slice: usize,
+        destination_level: usize,
+        destination_origin: Origin,
+    ) {
+        self.encoder.copy_texture_to_texture(
+            source,
+            source_slice,
+            source_level,
+            source_origin,
+            size,
+            destination,
+            destination_slice,
+            destination_level,
+            destination_origin,
+        );
+    }
+
+    pub fn copy_buffer_to_texture(
+        &self,
+        source: &Buffer,
+        source_offset: usize,
+        stride: usize,
+        destination: &Texture,
+        slice: usize,
+        level: usize,
+        origin: Origin,
+        size: Size,
+    ) {
+        self.encoder.copy_buffer_to_texture(
+            source,
+            source_offset,
+            stride,
+            stride * size.height,
+            size,
+            destination,
+            slice,
+            level,
+            origin,
+            BlitOption::NONE,
+        );
+    }
+
+    pub fn copy_texture_to_buffer(
+        &self,
+        source: &Texture,
+        slice: usize,
+        level: usize,
+        origin: Origin,
+        size: Size,
+        destination: &Buffer,
+        destination_offset: usize,
+        stride: usize,
+    ) {
+        self.encoder.copy_texture_to_buffer(
+            source,
+            slice,
+            level,
+            origin,
+            size,
+            destination,
+            destination_offset,
+            stride,
+            stride * size.height,
+            BlitOption::NONE,
+        );
+    }
+
+    pub fn generate_mipmaps(&self, texture: &Texture) {
+        self.encoder.generate_mipmaps(texture);
+    }
+
+    pub fn stage(&self, bytes: &[u8]) -> Option<usize> {
+        let (cpu, gpu) = self.arena.alloc_bytes(bytes.len(), 256)?;
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), cpu, bytes.len()) };
+        Some((gpu - self.arena.base) as usize)
+    }
+
+    pub fn upload_buffer(&self, destination: &Buffer, offset: usize, bytes: &[u8]) -> Option<()> {
+        let staged = self.stage(bytes)?;
+        self.encoder.copy_buffer_to_buffer(
+            &self.arena.buffer,
+            staged,
+            destination,
+            offset,
+            bytes.len(),
+        );
+        Some(())
+    }
+
+    pub fn upload_texture(
+        &self,
+        texture: &Texture,
+        slice: usize,
+        level: usize,
+        bytes: &[u8],
+        stride: usize,
+    ) -> Option<()> {
+        let (width, height) = (texture.width() >> level, texture.height() >> level);
+        assert_eq!(bytes.len(), stride * height);
+        let staged = self.stage(bytes)?;
+        self.encoder.copy_buffer_to_texture(
+            &self.arena.buffer,
+            staged,
+            stride,
+            bytes.len(),
+            Size::new(width, height, 1),
+            texture,
+            slice,
+            level,
+            Origin::new(0, 0, 0),
+            BlitOption::NONE,
+        );
+        Some(())
     }
 }
 
@@ -1285,7 +1440,7 @@ impl Recorder<'_> {
     }
 
     pub fn compute(&mut self) -> Option<Compute<'_>> {
-        Compute::new(self.command_buffer, self.table)
+        Compute::new(self.command_buffer, self.table, self.arena)
     }
 }
 
