@@ -614,6 +614,53 @@ impl Shaders {
         self.compiler
             .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)
     }
+
+    pub fn mesh(&self, desc: &MeshDesc) -> Result<RenderPipelineState, MetalError> {
+        let pipeline = M4MeshRenderPipelineDescriptor::new();
+        pipeline.set_label(desc.label);
+        if !desc.object.is_empty() {
+            let object = self.function(desc.object, desc.constants);
+            pipeline.set_object_function_descriptor(Some(&object));
+            pipeline.set_payload_memory_length(desc.payload);
+        }
+        pipeline.set_mesh_function_descriptor(Some(&self.function(desc.mesh, desc.constants)));
+        if !desc.fragment.is_empty() {
+            let fragment = self.function(desc.fragment, desc.constants);
+            pipeline.set_fragment_function_descriptor(Some(&fragment));
+        }
+        pipeline.set_support_indirect_command_buffers(match desc.indirect {
+            true => M4IndirectCommandBufferSupportState::Enabled,
+            false => M4IndirectCommandBufferSupportState::Disabled,
+        });
+        pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
+        pipeline.set_raster_sample_count(desc.samples);
+        pipeline.set_alpha_to_coverage_state(match desc.alpha_to_coverage {
+            true => M4AlphaToCoverageState::Enabled,
+            false => M4AlphaToCoverageState::Disabled,
+        });
+        let attachments = pipeline.color_attachments();
+        for (index, target) in desc.colors.iter().enumerate() {
+            let attachment = attachments.object_at(index);
+            attachment.set_pixel_format(target.format);
+            attachment.set_write_mask(target.write);
+            match target.blend {
+                BlendMode::Fixed(blend) => {
+                    attachment.set_blending_state(M4BlendState::Enabled);
+                    attachment.set_blend_factors(
+                        blend.src_rgb,
+                        blend.dst_rgb,
+                        blend.rgb_op,
+                        blend.src_alpha,
+                        blend.dst_alpha,
+                        blend.alpha_op,
+                    );
+                }
+                _ => attachment.set_blending_state(M4BlendState::Disabled),
+            }
+        }
+        self.compiler
+            .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -693,6 +740,42 @@ impl<'a> RasterDesc<'a> {
             samples: 1,
             alpha_to_coverage: false,
             label: vertex,
+            constants: None,
+            indirect: false,
+        }
+    }
+}
+
+pub struct MeshDesc<'a> {
+    pub object: &'a str,
+    pub mesh: &'a str,
+    pub fragment: &'a str,
+    pub colors: &'a [ColorTarget],
+    pub payload: usize,
+    pub samples: usize,
+    pub alpha_to_coverage: bool,
+    pub label: &'a str,
+    pub constants: Option<&'a dyn Constants>,
+    pub indirect: bool,
+}
+
+impl<'a> MeshDesc<'a> {
+    pub fn new(
+        object: &'a str,
+        mesh: &'a str,
+        fragment: &'a str,
+        colors: &'a [ColorTarget],
+        payload: usize,
+    ) -> Self {
+        Self {
+            object,
+            mesh,
+            fragment,
+            colors,
+            payload,
+            samples: 1,
+            alpha_to_coverage: false,
+            label: mesh,
             constants: None,
             indirect: false,
         }
@@ -779,7 +862,13 @@ impl<'a> Raster<'a> {
         viewport: Viewport,
     ) -> Option<Self> {
         let encoder = command_buffer.render_command_encoder_with_descriptor(&pass.desc)?;
-        encoder.set_argument_table(table, RenderStages::VERTEX | RenderStages::FRAGMENT);
+        encoder.set_argument_table(
+            table,
+            RenderStages::VERTEX
+                | RenderStages::FRAGMENT
+                | RenderStages::OBJECT
+                | RenderStages::MESH,
+        );
         encoder.set_viewport(viewport);
         Some(Self {
             encoder,
@@ -834,6 +923,21 @@ impl<'a> Raster<'a> {
             I::INDEX_TYPE,
             indices.0.get(),
             count * size_of::<I>(),
+        );
+    }
+
+    pub fn draw_mesh<T>(
+        &self,
+        root: Gpu<'_, T>,
+        groups: usize,
+        object_group: usize,
+        mesh_group: usize,
+    ) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder.draw_mesh_threadgroups(
+            Size::new(groups, 1, 1),
+            Size::new(object_group, 1, 1),
+            Size::new(mesh_group, 1, 1),
         );
     }
 
