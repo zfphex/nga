@@ -26,7 +26,7 @@ Since the binding details are yours, here's the contract. This doubles as the M0
 - `MTLBuffer::gpu_address()` and `MTLHeap` placement (`heap_texture_size_and_align(desc)`, `new_texture(desc, offset)`).
 - **Residency sets**: create, add allocation, commit, attach to queue.
 - **Argument table address binding** — setting a raw `u64` device address at a binding index, not a buffer object. (Metal 4 `MTL4ArgumentTable`.)
-- `MTLTexture::gpu_resource_id() -> u64`, writable into a plain buffer.
+- `MTLTexture::gpu_resource_id() -> MTLResourceID` (a `#[repr(C)]` newtype over `u64`), writable into a plain buffer.
 - Encoder-level memory barrier with scope + before/after stage masks.
 - `MTLSharedEvent` (signal on queue, wait on CPU) and `MTLFence`.
 
@@ -87,39 +87,50 @@ Prove this in M0 before anything else is written.
 
 ## 5. Bindless textures: build the heap Metal won't give you
 
-Aaltonen's complaint that Metal lacks a global indexable heap is about the *allocator*, not the hardware. In MSL 3.0+, `resource_id` allows textures to be constructed directly from 64-bit handles stored in a plain buffer pointer: `device const resource_id* heap [[buffer(1)]]`.
+Aaltonen's complaint that Metal lacks a global indexable heap is about the *allocator*, not the hardware. `MTLTexture.gpuResourceID` is a 64-bit handle writable into a plain buffer, so we own the array and the indexing scheme.
 
-```glsl
+The only real constraint is how MSL spells the array element. There is no `resource_id` type, and no `texture2d<float>` constructor taking a handle — verified against Apple metal 32023.864 (`-std=metal3.2`), where every spelling fails:
+
+```
+device const resource_id* heap        ->  unknown type name 'resource_id'
+device const metal::resource_id* heap ->  no type named 'resource_id' in namespace 'metal'
+texture2d<float> tex(heap[i])         ->  no matching constructor for 'texture2d<float>'
+```
+
+`resource_id` appears nowhere in the MSL headers; `MTLResourceID` exists only inside `metal_raytracing`, for acceleration structures. `texture2d`'s constructor set is copy-constructors across address spaces plus a null-texture default — there is no handle-to-texture constructor to call, whatever the array element is named.
+
+What Apple does expose is the one-member argument-buffer struct, which is exactly 8 bytes — one resource ID:
+
+```metal
 // In MSL shared header:
-#include <metal_stdlib>
-using namespace metal;
+struct nga_texture2d { texture2d<float> t; };
+static_assert(sizeof(nga_texture2d) == 8, "not one resource id");
 
 fragment float4 my_fs(
-    device const Data*        data         [[buffer(0)]],
-    device const resource_id* texture_heap [[buffer(1)]]
+    device const Data*         data         [[buffer(0)]],
+    device const nga_texture2d* texture_heap [[buffer(1)]]
 ) {
-    constexpr sampler s(address::repeat, filter::linear);
     uint albedo_idx = data->material.texture_base + 0;
-
-    // Construct texture directly from 64-bit resource_id
-    texture2d<float> tex(texture_heap[albedo_idx]);
-
-    return tex.sample(s, data->uv);
+    return texture_heap[albedo_idx].t.sample(nga_linear_repeat, data->uv);
 }
 ```
+
+The CPU side is therefore exactly the intended thing — a plain array of 64-bit handles in GPU memory:
 
 ```rust
-pub struct TextureHeap {
-    storage: GpuBox<'static, MTLResourceID>, // just a u64 array in GPU memory
-    free: RangeAllocator,                      // supports contiguous ranges
+pub struct ResourceHeap {
+    storage: HeapBuffer,     // u64 array in GPU memory; freed via its Alloc
+    ranges: RangeAllocator,  // supports contiguous ranges
 }
-let range: TexRange = heap.alloc_range(3)?;    // base index -> one u32 in your material
-heap.write(range, 0, &albedo);
+let range: HeapRange = heap.alloc_range(3)?;   // base index -> one u32 in your material
+heap.write(range, 0, albedo.gpu_resource_id()?);
 ```
 
-Metal won't give us a user-indexable heap, so we build one: `gpu_resource_id()` values written as raw `u64` entries into a plain buffer, read in MSL as `device const resource_id* heap [[buffer(1)]]`. Because we own the array layout, we get **contiguous descriptor ranges** — a material is one `u32 texture_base`, not five 64-bit handles. A `RangeAllocator` (first-fit over a sorted free-range `Vec`) backs it. Compute shaders can write descriptors too, gated by `Hazard::DESCRIPTORS` on the following barrier.
+Metal won't give us a user-indexable heap, so we build one. Because we own the array layout, we get **contiguous descriptor ranges** — the thing Metal's automatic handles can't express — so a material is one `u32 texture_base`, not five 64-bit handles. A `RangeAllocator` (first-fit over a sorted free-range `Vec`) backs it.
 
-Because we own the array, we get contiguous descriptor ranges — the thing Metal's automatic handles can't express — so a material is `u32 texture_base`, not five 64-bit handles. Samplers default to MSL `constexpr sampler` (embedded, as in the post); an optional sampler heap uses the same mechanism for dynamic cases.
+`storage` is a `HeapBuffer`, not the `GpuBox` earlier drafts assumed: `GpuBox` is arena-shaped and deliberately has no freeing `Drop`, whereas a descriptor heap is persistent and needs an explicit free. Allocating it from the `GpuHeap` also places it in the heap already covered by the residency set. The element type is `ResourceID` — a `#[repr(C)]` newtype over `u64`, so the same 8 bytes and the same layout as `[u64]`, but it is what `gpu_resource_id()` returns, so no conversion appears at any call site and a stray integer cannot be written into a descriptor slot.
+
+Samplers default to MSL `constexpr sampler` (embedded, as in the post). A dynamic sampler heap needs no extra code: `struct nga_sampler { sampler s; }` is also 8 bytes, so it is the same `ResourceHeap` holding `SamplerState::gpu_resource_id()` values. Compute shaders can write descriptors too, gated by `Hazard::DESCRIPTORS` on the following barrier.
 
 ---
 
@@ -131,7 +142,7 @@ Because we own the array, we get contiguous descriptor ranges — the thing Meta
 - **Function constants** map to specialization constants. A `#[derive(Constants)]` struct generates the index mapping, so the user writes a struct rather than an index-keyed API. Caveat: MSL function constants are scalars/vectors only — a "constant GPU pointer" must be a `ulong` cast in the shader.
 - Vertex buffers do not exist. Ever. Vertex fetch is `data->vertices[vid]`.
 
-**Root data** is one device address per stage in the argument table — index 0 for vertex/kernel, index 0 for fragment. Nothing else is ever bound. MSL receives `device const Data* data [[buffer(0)]]`; `const` is what lets Apple's compiler run uniformity analysis and preload into uniform registers, which is why constant buffers can be deleted outright.
+**Root data** is one device address per stage in the argument table — index 0 for vertex/kernel, index 0 for fragment. Nothing else is ever bound per draw; the descriptor heap of §5 is a second address set once at init, not per-draw state. MSL receives `device const Data* data [[buffer(0)]]`; `const` is what lets Apple's compiler run uniformity analysis and preload into uniform registers, which is why constant buffers can be deleted outright.
 
 **Pipelines** take IR plus a small `RasterDesc`. No root signature, no vertex layout, no bind group layouts — there is nothing to describe. Depth-stencil is a separate object. Blend is baked into the PSO (Metal has no dynamic blend state), with framebuffer fetch exposed as the permutation-collapsing alternative, per the post's mobile branch. Vertex buffers do not exist: fetch is `data->vertices[vid]`.
 
@@ -239,7 +250,7 @@ nga-examples triangle, gpu-driven meshlets, bindless deferred
 
 - **M0 — Feasibility spike.** One triangle: untracked shared buffer → `gpu_address` → argument table → residency set → MSL `device const Data*`.
 - **M1 — Memory.** Bump/TLSF/Pool, `Gpu<'a,T>`, `GpuBox`, placement textures, staging upload.
-- **M2 — Bindless.** Texture heap array, contiguous ranges, `NonUniformResourceIndex` marker, `constexpr` samplers.
+- **M2 — Bindless.** Texture heap array, contiguous ranges, `constexpr` samplers. No `NonUniformResourceIndex` marker: that is an HLSL qualifier with no MSL equivalent, and Metal 3 already treats dynamic indexing into a descriptor array as potentially divergent, so a Rust-side marker would be decorative.
 - **M3 — Raster.** `RasterDesc`, separate depth-stencil state, render passes, framebuffer-fetch blending.
 - **M4 — Sync.** Stage/hazard barriers, fences, shared-event frame loop, frames-in-flight ring.
 - **M5 — Macros.** `gpu_struct` parser, MSL emission, offset asserts, golden-file test harness. Deliberately after M1–M4, so the macro is written against real structs rather than guessed ones.
