@@ -11,6 +11,7 @@ struct Vertex {
 #[gpu_struct]
 struct Material {
     texture_base: u32,
+    sampler: u32,
     tint: [f32; 3],
 }
 
@@ -18,8 +19,14 @@ struct Material {
 struct Data {
     vertices: Gpu<'static, Vertex>,
     materials: Gpu<'static, Material>,
-    textures: Gpu<'static, Texture2d>,
     mvp: f32x4x4,
+}
+
+#[gpu_struct]
+struct Paint {
+    target: u32,
+    size: u32,
+    time: f32,
 }
 
 const SHADERS: &str = include_str!("../shaders/bindless.metal");
@@ -51,10 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let event = device.new_shared_event()?;
 
-    let source = format!(
-        "{}\n{SHADERS}",
-        msl::header!(Vertex, Material, Data)
-    );
+    let source = format!("{}\n{SHADERS}", msl::header!(Vertex, Material, Data, Paint));
     msl::assert_matches(
         concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/bindless.metal"),
         &format!("{MSL_PRELUDE}{source}"),
@@ -83,6 +87,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline =
         compiler.new_render_pipeline_state(&pipeline_desc.as_pipeline_descriptor(), None)?;
 
+    let paint_function = M4LibraryFunctionDescriptor::new();
+    paint_function.set_name("paint");
+    paint_function.set_library(Some(&library));
+    let paint_desc = M4ComputePipelineDescriptor::new();
+    paint_desc.set_compute_function_descriptor(Some(&paint_function.as_function_descriptor()));
+    let paint_pipeline = compiler.new_compute_pipeline_state(&paint_desc, None)?;
+
     let arena = Arena::new(&device, 64 * 1024)?;
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let mut textures = ResourceHeap::new(&mut heap, 1024)?;
@@ -109,8 +120,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vertex_buffer = heap.alloc_buffer(size_of_val(quads.as_slice()))?;
     vertex_buffer.write(0, &quads);
 
+    let sampler_desc = SamplerDescriptor::new();
+    sampler_desc.set_min_filter(SamplerMinMagFilter::Nearest);
+    sampler_desc.set_mag_filter(SamplerMinMagFilter::Nearest);
+    sampler_desc.set_address_mode(SamplerAddressMode::ClampToEdge);
+    sampler_desc.set_support_argument_buffers(true);
+    let sampler = device.new_sampler_state(&sampler_desc)?;
+    let sampler_range = textures.alloc_range(1)?;
+    textures.write(sampler_range, 0, sampler.gpu_resource_id()?);
+
     let mut live = Vec::new();
     let mut materials = Vec::new();
+    let mut paint_target = 0;
     let mut pixels = vec![0u8; TEX * TEX * 4];
     for quad in 0..QUADS {
         let range = textures.alloc_range(LAYERS)?;
@@ -136,20 +157,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pixels[texel + 3] = 255;
                 }
             }
+            let painted = quad == 0 && layer == 0;
             let desc = TextureDescriptor::texture_2d(PixelFormat::Rgba8Unorm, TEX, TEX, false);
-            desc.set_usage(TextureUsage::SHADER_READ);
+            desc.set_usage(match painted {
+                true => TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+                false => TextureUsage::SHADER_READ,
+            });
             let texture = heap.alloc_texture(&desc)?;
-            texture.texture.replace_region(
-                Region::new_2d(0, 0, TEX, TEX),
-                0,
-                &pixels,
-                TEX * 4,
-            );
+            texture
+                .texture
+                .replace_region(Region::new_2d(0, 0, TEX, TEX), 0, &pixels, TEX * 4);
             textures.write(range, layer, texture.texture.gpu_resource_id()?);
+            if painted {
+                paint_target = range.base + layer;
+            }
             live.push(texture);
         }
         materials.push(Material {
             texture_base: range.base,
+            sampler: sampler_range.base,
             tint: [
                 1.0 - quad as f32 * 0.15,
                 0.6 + quad as f32 * 0.1,
@@ -163,12 +189,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut data: Pool<Data> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32)
         .ok_or(MetalError::new("frame arena is too small"))?;
+    let mut paint: Pool<Paint> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32)
+        .ok_or(MetalError::new("frame arena is too small"))?;
     for _ in 0..FRAMES_IN_FLIGHT {
         data.alloc(Data {
             vertices: Gpu::new(vertex_buffer.gpu),
             materials: Gpu::new(material_buffer.gpu),
-            textures: Gpu::new(textures.storage.gpu),
             mvp: f32x4x4([[0.0; 4]; 4]),
+        });
+        paint.alloc(Paint {
+            target: paint_target,
+            size: TEX as u32,
+            time: 0.0,
         });
     }
 
@@ -179,8 +211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     queue.add_residency_set(&residency);
 
     let table_desc = M4ArgumentTableDescriptor::new();
-    table_desc.set_max_buffer_bind_count(1);
+    table_desc.set_max_buffer_bind_count(2);
     let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
+    table.set_address(textures.storage.gpu, 1);
 
     let scale = window.scale_factor();
     let (mut drawable_width, mut drawable_height) = window.scaled_size();
@@ -230,10 +263,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ]);
-            table.set_address(data.gpu(slot).0.get(), 0);
+            paint[slot].time = angle;
 
             allocators[slot as usize].reset();
             command_buffer.begin_command_buffer_with_allocator(&allocators[slot as usize]);
+
+            if let Some(compute) = command_buffer.compute_command_encoder() {
+                compute.set_argument_table(Some(&table));
+                compute.set_compute_pipeline_state(&paint_pipeline);
+                table.set_address(paint.gpu(slot).0.get(), 0);
+                compute.dispatch_threads(Size::new(TEX, TEX, 1), Size::new(8, 8, 1));
+                compute.barrier(
+                    Stages::DISPATCH,
+                    Stages::FRAGMENT,
+                    M4VisibilityOptions::DEVICE,
+                );
+                compute.end_encoding();
+            }
+
+            table.set_address(data.gpu(slot).0.get(), 0);
 
             let pass = M4RenderPassDescriptor::new();
             let color = pass.color_attachments().object_at_indexed_subscript(0);

@@ -1,10 +1,9 @@
 pub const NIL: u32 = u32::MAX;
-pub const MIN: u64 = 256;
 
-const FL_SHIFT: usize = 8;
 const FL: usize = 32;
 const SL_BITS: usize = 5;
 const SL: usize = 1 << SL_BITS;
+const MAX_UNITS: u64 = 1 << (FL + SL_BITS - 1);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Alloc {
@@ -31,11 +30,13 @@ pub struct Tlsf {
     pub sl_bitmap: [u32; FL],
     pub fl_bitmap: u32,
     pub size: u64,
+    pub min: u64,
 }
 
 impl Tlsf {
-    pub fn new(size: u64) -> Self {
-        assert!(size >= MIN && size < MIN << FL);
+    pub fn new(size: u64, min: u64) -> Self {
+        debug_assert!(min.is_power_of_two());
+        debug_assert!(size >= min && size / min < MAX_UNITS);
         let mut tlsf = Self {
             blocks: Vec::new(),
             spare: Vec::new(),
@@ -43,16 +44,21 @@ impl Tlsf {
             sl_bitmap: [0; FL],
             fl_bitmap: 0,
             size,
+            min,
         };
-        let root = tlsf.block(0, size & !(MIN - 1));
+        let root = tlsf.block(0, size & !(min - 1));
         tlsf.insert(root);
         tlsf
     }
 
-    fn mapping(size: u64) -> (usize, usize) {
-        let fl = 63 - size.leading_zeros() as usize;
-        let sl = ((size >> (fl - SL_BITS)) & (SL as u64 - 1)) as usize;
-        (fl - FL_SHIFT, sl)
+    fn mapping(&self, size: u64) -> (usize, usize) {
+        let units = size / self.min;
+        if units < SL as u64 {
+            return (0, units as usize);
+        }
+        let raw = 63 - units.leading_zeros() as usize;
+        let sl = ((units >> (raw - SL_BITS)) & (SL as u64 - 1)) as usize;
+        (raw - SL_BITS + 1, sl)
     }
 
     fn block(&mut self, offset: u64, size: u64) -> u32 {
@@ -78,7 +84,7 @@ impl Tlsf {
     }
 
     fn insert(&mut self, index: u32) {
-        let (fl, sl) = Self::mapping(self.blocks[index as usize].size);
+        let (fl, sl) = self.mapping(self.blocks[index as usize].size);
         let head = self.heads[fl][sl];
         self.blocks[index as usize].free = true;
         self.blocks[index as usize].free_prev = NIL;
@@ -93,7 +99,7 @@ impl Tlsf {
 
     fn remove(&mut self, index: u32) {
         let block = self.blocks[index as usize];
-        let (fl, sl) = Self::mapping(block.size);
+        let (fl, sl) = self.mapping(block.size);
         if block.free_prev != NIL {
             self.blocks[block.free_prev as usize].free_next = block.free_next;
         } else {
@@ -112,11 +118,21 @@ impl Tlsf {
     }
 
     pub fn alloc(&mut self, size: u64, align: u64) -> Option<Alloc> {
-        let align = align.max(MIN).next_power_of_two();
-        let size = (size.max(1) + MIN - 1) & !(MIN - 1);
-        let want = size + if align > MIN { align } else { 0 };
-        let raw = 63 - want.leading_zeros() as usize;
-        let (mut fl, mut sl) = Self::mapping(want + (1 << (raw - SL_BITS)) - 1);
+        let align = align.max(self.min).next_power_of_two();
+        let size = (size.max(1) + self.min - 1) & !(self.min - 1);
+        let want = size + if align > self.min { align } else { 0 };
+        let units = want / self.min;
+        let rounded = match units < SL as u64 {
+            true => want,
+            false => {
+                let raw = 63 - units.leading_zeros() as usize;
+                (units + (1 << (raw - SL_BITS)) - 1) * self.min
+            }
+        };
+        let (mut fl, mut sl) = self.mapping(rounded);
+        if fl >= FL {
+            return None;
+        }
 
         let mut map = self.sl_bitmap[fl] & (u32::MAX << sl);
         if map == 0 {
@@ -152,7 +168,7 @@ impl Tlsf {
         }
 
         let rest = self.blocks[index as usize].size - size;
-        if rest >= MIN {
+        if rest >= self.min {
             let tail = self.block(aligned + size, rest);
             let next = self.blocks[index as usize].next;
             self.blocks[tail as usize].prev = index;
@@ -172,8 +188,8 @@ impl Tlsf {
         })
     }
 
-    pub fn free(&mut self, alloc: Alloc) {
-        let mut index = alloc.block;
+    pub fn free(&mut self, block: u32) {
+        let mut index = block;
         let next = self.blocks[index as usize].next;
         if next != NIL && self.blocks[next as usize].free {
             self.remove(next);

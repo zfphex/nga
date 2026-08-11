@@ -8,6 +8,7 @@ pub mod tlsf;
 
 use minmetal::*;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
@@ -278,7 +279,7 @@ impl GpuHeap {
         Ok(Self {
             heap: device.new_heap(&desc)?,
             device: device.clone(),
-            tlsf: Tlsf::new(size),
+            tlsf: Tlsf::new(size, 256),
         })
     }
 
@@ -318,45 +319,7 @@ impl GpuHeap {
     }
 
     pub fn free(&mut self, alloc: Alloc) {
-        self.tlsf.free(alloc);
-    }
-}
-
-pub struct RangeAllocator {
-    pub free: Vec<(u32, u32)>,
-}
-
-impl RangeAllocator {
-    pub fn new(cap: u32) -> Self {
-        Self {
-            free: vec![(0, cap)],
-        }
-    }
-
-    pub fn alloc(&mut self, len: u32) -> Option<u32> {
-        let index = self.free.iter().position(|&(_, free)| free >= len)?;
-        let (base, free) = self.free[index];
-        if free == len {
-            self.free.remove(index);
-        } else {
-            self.free[index] = (base + len, free - len);
-        }
-        Some(base)
-    }
-
-    pub fn free(&mut self, base: u32, len: u32) {
-        let index = self.free.partition_point(|&(start, _)| start < base);
-        debug_assert!(index == self.free.len() || base + len <= self.free[index].0);
-        debug_assert!(index == 0 || self.free[index - 1].0 + self.free[index - 1].1 <= base);
-        self.free.insert(index, (base, len));
-        if index + 1 < self.free.len() && base + len == self.free[index + 1].0 {
-            self.free[index].1 += self.free[index + 1].1;
-            self.free.remove(index + 1);
-        }
-        if index > 0 && self.free[index - 1].0 + self.free[index - 1].1 == base {
-            self.free[index - 1].1 += self.free[index].1;
-            self.free.remove(index);
-        }
+        self.tlsf.free(alloc.block);
     }
 }
 
@@ -364,12 +327,14 @@ impl RangeAllocator {
 pub struct HeapRange {
     pub base: u32,
     pub len: u32,
+    pub block: u32,
 }
 
 pub struct ResourceHeap {
     pub storage: HeapBuffer,
-    pub ranges: RangeAllocator,
+    pub ranges: Tlsf,
     pub cap: u32,
+    pub pending: VecDeque<(u64, HeapRange)>,
 }
 
 impl ResourceHeap {
@@ -378,21 +343,37 @@ impl ResourceHeap {
         unsafe { std::ptr::write_bytes(storage.cpu, 0, cap as usize * size_of::<ResourceID>()) };
         Ok(Self {
             storage,
-            ranges: RangeAllocator::new(cap),
+            ranges: Tlsf::new(cap as u64, 1),
             cap,
+            pending: VecDeque::new(),
         })
     }
 
     pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, MetalError> {
-        let base = self
+        let alloc = self
             .ranges
-            .alloc(len)
+            .alloc(len as u64, 1)
             .ok_or(MetalError::new("resource heap has no free range"))?;
-        Ok(HeapRange { base, len })
+        Ok(HeapRange {
+            base: alloc.offset as u32,
+            len,
+            block: alloc.block,
+        })
     }
 
-    pub fn free_range(&mut self, range: HeapRange) {
-        self.ranges.free(range.base, range.len);
+    pub fn free_range(&mut self, range: HeapRange, frame: u64) {
+        debug_assert!(self.pending.back().is_none_or(|&(last, _)| last <= frame));
+        self.pending.push_back((frame, range));
+    }
+
+    pub fn retire(&mut self, completed: u64) {
+        while let Some(&(frame, range)) = self.pending.front() {
+            if frame > completed {
+                return;
+            }
+            self.pending.pop_front();
+            self.ranges.free(range.block);
+        }
     }
 
     pub fn write(&mut self, range: HeapRange, slot: u32, resource: ResourceID) {
@@ -422,6 +403,42 @@ pub struct Pipeline(pub ResourceID);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
 pub struct Texture2d(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture2dW(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture2dRW(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture2dArray(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture3d(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture3dW(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture3dRW(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct TextureCube(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Depth2d(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Sampler(pub ResourceID);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -477,8 +494,8 @@ impl IndirectCommands {
         });
         desc.set_inherit_pipeline_state(true);
         desc.set_inherit_buffers(false);
-        desc.set_max_vertex_buffer_bind_count(1);
-        desc.set_max_fragment_buffer_bind_count(1);
+        desc.set_max_vertex_buffer_bind_count(2);
+        desc.set_max_fragment_buffer_bind_count(2);
         Self::new(device, &desc, count)
     }
 
@@ -487,7 +504,7 @@ impl IndirectCommands {
         desc.set_command_types(IndirectCommandType::CONCURRENT_DISPATCH_THREADS);
         desc.set_inherit_pipeline_state(true);
         desc.set_inherit_buffers(false);
-        desc.set_max_kernel_buffer_bind_count(1);
+        desc.set_max_kernel_buffer_bind_count(2);
         Self::new(device, &desc, count)
     }
 
@@ -948,14 +965,20 @@ pub struct Context {
     pub event: SharedEvent,
     pub residency: ResidencySet,
     pub heap: GpuHeap,
+    pub resources: ResourceHeap,
     pub arenas: Vec<Arena>,
     pub allocators: Vec<M4CommandAllocator>,
-    pub retired: Vec<(u64, Retired)>,
+    pub retired: VecDeque<(u64, Retired)>,
     pub frame: u64,
 }
 
 impl Context {
-    pub fn new(device: &Device, arena_size: usize, heap_size: u64) -> Result<Self, MetalError> {
+    pub fn new(
+        device: &Device,
+        arena_size: usize,
+        heap_size: u64,
+        resource_cap: u32,
+    ) -> Result<Self, MetalError> {
         let queue = device.new_m4_command_queue().ok_or(MetalError::new(
             "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
         ))?;
@@ -974,7 +997,8 @@ impl Context {
             );
         }
 
-        let heap = GpuHeap::new(device, heap_size)?;
+        let mut heap = GpuHeap::new(device, heap_size)?;
+        let resources = ResourceHeap::new(&mut heap, resource_cap)?;
         let residency = device.new_residency_set(&ResidencySetDescriptor::new()?)?;
         for arena in &arenas {
             residency.add_allocation(&Allocation::from_buffer(&arena.buffer))?;
@@ -984,19 +1008,22 @@ impl Context {
         queue.add_residency_set(&residency);
 
         let table_desc = M4ArgumentTableDescriptor::new();
-        table_desc.set_max_buffer_bind_count(1);
+        table_desc.set_max_buffer_bind_count(2);
+        let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
+        table.set_address(resources.storage.gpu, 1);
 
         Ok(Self {
-            table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
+            table,
             event: device.new_shared_event()?,
             device: device.clone(),
             queue,
             command_buffer,
             residency,
             heap,
+            resources,
             arenas,
             allocators,
-            retired: Vec::new(),
+            retired: VecDeque::new(),
             frame: 0,
         })
     }
@@ -1007,7 +1034,7 @@ impl Context {
     }
 
     pub fn free_later(&mut self, retired: Retired) {
-        self.retired.push((self.frame, retired));
+        self.retired.push_back((self.frame, retired));
     }
 
     pub fn begin_frame(&mut self) -> Frame<'_> {
@@ -1019,16 +1046,11 @@ impl Context {
         }
 
         let completed = self.event.signaled_value();
-        let heap = &mut self.heap;
-        let mut i = 0;
-        while i < self.retired.len() {
-            if self.retired[i].0 > completed {
-                i += 1;
-                continue;
-            }
-            match self.retired.swap_remove(i).1 {
-                Retired::Buffer(buffer) => heap.free(buffer.alloc),
-                Retired::Texture(texture) => heap.free(texture.alloc),
+        self.resources.retire(completed);
+        while self.retired.front().is_some_and(|&(frame, _)| frame <= completed) {
+            match self.retired.pop_front().unwrap().1 {
+                Retired::Buffer(buffer) => self.heap.free(buffer.alloc),
+                Retired::Texture(texture) => self.heap.free(texture.alloc),
             }
         }
 
