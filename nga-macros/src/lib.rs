@@ -12,7 +12,7 @@ enum Ty {
     Msl(String),
     User(String),
     Array(Box<Ty>, u32),
-    Ptr { mutable: bool, pointee: String },
+    Ptr { mutable: bool, pointee: Box<Ty> },
 }
 
 fn scalar(name: &str) -> Option<&'static str> {
@@ -38,6 +38,13 @@ fn scalar(name: &str) -> Option<&'static str> {
         "i32x4" => "int4",
         "f32x3x3" => "float3x3",
         "f32x4x4" => "float4x4",
+        "AtomicU32" => "atomic_uint",
+        "Commands" => "nga_commands",
+        "ExecRange" => "nga_exec_range",
+        "Draw" => "nga_draw",
+        "DrawIndexed" => "nga_draw_indexed",
+        "Dispatch" => "nga_dispatch",
+        "DispatchThreads" => "nga_dispatch_threads",
         _ => return None,
     })
 }
@@ -202,7 +209,10 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
                 ));
             }
             match parse_ty(pointee, true)? {
-                Ty::Msl(t) | Ty::User(t) => Ok(Ty::Ptr { mutable, pointee: t }),
+                pointee @ (Ty::Msl(_) | Ty::User(_)) => Ok(Ty::Ptr {
+                    mutable,
+                    pointee: Box::new(pointee),
+                }),
                 _ => Err((
                     span,
                     "a GPU pointer must point at a scalar, vector or #[gpu_struct] type".into(),
@@ -227,17 +237,23 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
 fn declare(ty: &Ty, name: &str) -> String {
     match ty {
         Ty::Msl(t) | Ty::User(t) => format!("{t} {name}"),
-        Ty::Ptr { mutable, pointee } => match mutable {
-            true => format!("device {pointee}* {name}"),
-            false => format!("device const {pointee}* {name}"),
-        },
+        Ty::Ptr { mutable, pointee } => {
+            let (Ty::Msl(t) | Ty::User(t)) = &**pointee else {
+                unreachable!()
+            };
+            match mutable {
+                true => format!("device {t}* {name}"),
+                false => format!("device const {t}* {name}"),
+            }
+        }
         Ty::Array(element, len) => format!("{}[{len}]", declare(element, name)),
     }
 }
 
 fn users(ty: &Ty, out: &mut Vec<String>) {
     match ty {
-        Ty::User(t) | Ty::Ptr { pointee: t, .. } if scalar(t).is_none() => out.push(t.clone()),
+        Ty::User(t) => out.push(t.clone()),
+        Ty::Ptr { pointee, .. } => users(pointee, out),
         Ty::Array(element, _) => users(element, out),
         _ => {}
     }

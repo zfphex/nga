@@ -148,6 +148,19 @@ impl Arena {
         })
     }
 
+    pub fn alloc_scratch<T>(&self, len: usize) -> Option<GpuBox<'_, [T]>> {
+        let bytes = size_of::<T>() * len;
+        let (cpu, gpu) = self.alloc_bytes(bytes, align_of::<T>().max(16))?;
+        unsafe { std::ptr::write_bytes(cpu, 0, bytes) };
+        Some(GpuBox {
+            cpu: NonNull::slice_from_raw_parts(
+                unsafe { NonNull::new_unchecked(cpu as *mut T) },
+                len,
+            ),
+            gpu: Gpu::new(gpu),
+        })
+    }
+
     pub fn reset(&self) {
         self.head.set(0);
     }
@@ -394,6 +407,104 @@ impl ResourceHeap {
     }
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct AtomicU32(pub u32);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Commands(pub ResourceID);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ExecRange {
+    pub location: u32,
+    pub length: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    pub vertex_count: u32,
+    pub instance_count: u32,
+    pub vertex_start: u32,
+    pub base_instance: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DrawIndexed {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub index_start: u32,
+    pub base_vertex: i32,
+    pub base_instance: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Dispatch {
+    pub threadgroups: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DispatchThreads {
+    pub threads: [u32; 3],
+    pub group: [u32; 3],
+}
+
+pub struct IndirectCommands {
+    pub icb: IndirectCommandBuffer,
+    pub handle: Commands,
+    pub count: usize,
+}
+
+impl IndirectCommands {
+    pub fn draws(device: &Device, count: usize, indexed: bool) -> Result<Self, MetalError> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(match indexed {
+            true => IndirectCommandType::DRAW_INDEXED,
+            false => IndirectCommandType::DRAW,
+        });
+        desc.set_inherit_pipeline_state(true);
+        desc.set_inherit_buffers(false);
+        desc.set_max_vertex_buffer_bind_count(1);
+        desc.set_max_fragment_buffer_bind_count(1);
+        Self::new(device, &desc, count)
+    }
+
+    pub fn dispatches(device: &Device, count: usize) -> Result<Self, MetalError> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(IndirectCommandType::CONCURRENT_DISPATCH_THREADS);
+        desc.set_inherit_pipeline_state(true);
+        desc.set_inherit_buffers(false);
+        desc.set_max_kernel_buffer_bind_count(1);
+        Self::new(device, &desc, count)
+    }
+
+    pub fn new(
+        device: &Device,
+        desc: &IndirectCommandBufferDescriptor,
+        count: usize,
+    ) -> Result<Self, MetalError> {
+        let icb =
+            device.new_indirect_command_buffer(desc, count, IndirectCommandBufferOptions::NONE)?;
+        Ok(Self {
+            handle: Commands(icb.gpu_resource_id()?),
+            icb,
+            count,
+        })
+    }
+
+    pub fn all(&self) -> minmetal::Range {
+        minmetal::Range {
+            location: 0,
+            length: self.count,
+        }
+    }
+}
+
 pub struct Shaders {
     pub compiler: M4Compiler,
     pub library: Library,
@@ -449,6 +560,10 @@ impl Shaders {
             let fragment = self.function(desc.fragment, desc.constants);
             pipeline.set_fragment_function_descriptor(Some(&fragment));
         }
+        pipeline.set_support_indirect_command_buffers(match desc.indirect {
+            true => M4IndirectCommandBufferSupportState::Enabled,
+            false => M4IndirectCommandBufferSupportState::Disabled,
+        });
         pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
         pipeline.set_raster_sample_count(desc.samples);
         pipeline.set_alpha_to_coverage_state(match desc.alpha_to_coverage {
@@ -545,6 +660,7 @@ pub struct RasterDesc<'a> {
     pub alpha_to_coverage: bool,
     pub label: &'a str,
     pub constants: Option<&'a FunctionConstantValues>,
+    pub indirect: bool,
 }
 
 impl<'a> RasterDesc<'a> {
@@ -557,6 +673,7 @@ impl<'a> RasterDesc<'a> {
             alpha_to_coverage: false,
             label: vertex,
             constants: None,
+            indirect: false,
         }
     }
 }
@@ -698,6 +815,39 @@ impl<'a> Raster<'a> {
             count * size_of::<I>(),
         );
     }
+
+    pub fn draw_indirect<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, args: Gpu<'_, Draw>) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder
+            .draw_primitives_with_indirect_buffer(primitive, args.0.get());
+    }
+
+    pub fn draw_indexed_indirect<T, I: IndexFormat>(
+        &self,
+        root: Gpu<'_, T>,
+        primitive: PrimitiveType,
+        indices: Gpu<'_, I>,
+        index_count: usize,
+        args: Gpu<'_, DrawIndexed>,
+    ) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder.draw_indexed_primitives_with_indirect_buffer(
+            primitive,
+            I::INDEX_TYPE,
+            indices.0.get(),
+            index_count * size_of::<I>(),
+            args.0.get(),
+        );
+    }
+
+    pub fn execute(&self, commands: &IndirectCommands, range: minmetal::Range) {
+        self.encoder.execute_commands_in_buffer(&commands.icb, range);
+    }
+
+    pub fn execute_indirect(&self, commands: &IndirectCommands, range: Gpu<'_, ExecRange>) {
+        self.encoder
+            .execute_commands_in_buffer_with_indirect_buffer(&commands.icb, range.0.get());
+    }
 }
 
 impl Drop for Raster<'_> {
@@ -731,6 +881,31 @@ impl<'a> Compute<'a> {
         self.table.set_address(root.0.get(), 0);
         self.encoder
             .dispatch_threads(Size::new(threads, 1, 1), Size::new(group, 1, 1));
+    }
+
+    pub fn dispatch_indirect<T>(&self, root: Gpu<'_, T>, args: Gpu<'_, Dispatch>, group: usize) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder
+            .dispatch_threadgroups_with_indirect_buffer(args.0.get(), Size::new(group, 1, 1));
+    }
+
+    pub fn dispatch_threads_indirect<T>(&self, root: Gpu<'_, T>, args: Gpu<'_, DispatchThreads>) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder
+            .dispatch_threads_with_indirect_buffer(args.0.get());
+    }
+
+    pub fn execute(&self, commands: &IndirectCommands, range: minmetal::Range) {
+        self.encoder.execute_commands_in_buffer(&commands.icb, range);
+    }
+
+    pub fn execute_indirect(&self, commands: &IndirectCommands, range: Gpu<'_, ExecRange>) {
+        self.encoder
+            .execute_commands_in_buffer_with_indirect_buffer(&commands.icb, range.0.get());
+    }
+
+    pub fn reset(&self, commands: &IndirectCommands, range: minmetal::Range) {
+        self.encoder.reset_commands_in_buffer(&commands.icb, range);
     }
 
     pub fn barrier(&self, after: Stages, before: Stages, hazard: M4VisibilityOptions) {

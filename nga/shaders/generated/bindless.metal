@@ -17,6 +17,17 @@ static_assert(sizeof(nga_texture2d_array) == 8, "nga_texture2d_array is not one 
 static_assert(sizeof(nga_texturecube) == 8, "nga_texturecube is not one resource id");
 static_assert(sizeof(nga_sampler) == 8, "nga_sampler is not one resource id");
 
+struct nga_commands { command_buffer cb; };
+struct nga_exec_range { uint location; atomic_uint length; };
+struct nga_draw { uint vertex_count; uint instance_count; uint vertex_start; uint base_instance; };
+struct nga_draw_indexed { uint index_count; uint instance_count; uint index_start; int base_vertex; uint base_instance; };
+struct nga_dispatch { uint threadgroups[3]; };
+struct nga_dispatch_threads { uint threads[3]; uint group[3]; };
+
+static_assert(sizeof(nga_commands) == 8, "nga_commands is not one resource id");
+static_assert(sizeof(nga_exec_range) == 8, "nga_exec_range does not match MTLIndirectCommandBufferExecutionRange");
+
+
 struct Vertex {
     packed_float2 position;
     packed_float2 uv;
