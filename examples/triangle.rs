@@ -47,8 +47,6 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 "#;
 
 const FRAMES_IN_FLIGHT: u64 = 2;
-const VERTEX_SLOT: usize = 0;
-const DATA_SLOTS: [usize; 2] = [256, 512];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = create_window("nga M0", None, 800, 600, true, WindowStyle::Standard);
@@ -95,16 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline =
         compiler.new_render_pipeline_state(&pipeline_desc.as_pipeline_descriptor(), None)?;
 
-    let arena = device.new_buffer(
-        4096,
-        ResourceOptions::new(
-            CpuCacheMode::DefaultCache,
-            StorageMode::Shared,
-            HazardTrackingMode::Untracked,
-        ),
-    )?;
-    let base = arena.gpu_address()?;
-    let cpu = arena.contents() as *mut u8;
+    let arena = Arena::new(&device, 64 * 1024)?;
+    let mut heap = GpuHeap::new(&device, 16 * 1024 * 1024)?;
 
     let triangle = [
         Vertex {
@@ -120,17 +110,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             color: [0.3, 0.4, 1.0],
         },
     ];
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            triangle.as_ptr(),
-            cpu.add(VERTEX_SLOT) as *mut Vertex,
-            triangle.len(),
-        );
+    let scratch = heap.alloc_texture(&TextureDescriptor::texture_2d(
+        PixelFormat::Rgba8Unorm,
+        256,
+        256,
+        false,
+    ))?;
+    let mut mesh = heap.alloc_buffer(size_of_val(&triangle))?;
+    mesh.write(0, &triangle);
+    let vertices: Gpu<'static, Vertex> = Gpu::new(mesh.gpu);
+    eprintln!(
+        "heap: texture {:?} at {:#x}, mesh at {:#x}",
+        scratch.texture.raw, scratch.alloc.offset, mesh.alloc.offset
+    );
+    drop(scratch.texture);
+    heap.free(scratch.alloc);
+
+    let mut data: Pool<Data> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32)
+        .ok_or(MetalError::new("frame arena is too small"))?;
+    for _ in 0..FRAMES_IN_FLIGHT {
+        data.alloc(Data {
+            vertices,
+            mvp: f32x4x4([[0.0; 4]; 4]),
+        });
     }
-    let vertices: Gpu<'static, Vertex> = Gpu::new(base + VERTEX_SLOT as u64);
 
     let residency = device.new_residency_set(&ResidencySetDescriptor::new()?)?;
-    residency.add_allocation(&Allocation::from_buffer(&arena))?;
+    residency.add_allocation(&Allocation::from_buffer(&arena.buffer))?;
+    residency.add_allocation(&Allocation::from_heap(&heap.heap))?;
     residency.commit()?;
     queue.add_residency_set(&residency);
 
@@ -180,21 +187,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (sin, cos) = angle.sin_cos();
             let aspect = drawable_height as f32 / drawable_width as f32;
-            unsafe {
-                std::ptr::write(
-                    cpu.add(DATA_SLOTS[slot]) as *mut Data,
-                    Data {
-                        vertices,
-                        mvp: f32x4x4([
-                            [cos * aspect, sin, 0.0, 0.0],
-                            [-sin * aspect, cos, 0.0, 0.0],
-                            [0.0, 0.0, 1.0, 0.0],
-                            [0.0, 0.0, 0.0, 1.0],
-                        ]),
-                    },
-                );
-            }
-            table.set_address(base + DATA_SLOTS[slot] as u64, 0);
+            data[slot as u32].mvp = f32x4x4([
+                [cos * aspect, sin, 0.0, 0.0],
+                [-sin * aspect, cos, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            table.set_address(data.gpu(slot as u32).0.get(), 0);
 
             allocators[slot].reset();
             command_buffer.begin_command_buffer_with_allocator(&allocators[slot]);
