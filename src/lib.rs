@@ -292,6 +292,111 @@ impl GpuHeap {
     }
 }
 
+pub struct RangeAllocator {
+    pub free: Vec<(u32, u32)>,
+}
+
+impl RangeAllocator {
+    pub fn new(cap: u32) -> Self {
+        Self {
+            free: vec![(0, cap)],
+        }
+    }
+
+    pub fn alloc(&mut self, len: u32) -> Option<u32> {
+        let index = self.free.iter().position(|&(_, free)| free >= len)?;
+        let (base, free) = self.free[index];
+        if free == len {
+            self.free.remove(index);
+        } else {
+            self.free[index] = (base + len, free - len);
+        }
+        Some(base)
+    }
+
+    pub fn free(&mut self, base: u32, len: u32) {
+        let index = self.free.partition_point(|&(start, _)| start < base);
+        debug_assert!(index == self.free.len() || base + len <= self.free[index].0);
+        debug_assert!(index == 0 || self.free[index - 1].0 + self.free[index - 1].1 <= base);
+        self.free.insert(index, (base, len));
+        if index + 1 < self.free.len() && base + len == self.free[index + 1].0 {
+            self.free[index].1 += self.free[index + 1].1;
+            self.free.remove(index + 1);
+        }
+        if index > 0 && self.free[index - 1].0 + self.free[index - 1].1 == base {
+            self.free[index - 1].1 += self.free[index].1;
+            self.free.remove(index);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HeapRange {
+    pub base: u32,
+    pub len: u32,
+}
+
+pub struct ResourceHeap {
+    pub storage: HeapBuffer,
+    pub ranges: RangeAllocator,
+    pub cap: u32,
+}
+
+impl ResourceHeap {
+    pub fn new(heap: &mut GpuHeap, cap: u32) -> Result<Self, MetalError> {
+        let storage = heap.alloc_buffer(cap as usize * size_of::<ResourceID>())?;
+        unsafe { std::ptr::write_bytes(storage.cpu, 0, cap as usize * size_of::<ResourceID>()) };
+        Ok(Self {
+            storage,
+            ranges: RangeAllocator::new(cap),
+            cap,
+        })
+    }
+
+    pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, MetalError> {
+        let base = self
+            .ranges
+            .alloc(len)
+            .ok_or(MetalError::new("resource heap has no free range"))?;
+        Ok(HeapRange { base, len })
+    }
+
+    pub fn free_range(&mut self, range: HeapRange) {
+        self.ranges.free(range.base, range.len);
+    }
+
+    pub fn write(&mut self, range: HeapRange, slot: u32, resource: ResourceID) {
+        assert!(slot < range.len);
+        unsafe {
+            self.storage
+                .cpu
+                .cast::<ResourceID>()
+                .add((range.base + slot) as usize)
+                .write(resource)
+        };
+    }
+}
+
+pub const MSL_PRELUDE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+[[maybe_unused]] constexpr sampler nga_nearest_clamp(filter::nearest, address::clamp_to_edge);
+[[maybe_unused]] constexpr sampler nga_linear_clamp(filter::linear, mip_filter::linear, address::clamp_to_edge);
+[[maybe_unused]] constexpr sampler nga_linear_repeat(filter::linear, mip_filter::linear, address::repeat);
+[[maybe_unused]] constexpr sampler nga_aniso_repeat(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(16));
+
+struct nga_texture2d { texture2d<float> t; };
+struct nga_texture2d_array { texture2d_array<float> t; };
+struct nga_texturecube { texturecube<float> t; };
+struct nga_sampler { sampler s; };
+
+static_assert(sizeof(nga_texture2d) == 8, "nga_texture2d is not one resource id");
+static_assert(sizeof(nga_texture2d_array) == 8, "nga_texture2d_array is not one resource id");
+static_assert(sizeof(nga_texturecube) == 8, "nga_texturecube is not one resource id");
+static_assert(sizeof(nga_sampler) == 8, "nga_sampler is not one resource id");
+"#;
+
 impl HeapBuffer {
     pub fn write<T: Copy>(&mut self, offset: usize, values: &[T]) {
         unsafe {

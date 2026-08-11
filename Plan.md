@@ -1,6 +1,6 @@
 # Plan: `nga` — a zero-dependency Rust Metal library on "No Graphics API" principles
 
-Revised for `minmetal` as the only binding layer, no third-party crates anywhere in the tree, and no C-facing surface. `#[repr(C)]` still appears, but purely as a _layout_ tool for matching MSL — nothing is `extern "C"`, nothing is exported for C consumers, and there is no header to ship.
+Revised for `minmetal` (Metal 4) as the only binding layer, no third-party crates anywhere in the tree, and no C-facing surface. `#[repr(C)]` still appears, but purely as a _layout_ tool for matching MSL — nothing is `extern "C"`, nothing is exported for C consumers, and there is no header to ship.
 
 ---
 
@@ -87,24 +87,43 @@ Prove this in M0 before anything else is written.
 
 ## 5. Bindless textures: build the heap Metal won't give you
 
-Aaltonen's complaint that Metal lacks a global indexable heap is about the _allocator_, not the hardware. MSL 3+ supports `device const texture2d<float>* heap [[buffer(1)]]`, and `MTLTexture.gpuResourceID` is writable into a plain buffer. So:
+Aaltonen's complaint that Metal lacks a global indexable heap is about the *allocator*, not the hardware. In MSL 3.0+, `resource_id` allows textures to be constructed directly from 64-bit handles stored in a plain buffer pointer: `device const resource_id* heap [[buffer(1)]]`.
+
+```glsl
+// In MSL shared header:
+#include <metal_stdlib>
+using namespace metal;
+
+fragment float4 my_fs(
+    device const Data*        data         [[buffer(0)]],
+    device const resource_id* texture_heap [[buffer(1)]]
+) {
+    constexpr sampler s(address::repeat, filter::linear);
+    uint albedo_idx = data->material.texture_base + 0;
+
+    // Construct texture directly from 64-bit resource_id
+    texture2d<float> tex(texture_heap[albedo_idx]);
+
+    return tex.sample(s, data->uv);
+}
+```
 
 ```rust
 pub struct TextureHeap {
-    storage: GpuBox<'static, [MTLResourceID]>, // just a u64 array in GPU memory
+    storage: GpuBox<'static, MTLResourceID>, // just a u64 array in GPU memory
     free: RangeAllocator,                      // supports contiguous ranges
 }
 let range: TexRange = heap.alloc_range(3)?;    // base index -> one u32 in your material
 heap.write(range, 0, &albedo);
 ```
 
-Because we own the array, we get contiguous descriptor ranges — the thing Metal's automatic handles can't express — so a material is `u32 texture_base`, not five 64-bit handles. Samplers default to MSL `constexpr sampler` (embedded, as in the post); an optional sampler heap uses the same mechanism for dynamic cases.
+Metal won't give us a user-indexable heap, so we build one: `gpu_resource_id()` values written as raw `u64` entries into a plain buffer, read in MSL as `device const resource_id* heap [[buffer(1)]]`. Because we own the array layout, we get **contiguous descriptor ranges** — a material is one `u32 texture_base`, not five 64-bit handles. A `RangeAllocator` (first-fit over a sorted free-range `Vec`) backs it. Compute shaders can write descriptors too, gated by `Hazard::DESCRIPTORS` on the following barrier.
 
-Writing descriptors from a compute shader works too, gated behind `Hazard::DESCRIPTORS` on the following barrier.
+Because we own the array, we get contiguous descriptor ranges — the thing Metal's automatic handles can't express — so a material is `u32 texture_base`, not five 64-bit handles. Samplers default to MSL `constexpr sampler` (embedded, as in the post); an optional sampler heap uses the same mechanism for dynamic cases.
 
 ---
 
-## 6. Root data, bindless textures, pipelines and state
+## 6. Root data, pipelines and state
 
 - **Compute / raster PSO creation takes IR + a small `RasterDesc`.** No root signature, no vertex layout, no bind group layouts — there's nothing to describe.
 - **Depth-stencil is a separate object** (`MTLDepthStencilState`), matching both Metal and the proposal.
@@ -113,8 +132,6 @@ Writing descriptors from a compute shader works too, gated behind `Hazard::DESCR
 - Vertex buffers do not exist. Ever. Vertex fetch is `data->vertices[vid]`.
 
 **Root data** is one device address per stage in the argument table — index 0 for vertex/kernel, index 0 for fragment. Nothing else is ever bound. MSL receives `device const Data* data [[buffer(0)]]`; `const` is what lets Apple's compiler run uniformity analysis and preload into uniform registers, which is why constant buffers can be deleted outright.
-
-**Texture heap.** Metal won't give us a user-indexable heap, so we build one: `gpu_resource_id()` values written into a plain `u64` array, read in MSL as `device const texture2d<float>* heap [[buffer(1)]]`. Because we own the array, we get **contiguous descriptor ranges** — a material is one `u32 texture_base`, not five 64-bit handles. A `RangeAllocator` (first-fit over a sorted free-range `Vec`) backs it. Compute shaders can write descriptors too, gated by `Hazard::DESCRIPTORS` on the following barrier.
 
 **Pipelines** take IR plus a small `RasterDesc`. No root signature, no vertex layout, no bind group layouts — there is nothing to describe. Depth-stencil is a separate object. Blend is baked into the PSO (Metal has no dynamic blend state), with framebuffer fetch exposed as the permutation-collapsing alternative, per the post's mobile branch. Vertex buffers do not exist: fetch is `data->vertices[vid]`.
 
