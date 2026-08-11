@@ -164,9 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false => TextureUsage::SHADER_READ,
             });
             let texture = heap.alloc_texture(&desc)?;
-            texture
-                .texture
-                .replace_region(Region::new_2d(0, 0, TEX, TEX), 0, &pixels, TEX * 4);
+            texture.upload(0, &pixels, TEX * 4);
             textures.write(range, layer, texture.texture.gpu_resource_id()?);
             if painted {
                 paint_target = range.base + layer;

@@ -277,6 +277,15 @@ pub struct HeapTexture {
     pub alloc: Alloc,
 }
 
+impl HeapTexture {
+    pub fn upload(&self, mip: usize, bytes: &[u8], stride: usize) {
+        let (width, height) = (self.texture.width() >> mip, self.texture.height() >> mip);
+        debug_assert_eq!(bytes.len(), stride * height);
+        self.texture
+            .replace_region(Region::new_2d(0, 0, width, height), mip, bytes, stride);
+    }
+}
+
 pub struct GpuHeap {
     pub device: Device,
     pub heap: Heap,
