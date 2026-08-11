@@ -907,6 +907,34 @@ impl<'a> Raster<'a> {
         self.encoder.set_front_facing_winding(winding);
     }
 
+    pub fn viewport(&self, viewport: Viewport) {
+        self.encoder.set_viewport(viewport);
+    }
+
+    pub fn viewports(&self, viewports: &[Viewport]) {
+        self.encoder.set_viewports(viewports);
+    }
+
+    pub fn scissor(&self, rect: ScissorRect) {
+        self.encoder.set_scissor_rect(rect);
+    }
+
+    pub fn scissors(&self, rects: &[ScissorRect]) {
+        self.encoder.set_scissor_rects(rects);
+    }
+
+    pub fn depth_bias(&self, bias: f32, slope_scale: f32, clamp: f32) {
+        self.encoder.set_depth_bias(bias, slope_scale, clamp);
+    }
+
+    pub fn depth_clip(&self, mode: DepthClipMode) {
+        self.encoder.set_depth_clip_mode(mode);
+    }
+
+    pub fn blend_color(&self, red: f32, green: f32, blue: f32, alpha: f32) {
+        self.encoder.set_blend_color(red, green, blue, alpha);
+    }
+
     pub fn barrier(&self, after: Stages, before: Stages, hazard: M4VisibilityOptions) {
         self.encoder.barrier(after, before, hazard);
     }
