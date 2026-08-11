@@ -16,4 +16,9 @@ version = "0.1.0"
 dependencies = [
  "minmetal",
  "minwin",
+ "nga-macros",
 ]
+
+[[package]]
+name = "nga-macros"
+version = "0.1.0"

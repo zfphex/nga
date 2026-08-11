@@ -1,8 +1,7 @@
-[package]
-name = "nga"
+[workspace]
+members = ["nga", "nga-macros"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]
-minmetal = { version = "0.1.0", path = "../minmetal" }
-minwin = { version = "0.1.0", path = "../minwin" }

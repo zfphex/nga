@@ -1,5 +1,9 @@
 #![allow(non_camel_case_types)]
 
+extern crate self as nga;
+
+pub mod abi;
+pub mod msl;
 pub mod tlsf;
 
 use minmetal::*;
@@ -8,6 +12,11 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
+
+pub use abi::*;
+pub use minmetal::FunctionConstantValues;
+pub use msl::MSL_PRELUDE;
+pub use nga_macros::{Constants, gpu_struct};
 pub use tlsf::{Alloc, Tlsf};
 
 #[repr(transparent)]
@@ -64,10 +73,6 @@ pub struct GpuSlice<'a, T> {
     pub ptr: Gpu<'a, T>,
     pub len: u32,
 }
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug)]
-pub struct f32x4x4(pub [[f32; 4]; 4]);
 
 pub const SHARED_UNTRACKED: ResourceOptions = ResourceOptions::new(
     CpuCacheMode::DefaultCache,
@@ -389,26 +394,6 @@ impl ResourceHeap {
     }
 }
 
-pub const MSL_PRELUDE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-[[maybe_unused]] constexpr sampler nga_nearest_clamp(filter::nearest, address::clamp_to_edge);
-[[maybe_unused]] constexpr sampler nga_linear_clamp(filter::linear, mip_filter::linear, address::clamp_to_edge);
-[[maybe_unused]] constexpr sampler nga_linear_repeat(filter::linear, mip_filter::linear, address::repeat);
-[[maybe_unused]] constexpr sampler nga_aniso_repeat(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(16));
-
-struct nga_texture2d { texture2d<float> t; };
-struct nga_texture2d_array { texture2d_array<float> t; };
-struct nga_texturecube { texturecube<float> t; };
-struct nga_sampler { sampler s; };
-
-static_assert(sizeof(nga_texture2d) == 8, "nga_texture2d is not one resource id");
-static_assert(sizeof(nga_texture2d_array) == 8, "nga_texture2d_array is not one resource id");
-static_assert(sizeof(nga_texturecube) == 8, "nga_texturecube is not one resource id");
-static_assert(sizeof(nga_sampler) == 8, "nga_sampler is not one resource id");
-"#;
-
 pub struct Shaders {
     pub compiler: M4Compiler,
     pub library: Library,
@@ -425,26 +410,44 @@ impl Shaders {
         })
     }
 
-    pub fn function(&self, name: &str) -> M4FunctionDescriptor {
+    pub fn function(
+        &self,
+        name: &str,
+        constants: Option<&FunctionConstantValues>,
+    ) -> M4FunctionDescriptor {
         let function = M4LibraryFunctionDescriptor::new();
         function.set_name(name);
         function.set_library(Some(&self.library));
-        function.as_function_descriptor()
+        let Some(constants) = constants else {
+            return function.as_function_descriptor();
+        };
+        let specialized = M4SpecializedFunctionDescriptor::new();
+        specialized.set_function_descriptor(Some(&function.as_function_descriptor()));
+        specialized.set_constant_values(Some(constants));
+        specialized.set_specialized_name(name);
+        M4FunctionDescriptor {
+            raw: retain(specialized.raw),
+        }
     }
 
-    pub fn compute(&self, name: &str) -> Result<ComputePipelineState, MetalError> {
+    pub fn compute(
+        &self,
+        name: &str,
+        constants: Option<&FunctionConstantValues>,
+    ) -> Result<ComputePipelineState, MetalError> {
         let pipeline = M4ComputePipelineDescriptor::new();
         pipeline.set_label(name);
-        pipeline.set_compute_function_descriptor(Some(&self.function(name)));
+        pipeline.set_compute_function_descriptor(Some(&self.function(name, constants)));
         self.compiler.new_compute_pipeline_state(&pipeline, None)
     }
 
     pub fn raster(&self, desc: &RasterDesc) -> Result<RenderPipelineState, MetalError> {
         let pipeline = M4RenderPipelineDescriptor::new();
         pipeline.set_label(desc.label);
-        pipeline.set_vertex_function_descriptor(Some(&self.function(desc.vertex)));
+        pipeline.set_vertex_function_descriptor(Some(&self.function(desc.vertex, desc.constants)));
         if !desc.fragment.is_empty() {
-            pipeline.set_fragment_function_descriptor(Some(&self.function(desc.fragment)));
+            let fragment = self.function(desc.fragment, desc.constants);
+            pipeline.set_fragment_function_descriptor(Some(&fragment));
         }
         pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
         pipeline.set_raster_sample_count(desc.samples);
@@ -541,6 +544,7 @@ pub struct RasterDesc<'a> {
     pub samples: usize,
     pub alpha_to_coverage: bool,
     pub label: &'a str,
+    pub constants: Option<&'a FunctionConstantValues>,
 }
 
 impl<'a> RasterDesc<'a> {
@@ -552,6 +556,7 @@ impl<'a> RasterDesc<'a> {
             samples: 1,
             alpha_to_coverage: false,
             label: vertex,
+            constants: None,
         }
     }
 }

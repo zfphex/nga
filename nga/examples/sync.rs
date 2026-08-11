@@ -2,30 +2,28 @@ use minmetal::*;
 use minwin::*;
 use nga::*;
 
-#[repr(C, align(16))]
-#[derive(Clone, Copy)]
+#[gpu_struct]
 struct Instance {
-    center: [f32; 2],
+    center: f32x2,
     angle: f32,
     scale: f32,
-    color: [f32; 4],
+    color: f32x4,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
+#[gpu_struct]
 struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
 }
 
-#[repr(C)]
+#[gpu_struct]
 struct SimData {
     instances: GpuMut<'static, Instance>,
     time: f32,
     count: u32,
 }
 
-#[repr(C)]
+#[gpu_struct]
 struct BuildData {
     instances: Gpu<'static, Instance>,
     vertices: GpuMut<'static, Vertex>,
@@ -33,90 +31,13 @@ struct BuildData {
     pad: u32,
 }
 
-#[repr(C, align(16))]
+#[gpu_struct(align(16))]
 struct DrawData {
     vertices: Gpu<'static, Vertex>,
     mvp: f32x4x4,
 }
 
-const SHADERS: &str = r#"
-struct Instance {
-    float2 center;
-    float angle;
-    float scale;
-    float4 color;
-};
-
-struct Vertex {
-    packed_float3 position;
-    packed_float3 color;
-};
-
-struct SimData {
-    device Instance* instances;
-    float time;
-    uint count;
-};
-
-struct BuildData {
-    device const Instance* instances;
-    device Vertex* vertices;
-    uint count;
-    uint pad;
-};
-
-struct DrawData {
-    device const Vertex* vertices;
-    float4x4 mvp;
-};
-
-kernel void simulate(device const SimData* data [[buffer(0)]], uint i [[thread_position_in_grid]]) {
-    if (i >= data->count) {
-        return;
-    }
-    float f = float(i) / float(data->count);
-    float orbit = 0.25 + 0.65 * fract(f * 7.0);
-    float phase = f * 6.2831853 + data->time * (0.2 + 0.9 * fract(f * 5.0));
-
-    Instance inst;
-    inst.center = float2(cos(phase), sin(phase)) * orbit;
-    inst.angle = phase * 2.0 + data->time;
-    inst.scale = 0.015 + 0.045 * fract(f * 3.0);
-    inst.color = float4(0.5 + 0.5 * cos(6.2831853 * f + float3(0.0, 2.0, 4.0)), 1.0);
-    data->instances[i] = inst;
-}
-
-kernel void build_vertices(device const BuildData* data [[buffer(0)]], uint i [[thread_position_in_grid]]) {
-    if (i >= data->count) {
-        return;
-    }
-    Instance inst = data->instances[i];
-    device Vertex* out = data->vertices + i * 3;
-    for (uint k = 0; k < 3; ++k) {
-        float a = inst.angle + float(k) * 2.0943951;
-        float2 p = inst.center + float2(cos(a), sin(a)) * inst.scale;
-        out[k].position = float3(p, 0.5);
-        out[k].color = inst.color.rgb;
-    }
-}
-
-struct VertexOut {
-    float4 position [[position]];
-    float3 color;
-};
-
-vertex VertexOut vertex_main(device const DrawData* data [[buffer(0)]], uint vid [[vertex_id]]) {
-    Vertex v = data->vertices[vid];
-    VertexOut out;
-    out.position = data->mvp * float4(v.position, 1.0);
-    out.color = v.color;
-    return out;
-}
-
-fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    return float4(in.color, 1.0);
-}
-"#;
+const SHADERS: &str = include_str!("../shaders/sync.metal");
 
 const COUNT: usize = 1024;
 const GROUP: usize = 64;
@@ -130,9 +51,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut ctx = Context::new(&device, 64 * 1024, 64 * 1024 * 1024)?;
 
-    let shaders = Shaders::new(&device, SHADERS)?;
-    let simulate = shaders.compute("simulate")?;
-    let build = shaders.compute("build_vertices")?;
+    let source = format!(
+        "{}\n{SHADERS}",
+        msl::header!(Instance, Vertex, SimData, BuildData, DrawData)
+    );
+    msl::assert_matches(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/sync.metal"),
+        &format!("{MSL_PRELUDE}{source}"),
+    );
+
+    let shaders = Shaders::new(&device, &source)?;
+    let simulate = shaders.compute("simulate", None)?;
+    let build = shaders.compute("build_vertices", None)?;
     let draw = shaders.raster(&RasterDesc::new(
         "vertex_main",
         "fragment_main",

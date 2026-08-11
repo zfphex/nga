@@ -2,56 +2,26 @@ use minmetal::*;
 use minwin::*;
 use nga::*;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
+#[gpu_struct]
 struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
 }
 
-#[repr(C)]
+#[gpu_struct]
 struct Data {
     vertices: Gpu<'static, Vertex>,
     mvp: f32x4x4,
-    tint: [f32; 4],
+    tint: f32x4,
 }
 
-const SHADERS: &str = r#"
-struct Vertex {
-    packed_float3 position;
-    packed_float3 color;
-};
-
-struct Data {
-    device const Vertex* vertices;
-    float4x4 mvp;
-    float4 tint;
-};
-
-struct VertexOut {
-    float4 position [[position]];
-    float3 color;
-    float alpha;
-};
-
-vertex VertexOut vertex_main(device const Data* data [[buffer(0)]], uint vid [[vertex_id]]) {
-    Vertex v = data->vertices[vid];
-    VertexOut out;
-    out.position = data->mvp * float4(v.position, 1.0);
-    out.color = v.color * data->tint.rgb;
-    out.alpha = data->tint.a;
-    return out;
+#[derive(Constants)]
+struct Options {
+    boost: bool,
+    gamma: f32,
 }
 
-fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    return float4(in.color, in.alpha);
-}
-
-fragment float4 fragment_screen(VertexOut in [[stage_in]], float4 dst [[color(0)]]) {
-    float3 src = in.color * in.alpha;
-    return float4(1.0 - (1.0 - dst.rgb) * (1.0 - src), 1.0);
-}
-"#;
+const SHADERS: &str = include_str!("../shaders/raster.metal");
 
 const FRAMES_IN_FLIGHT: u64 = 2;
 const DEPTH_FORMAT: PixelFormat = PixelFormat::Depth32Float;
@@ -88,21 +58,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let event = device.new_shared_event()?;
 
-    let shaders = Shaders::new(&device, SHADERS)?;
+    let source = format!(
+        "{}{}\n{SHADERS}",
+        msl::header!(Vertex, Data),
+        Options::msl()
+    );
+    msl::assert_matches(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/raster.metal"),
+        &format!("{MSL_PRELUDE}{source}"),
+    );
+    let shaders = Shaders::new(&device, &source)?;
 
-    let opaque = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
-        &[ColorTarget::new(PixelFormat::Bgra8Unorm)],
-    ))?;
-    let translucent = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
-        &[ColorTarget {
-            blend: BlendMode::Fixed(Blend::ALPHA),
-            ..ColorTarget::new(PixelFormat::Bgra8Unorm)
-        }],
-    ))?;
+    let plain = Options {
+        boost: false,
+        gamma: 1.0,
+    }
+    .values();
+    let boosted = Options {
+        boost: true,
+        gamma: 0.6,
+    }
+    .values();
+
+    let opaque = shaders.raster(&RasterDesc {
+        constants: Some(&plain),
+        ..RasterDesc::new(
+            "vertex_main",
+            "fragment_main",
+            &[ColorTarget::new(PixelFormat::Bgra8Unorm)],
+        )
+    })?;
+    let translucent = shaders.raster(&RasterDesc {
+        constants: Some(&boosted),
+        ..RasterDesc::new(
+            "vertex_main",
+            "fragment_main",
+            &[ColorTarget {
+                blend: BlendMode::Fixed(Blend::ALPHA),
+                ..ColorTarget::new(PixelFormat::Bgra8Unorm)
+            }],
+        )
+    })?;
     let screen = shaders.raster(&RasterDesc::new(
         "vertex_main",
         "fragment_screen",
@@ -149,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data.alloc(Data {
             vertices,
             mvp: f32x4x4([[0.0; 4]; 4]),
-            tint: [1.0; 4],
+            tint: f32x4([1.0; 4]),
         });
     }
 
@@ -249,11 +245,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let slot = (frame % FRAMES_IN_FLIGHT) as u32 * 3;
             data[slot].mvp = f32x4x4(scaled(1.0));
-            data[slot].tint = [1.0, 1.0, 1.0, 1.0];
+            data[slot].tint = f32x4([1.0, 1.0, 1.0, 1.0]);
             data[slot + 1].mvp = f32x4x4(scaled(1.6));
-            data[slot + 1].tint = [0.4, 0.8, 1.0, 0.35];
+            data[slot + 1].tint = f32x4([0.4, 0.8, 1.0, 0.35]);
             data[slot + 2].mvp = f32x4x4(scaled(2.1));
-            data[slot + 2].tint = [1.0, 0.5, 0.2, 0.6];
+            data[slot + 2].tint = f32x4([1.0, 0.5, 0.2, 0.6]);
 
             allocators[(frame % FRAMES_IN_FLIGHT) as usize].reset();
             command_buffer

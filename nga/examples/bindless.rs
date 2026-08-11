@@ -2,68 +2,26 @@ use minmetal::*;
 use minwin::*;
 use nga::*;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
+#[gpu_struct]
 struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
+#[gpu_struct]
 struct Material {
     texture_base: u32,
     tint: [f32; 3],
 }
 
-#[repr(C)]
+#[gpu_struct]
 struct Data {
     vertices: Gpu<'static, Vertex>,
     materials: Gpu<'static, Material>,
     mvp: f32x4x4,
 }
 
-const SHADERS: &str = r#"
-struct Vertex {
-    packed_float2 position;
-    packed_float2 uv;
-};
-
-struct Material {
-    uint texture_base;
-    packed_float3 tint;
-};
-
-struct Data {
-    device const Vertex* vertices;
-    device const Material* materials;
-    float4x4 mvp;
-};
-
-struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
-    uint material [[flat]];
-};
-
-vertex VertexOut vertex_main(device const Data* data [[buffer(0)]], uint vid [[vertex_id]]) {
-    Vertex v = data->vertices[vid];
-    VertexOut out;
-    out.position = data->mvp * float4(v.position, 0.0, 1.0);
-    out.uv = v.uv;
-    out.material = vid / 6;
-    return out;
-}
-
-fragment float4 fragment_main(VertexOut in [[stage_in]],
-                              device const Data* data [[buffer(0)]],
-                              device const nga_texture2d* textures [[buffer(1)]]) {
-    Material m = data->materials[in.material];
-    uint layer = min(uint(in.uv.x * 3.0), 2u);
-    float3 c = textures[m.texture_base + layer].t.sample(nga_linear_clamp, in.uv).rgb;
-    return float4(c * m.tint, 1.0);
-}
-"#;
+const SHADERS: &str = include_str!("../shaders/bindless.metal");
 
 const FRAMES_IN_FLIGHT: u64 = 2;
 const QUADS: u32 = 4;
@@ -92,9 +50,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let event = device.new_shared_event()?;
 
+    let source = format!(
+        "{}\n{SHADERS}",
+        msl::header!(Vertex, Material, Data)
+    );
+    msl::assert_matches(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/bindless.metal"),
+        &format!("{MSL_PRELUDE}{source}"),
+    );
+
     let compiler = device.new_m4_compiler_with_descriptor(&M4CompilerDescriptor::new())?;
     let library_desc = M4LibraryDescriptor::new();
-    library_desc.set_source(&format!("{MSL_PRELUDE}\n{SHADERS}"));
+    library_desc.set_source(&format!("{MSL_PRELUDE}{source}"));
     let library = compiler.new_library_with_descriptor(&library_desc)?;
 
     let vertex_function = M4LibraryFunctionDescriptor::new();
