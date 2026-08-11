@@ -40,6 +40,7 @@ fn scalar(name: &str) -> Option<&'static str> {
         "f32x4x4" => "float4x4",
         "AtomicU32" => "atomic_uint",
         "Commands" => "nga_commands",
+        "Pipeline" => "nga_pipeline",
         "Texture2d" => "nga_texture2d",
         "ExecRange" => "nga_exec_range",
         "Draw" => "nga_draw",

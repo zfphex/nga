@@ -417,6 +417,10 @@ pub struct Commands(pub ResourceID);
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
+pub struct Pipeline(pub ResourceID);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
 pub struct Texture2d(pub ResourceID);
 
 #[repr(C)]
