@@ -201,13 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 raster.pipeline(&draw);
                 raster.depth(&depth_write);
-                raster.draw(
-                    draw_root.gpu,
-                    draw_root.gpu,
-                    PrimitiveType::Triangle,
-                    0,
-                    COUNT * 3,
-                );
+                raster.draw(draw_root.gpu, PrimitiveType::Triangle, 0, COUNT * 3);
             }
 
             frame.submit(Some(&drawable));

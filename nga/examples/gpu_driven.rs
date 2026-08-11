@@ -278,7 +278,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 raster.pipeline(&boundary);
                 raster.draw_indirect(
                     boundary_root.gpu,
-                    boundary_root.gpu,
                     PrimitiveType::TriangleStrip,
                     ring_args.gpu.elements(),
                 );

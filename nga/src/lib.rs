@@ -750,8 +750,7 @@ impl IndexFormat for u32 {
 
 pub struct Raster<'a> {
     pub encoder: M4RenderCommandEncoder,
-    pub vertex_table: &'a M4ArgumentTable,
-    pub fragment_table: &'a M4ArgumentTable,
+    pub table: &'a M4ArgumentTable,
     pub command_buffer: &'a M4CommandBuffer,
 }
 
@@ -759,18 +758,15 @@ impl<'a> Raster<'a> {
     pub fn new(
         command_buffer: &'a M4CommandBuffer,
         pass: &Pass,
-        vertex_table: &'a M4ArgumentTable,
-        fragment_table: &'a M4ArgumentTable,
+        table: &'a M4ArgumentTable,
         viewport: Viewport,
     ) -> Option<Self> {
         let encoder = command_buffer.render_command_encoder_with_descriptor(&pass.desc)?;
-        encoder.set_argument_table(vertex_table, RenderStages::VERTEX);
-        encoder.set_argument_table(fragment_table, RenderStages::FRAGMENT);
+        encoder.set_argument_table(table, RenderStages::VERTEX | RenderStages::FRAGMENT);
         encoder.set_viewport(viewport);
         Some(Self {
             encoder,
-            vertex_table,
-            fragment_table,
+            table,
             command_buffer,
         })
     }
@@ -802,29 +798,19 @@ impl<'a> Raster<'a> {
             .barrier_before_queue_stages(after, before_queue, hazard);
     }
 
-    pub fn draw<V, F>(
-        &self,
-        vertex: Gpu<'_, V>,
-        fragment: Gpu<'_, F>,
-        primitive: PrimitiveType,
-        start: usize,
-        count: usize,
-    ) {
-        self.vertex_table.set_address(vertex.0.get(), 0);
-        self.fragment_table.set_address(fragment.0.get(), 0);
+    pub fn draw<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, start: usize, count: usize) {
+        self.table.set_address(root.0.get(), 0);
         self.encoder.draw_primitives(primitive, start, count);
     }
 
-    pub fn draw_indexed<V, F, I: IndexFormat>(
+    pub fn draw_indexed<T, I: IndexFormat>(
         &self,
-        vertex: Gpu<'_, V>,
-        fragment: Gpu<'_, F>,
+        root: Gpu<'_, T>,
         primitive: PrimitiveType,
         indices: Gpu<'_, I>,
         count: usize,
     ) {
-        self.vertex_table.set_address(vertex.0.get(), 0);
-        self.fragment_table.set_address(fragment.0.get(), 0);
+        self.table.set_address(root.0.get(), 0);
         self.encoder.draw_indexed_primitives(
             primitive,
             count,
@@ -834,30 +820,21 @@ impl<'a> Raster<'a> {
         );
     }
 
-    pub fn draw_indirect<V, F>(
-        &self,
-        vertex: Gpu<'_, V>,
-        fragment: Gpu<'_, F>,
-        primitive: PrimitiveType,
-        args: Gpu<'_, Draw>,
-    ) {
-        self.vertex_table.set_address(vertex.0.get(), 0);
-        self.fragment_table.set_address(fragment.0.get(), 0);
+    pub fn draw_indirect<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, args: Gpu<'_, Draw>) {
+        self.table.set_address(root.0.get(), 0);
         self.encoder
             .draw_primitives_with_indirect_buffer(primitive, args.0.get());
     }
 
-    pub fn draw_indexed_indirect<V, F, I: IndexFormat>(
+    pub fn draw_indexed_indirect<T, I: IndexFormat>(
         &self,
-        vertex: Gpu<'_, V>,
-        fragment: Gpu<'_, F>,
+        root: Gpu<'_, T>,
         primitive: PrimitiveType,
         indices: Gpu<'_, I>,
         index_count: usize,
         args: Gpu<'_, DrawIndexed>,
     ) {
-        self.vertex_table.set_address(vertex.0.get(), 0);
-        self.fragment_table.set_address(fragment.0.get(), 0);
+        self.table.set_address(root.0.get(), 0);
         self.encoder.draw_indexed_primitives_with_indirect_buffer(
             primitive,
             I::INDEX_TYPE,
@@ -967,9 +944,7 @@ pub struct Context {
     pub device: Device,
     pub queue: M4CommandQueue,
     pub command_buffer: M4CommandBuffer,
-    pub vertex_table: M4ArgumentTable,
-    pub fragment_table: M4ArgumentTable,
-    pub compute_table: M4ArgumentTable,
+    pub table: M4ArgumentTable,
     pub event: SharedEvent,
     pub residency: ResidencySet,
     pub heap: GpuHeap,
@@ -1012,9 +987,7 @@ impl Context {
         table_desc.set_max_buffer_bind_count(1);
 
         Ok(Self {
-            vertex_table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
-            fragment_table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
-            compute_table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
+            table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
             event: device.new_shared_event()?,
             device: device.clone(),
             queue,
@@ -1068,9 +1041,7 @@ impl Context {
         Frame {
             arena: &self.arenas[slot],
             command_buffer: &self.command_buffer,
-            vertex_table: &self.vertex_table,
-            fragment_table: &self.fragment_table,
-            compute_table: &self.compute_table,
+            table: &self.table,
             queue: &self.queue,
             event: &self.event,
             value: index + 1,
@@ -1081,9 +1052,7 @@ impl Context {
 pub struct Frame<'a> {
     pub arena: &'a Arena,
     pub command_buffer: &'a M4CommandBuffer,
-    pub vertex_table: &'a M4ArgumentTable,
-    pub fragment_table: &'a M4ArgumentTable,
-    pub compute_table: &'a M4ArgumentTable,
+    pub table: &'a M4ArgumentTable,
     pub queue: &'a M4CommandQueue,
     pub event: &'a SharedEvent,
     pub value: u64,
@@ -1091,17 +1060,11 @@ pub struct Frame<'a> {
 
 impl Frame<'_> {
     pub fn raster(&mut self, pass: &Pass, viewport: Viewport) -> Option<Raster<'_>> {
-        Raster::new(
-            self.command_buffer,
-            pass,
-            self.vertex_table,
-            self.fragment_table,
-            viewport,
-        )
+        Raster::new(self.command_buffer, pass, self.table, viewport)
     }
 
     pub fn compute(&mut self) -> Option<Compute<'_>> {
-        Compute::new(self.command_buffer, self.compute_table)
+        Compute::new(self.command_buffer, self.table)
     }
 
     pub fn submit(self, drawable: Option<&Drawable>) {
