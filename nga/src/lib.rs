@@ -69,13 +69,6 @@ impl<T: ?Sized> Clone for GpuMut<'_, T> {
 
 impl<T: ?Sized> Copy for GpuMut<'_, T> {}
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct GpuSlice<'a, T> {
-    pub ptr: Gpu<'a, T>,
-    pub len: u32,
-}
-
 pub const SHARED_UNTRACKED: ResourceOptions = ResourceOptions::new(
     CpuCacheMode::DefaultCache,
     StorageMode::Shared,

@@ -49,8 +49,6 @@ pub struct GpuMut<'a, T: ?Sized>(NonZeroU64, PhantomData<&'a Cell<T>>); // invar
 
 Eight bytes, `Copy`, embeddable in a struct shared with MSL. A frame-arena pointer cannot be stored in a persistent structure — that's a compile error, not a GPU hang. Persistent allocations hand out `Gpu<'static, T>`, which coerces into any shorter `'f`.
 
-`GpuSlice<'a, T>` adds a `u32` length for the optional bounds-clamping debug mode.
-
 ---
 
 ## 4. Memory: `gpuMalloc`/`gpuFree` → owned allocators, `&mut self` as the lock
