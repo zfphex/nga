@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::required_system_default()?;
     eprintln!("device: {}", device.name());
 
-    let mut ctx = Context::new(&device, 64 * 1024, 64 * 1024 * 1024, 1024)?;
+    let mut ctx = Context::new(&device, 64 * 1024, 64 * 1024 * 1024, 1024, 1)?;
 
     let source = format!(
         "{}\n{SHADERS}",
@@ -142,14 +142,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ]);
 
             let mut frame = ctx.begin_frame();
-            let Some(sim_root) = frame.arena.alloc(SimData {
+            let mut rec = frame.recorder();
+            let Some(sim_root) = rec.arena.alloc(SimData {
                 instances: instances_rw,
                 time,
                 count: COUNT as u32,
             }) else {
                 return;
             };
-            let Some(build_root) = frame.arena.alloc(BuildData {
+            let Some(build_root) = rec.arena.alloc(BuildData {
                 instances: instances_ro,
                 vertices: vertices_rw,
                 count: COUNT as u32,
@@ -157,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) else {
                 return;
             };
-            let Some(draw_root) = frame.arena.alloc(DrawData {
+            let Some(draw_root) = rec.arena.alloc(DrawData {
                 vertices: vertices_ro,
                 mvp,
             }) else {
@@ -165,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             {
-                let Some(compute) = frame.compute() else {
+                let Some(compute) = rec.compute() else {
                     return;
                 };
                 compute.pipeline(&simulate);
@@ -198,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             {
-                let Some(raster) = frame.raster(&pass, viewport) else {
+                let Some(raster) = rec.raster(&pass, viewport) else {
                     return;
                 };
                 raster.wait_fence(&vertices_ready, Stages::VERTEX);
@@ -206,6 +207,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 raster.depth(&depth_write);
                 raster.draw(draw_root.gpu, PrimitiveType::Triangle, 0, COUNT * 3);
             }
+
+            drop(rec);
 
             frame.submit(Some(&drawable));
             time += 0.016;

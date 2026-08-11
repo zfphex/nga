@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::required_system_default()?;
     eprintln!("device: {}", device.name());
 
-    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024)?;
+    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024, 1)?;
 
     let source = format!(
         "{}\n{SHADERS}",
@@ -187,14 +187,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cull_radius = 0.75 + 0.7 * (time * 0.7).sin();
 
             let mut frame = ctx.begin_frame();
+            let mut rec = frame.recorder();
             let (Some(sim_root), Some(draws), Some(range)) = (
-                frame.arena.alloc(SimData {
+                rec.arena.alloc(SimData {
                     instances: instances_rw,
                     time,
                     count: COUNT as u32,
                 }),
-                frame.arena.alloc_scratch::<DrawData>(COUNT),
-                frame.arena.alloc(ExecRange {
+                rec.arena.alloc_scratch::<DrawData>(COUNT),
+                rec.arena.alloc(ExecRange {
                     location: 0,
                     length: 0,
                 }),
@@ -202,9 +203,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let (Some(encode_args), Some(ring_args), Some(boundary_root)) = (
-                frame.arena.alloc_scratch::<Dispatch>(1),
-                frame.arena.alloc_scratch::<Draw>(1),
-                frame.arena.alloc(BoundaryData {
+                rec.arena.alloc_scratch::<Dispatch>(1),
+                rec.arena.alloc_scratch::<Draw>(1),
+                rec.arena.alloc(BoundaryData {
                     mvp,
                     radius: cull_radius,
                     segments: SEGMENTS,
@@ -212,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ) else {
                 return;
             };
-            let Some(prepare_root) = frame.arena.alloc(PrepareData {
+            let Some(prepare_root) = rec.arena.alloc(PrepareData {
                 encode: GpuMut::new(encode_args.gpu.0.get()),
                 ring: GpuMut::new(ring_args.gpu.0.get()),
                 count: COUNT as u32,
@@ -222,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) else {
                 return;
             };
-            let Some(encode_root) = frame.arena.alloc(EncodeData {
+            let Some(encode_root) = rec.arena.alloc(EncodeData {
                 commands: commands.handle,
                 instances: instances_ro,
                 draws: GpuMut::new(draws.gpu.0.get()),
@@ -235,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             {
-                let Some(compute) = frame.compute() else {
+                let Some(compute) = rec.compute() else {
                     return;
                 };
                 compute.pipeline(&prepare);
@@ -264,7 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             {
-                let Some(raster) = frame.raster(&pass, viewport) else {
+                let Some(raster) = rec.raster(&pass, viewport) else {
                     return;
                 };
                 raster.wait(
@@ -282,6 +283,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ring_args.gpu.elements(),
                 );
             }
+
+            drop(rec);
 
             frame.submit(Some(&drawable));
             time += 0.016;

@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::required_system_default()?;
     eprintln!("device: {}", device.name());
 
-    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024)?;
+    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024, 1)?;
 
     let source = format!(
         "{}\n{SHADERS}",
@@ -335,16 +335,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cull_radius = 1.1 + 0.9 * (time * 0.6).sin();
 
             let mut frame = ctx.begin_frame();
+            let mut rec = frame.recorder();
             let (Some(draws), Some(range)) = (
-                frame.arena.alloc_scratch::<DrawData>(OBJECTS),
-                frame.arena.alloc(ExecRange {
+                rec.arena.alloc_scratch::<DrawData>(OBJECTS),
+                rec.arena.alloc(ExecRange {
                     location: 0,
                     length: 0,
                 }),
             ) else {
                 return;
             };
-            let Some(encode_root) = frame.arena.alloc(EncodeData {
+            let Some(encode_root) = rec.arena.alloc(EncodeData {
                 commands: commands.handle,
                 pipelines: Gpu::new(pipeline_buffer.gpu),
                 objects: Gpu::new(object_buffer.gpu),
@@ -363,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             {
-                let Some(compute) = frame.compute() else {
+                let Some(compute) = rec.compute() else {
                     return;
                 };
                 compute.pipeline(&encode);
@@ -383,7 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             {
-                let Some(raster) = frame.raster(&pass, viewport) else {
+                let Some(raster) = rec.raster(&pass, viewport) else {
                     return;
                 };
                 raster.wait(
@@ -395,6 +396,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 raster.pipeline(&solid);
                 raster.execute_indirect(&commands, range.gpu);
             }
+
+            drop(rec);
 
             frame.submit(Some(&drawable));
             time += 0.016;

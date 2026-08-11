@@ -13,6 +13,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use abi::*;
 pub use minmetal::FunctionConstantValues;
@@ -104,8 +105,11 @@ pub struct Arena {
     pub base: u64,
     pub cpu: *mut u8,
     pub size: usize,
-    pub head: Cell<usize>,
+    pub head: AtomicUsize,
 }
+
+unsafe impl Send for Arena {}
+unsafe impl Sync for Arena {}
 
 impl Arena {
     pub fn new(device: &Device, size: usize) -> Result<Self, MetalError> {
@@ -114,18 +118,28 @@ impl Arena {
             base: buffer.gpu_address()?,
             cpu: buffer.contents() as *mut u8,
             size,
-            head: Cell::new(0),
+            head: AtomicUsize::new(0),
             buffer,
         })
     }
 
     pub fn alloc_bytes(&self, size: usize, align: usize) -> Option<(*mut u8, u64)> {
-        let offset = (self.head.get() + align - 1) & !(align - 1);
-        if offset + size > self.size {
-            return None;
+        let mut head = self.head.load(Ordering::Relaxed);
+        loop {
+            let offset = (head + align - 1) & !(align - 1);
+            if offset + size > self.size {
+                return None;
+            }
+            match self.head.compare_exchange_weak(
+                head,
+                offset + size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return unsafe { Some((self.cpu.add(offset), self.base + offset as u64)) },
+                Err(current) => head = current,
+            }
         }
-        self.head.set(offset + size);
-        unsafe { Some((self.cpu.add(offset), self.base + offset as u64)) }
     }
 
     pub fn alloc<T>(&self, value: T) -> Option<GpuBox<'_, T>> {
@@ -163,7 +177,7 @@ impl Arena {
     }
 
     pub fn reset(&self) {
-        self.head.set(0);
+        self.head.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1080,14 +1094,15 @@ pub enum Retired {
 pub struct Context {
     pub device: Device,
     pub queue: M4CommandQueue,
-    pub command_buffer: M4CommandBuffer,
-    pub table: M4ArgumentTable,
+    pub command_buffers: Vec<M4CommandBuffer>,
+    pub tables: Vec<M4ArgumentTable>,
     pub event: SharedEvent,
     pub residency: ResidencySet,
     pub heap: GpuHeap,
     pub resources: ResourceHeap,
     pub arenas: Vec<Arena>,
     pub allocators: Vec<M4CommandAllocator>,
+    pub threads: usize,
     pub retired: VecDeque<(u64, Retired)>,
     pub frame: u64,
 }
@@ -1098,22 +1113,27 @@ impl Context {
         arena_size: usize,
         heap_size: u64,
         resource_cap: u32,
+        threads: usize,
     ) -> Result<Self, MetalError> {
+        assert!(threads > 0);
         let queue = device.new_m4_command_queue().ok_or(MetalError::new(
             "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
         ))?;
-        let command_buffer = device
-            .new_m4_command_buffer()
-            .ok_or(MetalError::new("newCommandBuffer returned nil"))?;
 
         let mut arenas = Vec::new();
         let mut allocators = Vec::new();
-        for _ in 0..FRAMES_IN_FLIGHT {
+        let mut command_buffers = Vec::new();
+        for _ in 0..FRAMES_IN_FLIGHT as usize * threads {
             arenas.push(Arena::new(device, arena_size)?);
             allocators.push(
                 device
                     .new_m4_command_allocator()
                     .ok_or(MetalError::new("newCommandAllocator returned nil"))?,
+            );
+            command_buffers.push(
+                device
+                    .new_m4_command_buffer()
+                    .ok_or(MetalError::new("newCommandBuffer returned nil"))?,
             );
         }
 
@@ -1129,20 +1149,25 @@ impl Context {
 
         let table_desc = M4ArgumentTableDescriptor::new();
         table_desc.set_max_buffer_bind_count(2);
-        let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
-        table.set_address(resources.storage.gpu, 1);
+        let mut tables = Vec::new();
+        for _ in 0..FRAMES_IN_FLIGHT as usize * threads {
+            let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
+            table.set_address(resources.storage.gpu, 1);
+            tables.push(table);
+        }
 
         Ok(Self {
-            table,
+            tables,
             event: device.new_shared_event()?,
             device: device.clone(),
             queue,
-            command_buffer,
+            command_buffers,
             residency,
             heap,
             resources,
             arenas,
             allocators,
+            threads,
             retired: VecDeque::new(),
             frame: 0,
         })
@@ -1174,33 +1199,84 @@ impl Context {
             }
         }
 
-        let slot = (index % FRAMES_IN_FLIGHT) as usize;
-        self.allocators[slot].reset();
-        self.arenas[slot].reset();
-        self.command_buffer
-            .begin_command_buffer_with_allocator(&self.allocators[slot]);
+        let base = (index % FRAMES_IN_FLIGHT) as usize * self.threads;
+        let slots = base..base + self.threads;
+        for slot in slots.clone() {
+            self.allocators[slot].reset();
+            self.arenas[slot].reset();
+        }
 
         Frame {
-            arena: &self.arenas[slot],
-            command_buffer: &self.command_buffer,
-            table: &self.table,
+            arenas: &self.arenas[slots.clone()],
+            allocators: &self.allocators[slots.clone()],
+            command_buffers: &self.command_buffers[slots.clone()],
+            tables: &self.tables[slots],
             queue: &self.queue,
             event: &self.event,
             value: index + 1,
+            used: 0,
         }
     }
 }
 
 pub struct Frame<'a> {
-    pub arena: &'a Arena,
-    pub command_buffer: &'a M4CommandBuffer,
-    pub table: &'a M4ArgumentTable,
+    pub arenas: &'a [Arena],
+    pub allocators: &'a [M4CommandAllocator],
+    pub command_buffers: &'a [M4CommandBuffer],
+    pub tables: &'a [M4ArgumentTable],
     pub queue: &'a M4CommandQueue,
     pub event: &'a SharedEvent,
     pub value: u64,
+    pub used: usize,
 }
 
 impl Frame<'_> {
+    pub fn recorders(&mut self, count: usize) -> Vec<Recorder<'_>> {
+        assert!(self.used == 0, "recorders already taken for this frame");
+        assert!(
+            count <= self.command_buffers.len(),
+            "{count} recorders requested, Context::new was given {}",
+            self.command_buffers.len()
+        );
+        self.used = count;
+        (0..count)
+            .map(|i| {
+                self.command_buffers[i].begin_command_buffer_with_allocator(&self.allocators[i]);
+                Recorder {
+                    arena: &self.arenas[i],
+                    command_buffer: &self.command_buffers[i],
+                    table: &self.tables[i],
+                    not_sync: PhantomData,
+                }
+            })
+            .collect()
+    }
+
+    pub fn recorder(&mut self) -> Recorder<'_> {
+        self.recorders(1).pop().unwrap()
+    }
+
+    pub fn submit(self, drawable: Option<&Drawable>) {
+        if let Some(drawable) = drawable {
+            self.queue.wait_for_drawable(drawable);
+        }
+        self.queue.commit(&self.command_buffers[..self.used]);
+        self.queue.signal_event(&self.event.as_event(), self.value);
+        if let Some(drawable) = drawable {
+            self.queue.signal_drawable(drawable);
+            drawable.present();
+        }
+    }
+}
+
+pub struct Recorder<'a> {
+    pub arena: &'a Arena,
+    pub command_buffer: &'a M4CommandBuffer,
+    pub table: &'a M4ArgumentTable,
+    pub not_sync: PhantomData<Cell<()>>,
+}
+
+impl Recorder<'_> {
     pub fn raster(&mut self, pass: &Pass, viewport: Viewport) -> Option<Raster<'_>> {
         Raster::new(self.command_buffer, pass, self.table, viewport)
     }
@@ -1208,18 +1284,10 @@ impl Frame<'_> {
     pub fn compute(&mut self) -> Option<Compute<'_>> {
         Compute::new(self.command_buffer, self.table)
     }
+}
 
-    pub fn submit(self, drawable: Option<&Drawable>) {
+impl Drop for Recorder<'_> {
+    fn drop(&mut self) {
         self.command_buffer.end_command_buffer();
-        if let Some(drawable) = drawable {
-            self.queue.wait_for_drawable(drawable);
-        }
-        self.queue
-            .commit(std::slice::from_ref(self.command_buffer));
-        self.queue.signal_event(&self.event.as_event(), self.value);
-        if let Some(drawable) = drawable {
-            self.queue.signal_drawable(drawable);
-            drawable.present();
-        }
     }
 }

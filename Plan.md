@@ -162,17 +162,25 @@ No resource lists, no image layouts. `Stage` and `Hazard` come from a ~40-line `
 Frames are transient by construction, with encoder scoping enforced by borrows:
 
 ```rust
-let mut frame = ctx.begin_frame();        // waits event >= n - FRAMES_IN_FLIGHT; resets arena; drains retire list
+let mut frame = ctx.begin_frame();        // waits event >= n - FRAMES_IN_FLIGHT; resets arenas; drains retire list
 {
-    let mut cb = frame.command_buffer();
-    let mut pass = cb.render_pass(&desc); // Drop ends encoding — nesting errors are borrow errors
-    pass.set_pipeline(&pso);
+    let mut rec = frame.recorder();
+    let mut pass = rec.raster(&desc, viewport); // Drop ends encoding — nesting errors are borrow errors
+    pass.pipeline(&pso);
     pass.draw_indexed(/* … */);
 }
-frame.submit();                            // signals shared event, n += 1
+frame.submit(None);                        // signals shared event, n += 1
 ```
 
-Multi-threaded recording: one allocator + command buffer per thread, `Send + !Sync`. Submission order via an atomic ticket — an atomic is not a lock.
+Multi-threaded recording: `Context::new` takes a `threads` count and builds `FRAMES_IN_FLIGHT × threads` of everything a recording thread touches exclusively — arena, command allocator, command buffer, argument table. A shared argument table would be a real race, since every draw writes the root address into slot 0.
+
+`frame.recorders(n)` vends `n` `Recorder`s up front, each owning one disjoint set. `Recorder` is `Send + !Sync` (a `PhantomData<Cell<()>>` field), so it moves into a scoped thread but cannot be aliased; `Drop` ends its command buffer. Because recorders borrow the `Frame`, `submit` cannot run until every thread has joined — that's a borrow error, not a runtime check.
+
+No atomic ticket. Vending all recorders in one `&mut self` call makes submission order the vending order, so `submit` commits `command_buffers[..n]` as a contiguous slice in a single `commit:count:`. A ticket would only be needed if threads pulled recorders dynamically from a shared `&Frame`, which would also force the `Frame` to be `Sync`.
+
+The arena's bump head is an `AtomicUsize` with a CAS loop rather than a `Cell`, so `&Arena` is `Sync` and `Recorder` can hold one. Per-thread arenas mean the CAS is uncontended in practice; the atomic is what makes sharing an arena *sound* if a caller ever wants to, and an atomic is not a lock.
+
+`wait`/`signal` (`barrierAfterQueueStages:` / `barrierBeforeQueueStages:`) order an encoder against the *queue's own timeline* — work committed earlier on the same queue — not against a second queue. One queue is their normal case, and they are what makes a multi-recorder frame correct, since two command buffers in one `commit` cannot use an intra-buffer `MTLFence`.
 
 **Honest gap:** Metal has no encoder-level wait-on-memory-address, so the post's `gpuSignalAfter`/`gpuWaitBefore` atomic-max-on-a-pointer scheme can't be reproduced exactly. Split barriers use `MTLFence` intra-buffer (`signal_fence`/`wait_fence`, mapping to `updateFence:afterEncoderStages:` / `waitForFence:beforeEncoderStages:`) and `MTLSharedEvent` across submissions. MTL4 fences carry no `visibilityOptions`, so they order execution only — a device-visibility `barrier` still has to precede the signal when the consumer reads what the producer wrote.
 

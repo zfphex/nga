@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::required_system_default()?;
     eprintln!("device: {}", device.name());
 
-    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024)?;
+    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024, 1)?;
 
     let source = format!(
         "{}\n{SHADERS}",
@@ -493,7 +493,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut frame = ctx.begin_frame();
-            let Some(scene) = frame.arena.alloc(Scene {
+            let mut rec = frame.recorder();
+            let Some(scene) = rec.arena.alloc(Scene {
                 objects: Gpu::new(object_buffer.gpu),
                 models: Gpu::new(model_buffer.gpu),
                 meshlets: Gpu::new(meshlet_buffer.gpu),
@@ -524,13 +525,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             {
-                let Some(raster) = frame.raster(&pass, viewport) else {
+                let Some(raster) = rec.raster(&pass, viewport) else {
                     return;
                 };
                 raster.depth(&depth_write);
                 raster.pipeline(&pipeline);
                 raster.draw_mesh(scene.gpu, OBJECTS, MAX_MESHLETS, MESH_GROUP);
             }
+
+            drop(rec);
 
             frame.submit(Some(&drawable));
             time += 0.016;
