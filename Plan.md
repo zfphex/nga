@@ -174,7 +174,7 @@ frame.submit();                            // signals shared event, n += 1
 
 Multi-threaded recording: one allocator + command buffer per thread, `Send + !Sync`. Submission order via an atomic ticket — an atomic is not a lock.
 
-**Honest gap:** Metal has no encoder-level wait-on-memory-address, so the post's `gpuSignalAfter`/`gpuWaitBefore` atomic-max-on-a-pointer scheme can't be reproduced exactly. Split barriers use `MTLFence` intra-buffer and `MTLSharedEvent` across submissions.
+**Honest gap:** Metal has no encoder-level wait-on-memory-address, so the post's `gpuSignalAfter`/`gpuWaitBefore` atomic-max-on-a-pointer scheme can't be reproduced exactly. Split barriers use `MTLFence` intra-buffer (`signal_fence`/`wait_fence`, mapping to `updateFence:afterEncoderStages:` / `waitForFence:beforeEncoderStages:`) and `MTLSharedEvent` across submissions. MTL4 fences carry no `visibilityOptions`, so they order execution only — a device-visibility `barrier` still has to precede the signal when the consumer reads what the producer wrote.
 
 ---
 

@@ -904,6 +904,14 @@ impl<'a> Raster<'a> {
             .barrier_before_queue_stages(after, before_queue, hazard);
     }
 
+    pub fn signal_fence(&self, fence: &Fence, after: Stages) {
+        self.encoder.update_fence(fence, after);
+    }
+
+    pub fn wait_fence(&self, fence: &Fence, before: Stages) {
+        self.encoder.wait_for_fence(fence, before);
+    }
+
     pub fn draw<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, start: usize, count: usize) {
         self.table.set_address(root.0.get(), 0);
         self.encoder.draw_primitives(primitive, start, count);
@@ -1045,6 +1053,14 @@ impl<'a> Compute<'a> {
     pub fn signal(&self, after: Stages, before_queue: Stages, hazard: M4VisibilityOptions) {
         self.encoder
             .barrier_before_queue_stages(after, before_queue, hazard);
+    }
+
+    pub fn signal_fence(&self, fence: &Fence, after: Stages) {
+        self.encoder.update_fence(fence, after);
+    }
+
+    pub fn wait_fence(&self, fence: &Fence, before: Stages) {
+        self.encoder.wait_for_fence(fence, before);
     }
 }
 

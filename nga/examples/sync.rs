@@ -69,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[ColorTarget::new(PixelFormat::Bgra8Unorm)],
     ))?;
     let depth_write = depth_state(&device, CompareFunction::Less, true)?;
+    let vertices_ready = device.new_fence()?;
 
     let instances = ctx.heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let vertices = ctx.heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
@@ -176,6 +177,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 compute.pipeline(&build);
                 compute.dispatch(build_root.gpu, COUNT, GROUP);
+                compute.barrier(
+                    Stages::DISPATCH,
+                    Stages::DISPATCH,
+                    M4VisibilityOptions::DEVICE,
+                );
+                compute.signal_fence(&vertices_ready, Stages::DISPATCH);
             }
 
             let pass = Pass::new()
@@ -194,11 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(raster) = frame.raster(&pass, viewport) else {
                     return;
                 };
-                raster.wait(
-                    Stages::DISPATCH,
-                    Stages::VERTEX,
-                    M4VisibilityOptions::DEVICE,
-                );
+                raster.wait_fence(&vertices_ready, Stages::VERTEX);
                 raster.pipeline(&draw);
                 raster.depth(&depth_write);
                 raster.draw(draw_root.gpu, PrimitiveType::Triangle, 0, COUNT * 3);
