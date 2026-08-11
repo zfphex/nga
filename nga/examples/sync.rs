@@ -55,10 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}\n{SHADERS}",
         msl::header!(Instance, Vertex, SimData, BuildData, DrawData)
     );
-    msl::assert_matches(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/sync.metal"),
-        &format!("{MSL_PRELUDE}{source}"),
-    );
+    msl::dump("sync", &format!("{MSL_PRELUDE}{source}"));
 
     let shaders = Shaders::new(&device, &source)?;
     let simulate = shaders.compute("simulate", None)?;

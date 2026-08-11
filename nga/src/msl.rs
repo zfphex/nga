@@ -82,14 +82,9 @@ pub fn header(types: &[TypeAbi]) -> String {
     out
 }
 
-pub fn assert_matches(path: &str, contents: &str) {
-    if std::fs::read_to_string(path).ok().as_deref() == Some(contents) {
-        return;
-    }
-    if std::env::var_os("NGA_BLESS").is_some() {
-        std::fs::write(path, contents).expect("could not write the generated MSL header");
-        eprintln!("blessed {path}");
-        return;
-    }
-    panic!("{path} no longer matches the Rust structs; re-run with NGA_BLESS=1 to update it");
+pub fn dump(name: &str, contents: &str) {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/generated");
+    std::fs::create_dir_all(dir).expect("could not create the generated MSL directory");
+    std::fs::write(format!("{dir}/{name}.metal"), contents)
+        .expect("could not write the generated MSL header");
 }

@@ -59,10 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event = device.new_shared_event()?;
 
     let source = format!("{}\n{SHADERS}", msl::header!(Vertex, Material, Data, Paint));
-    msl::assert_matches(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/generated/bindless.metal"),
-        &format!("{MSL_PRELUDE}{source}"),
-    );
+    msl::dump("bindless", &format!("{MSL_PRELUDE}{source}"));
 
     let compiler = device.new_m4_compiler_with_descriptor(&M4CompilerDescriptor::new())?;
     let library_desc = M4LibraryDescriptor::new();

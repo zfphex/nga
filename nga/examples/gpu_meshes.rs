@@ -78,13 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}\n{SHADERS}",
         msl::header!(Vertex, Mesh, Object, DrawData, EncodeData)
     );
-    msl::assert_matches(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/shaders/generated/gpu_meshes.metal"
-        ),
-        &format!("{MSL_PRELUDE}{source}"),
-    );
+    msl::dump("gpu_meshes", &format!("{MSL_PRELUDE}{source}"));
 
     let shaders = Shaders::new(&device, &source)?;
     let encode = shaders.compute("encode", None)?;

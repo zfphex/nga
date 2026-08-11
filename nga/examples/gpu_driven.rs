@@ -84,13 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EncodeData
         )
     );
-    msl::assert_matches(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/shaders/generated/gpu_driven.metal"
-        ),
-        &format!("{MSL_PRELUDE}{source}"),
-    );
+    msl::dump("gpu_driven", &format!("{MSL_PRELUDE}{source}"));
 
     let shaders = Shaders::new(&device, &source)?;
     let prepare = shaders.compute("prepare", None)?;

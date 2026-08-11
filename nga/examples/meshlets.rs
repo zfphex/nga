@@ -88,13 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}\n{SHADERS}",
         msl::header!(Vertex, Meshlet, Model, Object, Payload, Scene)
     );
-    msl::assert_matches(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/shaders/generated/meshlets.metal"
-        ),
-        &format!("{MSL_PRELUDE}{source}"),
-    );
+    msl::dump("meshlets", &format!("{MSL_PRELUDE}{source}"));
 
     let shaders = Shaders::new(&device, &source)?;
     let pipeline = shaders.mesh(&MeshDesc::new(

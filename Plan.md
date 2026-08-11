@@ -217,19 +217,14 @@ Fully sufficient, and easier to debug than nested `quote!` (`cargo expand` isn't
 
 ## 9. MSL generation without `inventory` or `build.rs` magic
 
-The macro must not write files — proc macros run on demand and are cached, so file side effects are unreliable. Instead each type carries its MSL as associated consts (above), and a **golden-file test** the user owns does the emission:
+The macro must not write files — proc macros run on demand and are cached, so file side effects are unreliable. Instead each type carries its MSL as associated consts (above), and the header is built at startup from an explicit type list, then prepended to the hand-written shader:
 
 ```rust
-#[test]
-fn shaders_are_current() {
-    let header = nga::msl::header(&[
-        Data::DECL, Vertex::DECL, Meshlet::DECL, Material::DECL,
-    ]);
-    nga::msl::assert_matches("shaders/generated.h", &header); // rewrites if NGA_BLESS=1, else fails
-}
+let source = format!("{}\n{SHADERS}", msl::header!(Vertex, Mesh, Object));
+msl::dump("gpu_meshes", &format!("{MSL_PRELUDE}{source}"));
 ```
 
-`cargo test` fails whenever a Rust struct drifts from the shader header. No registry, no link-time collection, no hidden ordering, no dependency — and the explicit type list matches the library's "you own your data" philosophy rather than fighting it.
+Because the header is regenerated every run and compiled as part of the source, it cannot drift — there is nothing to keep in sync and no golden file to bless. `dump` writes the exact text handed to the Metal compiler into `target/generated/` purely as a debugging artifact: it is gitignored, and it is what you point `xcrun metal` at to reproduce a shader compile error outside the app. The explicit type list matches the library's "you own your data" philosophy rather than fighting it.
 
 The header also carries `static_assert(offsetof(Data, verts) == 16, "…")` lines generated from `core::mem::offset_of!` (stable since 1.77). A layout divergence therefore becomes a **shader compile error**, not silent corruption. This matters more than usual here, because `packed_float3` vs `float3` is the classic way to lose an afternoon.
 
