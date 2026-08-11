@@ -529,11 +529,7 @@ impl Shaders {
         })
     }
 
-    pub fn function(
-        &self,
-        name: &str,
-        constants: Option<&FunctionConstantValues>,
-    ) -> M4FunctionDescriptor {
+    pub fn function(&self, name: &str, constants: Option<&dyn Constants>) -> M4FunctionDescriptor {
         let function = M4LibraryFunctionDescriptor::new();
         function.set_name(name);
         function.set_library(Some(&self.library));
@@ -542,7 +538,7 @@ impl Shaders {
         };
         let specialized = M4SpecializedFunctionDescriptor::new();
         specialized.set_function_descriptor(Some(&function.as_function_descriptor()));
-        specialized.set_constant_values(Some(constants));
+        specialized.set_constant_values(Some(&constants.values()));
         specialized.set_specialized_name(name);
         M4FunctionDescriptor {
             raw: retain(specialized.raw),
@@ -552,7 +548,7 @@ impl Shaders {
     pub fn compute(
         &self,
         name: &str,
-        constants: Option<&FunctionConstantValues>,
+        constants: Option<&dyn Constants>,
     ) -> Result<ComputePipelineState, MetalError> {
         let pipeline = M4ComputePipelineDescriptor::new();
         pipeline.set_label(name);
@@ -667,7 +663,7 @@ pub struct RasterDesc<'a> {
     pub samples: usize,
     pub alpha_to_coverage: bool,
     pub label: &'a str,
-    pub constants: Option<&'a FunctionConstantValues>,
+    pub constants: Option<&'a dyn Constants>,
     pub indirect: bool,
 }
 

@@ -24,19 +24,11 @@ pub fn set_constant<T: ConstantValue>(values: &FunctionConstantValues, index: us
 }
 
 pub trait Constants {
-    const FIELDS: &'static [(&'static str, &'static str)];
+    fn msl() -> String
+    where
+        Self: Sized;
 
     fn values(&self) -> FunctionConstantValues;
-
-    fn msl() -> String {
-        Self::FIELDS
-            .iter()
-            .enumerate()
-            .map(|(index, (name, ty))| {
-                format!("constant {ty} {name} [[function_constant({index})]];\n")
-            })
-            .collect()
-    }
 }
 
 macro_rules! vector {

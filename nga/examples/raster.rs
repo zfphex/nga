@@ -69,19 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let shaders = Shaders::new(&device, &source)?;
 
-    let plain = Options {
-        boost: false,
-        gamma: 1.0,
-    }
-    .values();
-    let boosted = Options {
-        boost: true,
-        gamma: 0.6,
-    }
-    .values();
-
     let opaque = shaders.raster(&RasterDesc {
-        constants: Some(&plain),
+        constants: Some(&Options {
+            boost: false,
+            gamma: 1.0,
+        }),
         ..RasterDesc::new(
             "vertex_main",
             "fragment_main",
@@ -89,7 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
     let translucent = shaders.raster(&RasterDesc {
-        constants: Some(&boosted),
+        constants: Some(&Options {
+            boost: true,
+            gamma: 0.6,
+        }),
         ..RasterDesc::new(
             "vertex_main",
             "fragment_main",

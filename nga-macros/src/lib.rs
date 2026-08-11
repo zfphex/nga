@@ -350,14 +350,16 @@ pub fn constants(item: TokenStream) -> TokenStream {
         Err((span, message)) => return compile_error(span, &message),
     };
 
-    let mut names = String::new();
+    let mut format_string = String::new();
+    let mut types = String::new();
     let mut sets = String::new();
     for (index, field) in fields.iter().enumerate() {
         let ty: TokenStream = field.tokens.iter().cloned().collect();
-        names += &format!(
-            "(\"{}\", <{ty} as ::nga::ConstantValue>::MSL_TYPE),",
+        format_string += &format!(
+            "constant {{}} {} [[function_constant({index})]];\\n",
             field.name
         );
+        types += &format!("<{ty} as ::nga::ConstantValue>::MSL_TYPE,");
         sets += &format!(
             "::nga::set_constant(&values, {index}, self.{});",
             field.name
@@ -366,7 +368,9 @@ pub fn constants(item: TokenStream) -> TokenStream {
 
     format!(
         "impl ::nga::Constants for {name} {{
-             const FIELDS: &'static [(&'static str, &'static str)] = &[{names}];
+             fn msl() -> ::std::string::String {{
+                 ::std::format!(\"{format_string}\", {types})
+             }}
              fn values(&self) -> ::nga::FunctionConstantValues {{
                  let values = ::nga::FunctionConstantValues::new();
                  {sets}
