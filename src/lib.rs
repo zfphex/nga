@@ -227,6 +227,18 @@ pub struct HeapBuffer {
     pub alloc: Alloc,
 }
 
+impl HeapBuffer {
+    pub fn write<T: Copy>(&mut self, offset: usize, values: &[T]) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr(),
+                self.cpu.add(offset) as *mut T,
+                values.len(),
+            )
+        };
+    }
+}
+
 pub struct HeapTexture {
     pub texture: Texture,
     pub alloc: Alloc,
@@ -397,14 +409,273 @@ static_assert(sizeof(nga_texturecube) == 8, "nga_texturecube is not one resource
 static_assert(sizeof(nga_sampler) == 8, "nga_sampler is not one resource id");
 "#;
 
-impl HeapBuffer {
-    pub fn write<T: Copy>(&mut self, offset: usize, values: &[T]) {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                values.as_ptr(),
-                self.cpu.add(offset) as *mut T,
-                values.len(),
-            )
-        };
+pub struct Shaders {
+    pub compiler: M4Compiler,
+    pub library: Library,
+}
+
+impl Shaders {
+    pub fn new(device: &Device, source: &str) -> Result<Self, MetalError> {
+        let compiler = device.new_m4_compiler_with_descriptor(&M4CompilerDescriptor::new())?;
+        let desc = M4LibraryDescriptor::new();
+        desc.set_source(&format!("{MSL_PRELUDE}\n{source}"));
+        Ok(Self {
+            library: compiler.new_library_with_descriptor(&desc)?,
+            compiler,
+        })
+    }
+
+    pub fn function(&self, name: &str) -> M4FunctionDescriptor {
+        let function = M4LibraryFunctionDescriptor::new();
+        function.set_name(name);
+        function.set_library(Some(&self.library));
+        function.as_function_descriptor()
+    }
+
+    pub fn raster(&self, desc: &RasterDesc) -> Result<RenderPipelineState, MetalError> {
+        let pipeline = M4RenderPipelineDescriptor::new();
+        pipeline.set_label(desc.label);
+        pipeline.set_vertex_function_descriptor(Some(&self.function(desc.vertex)));
+        if !desc.fragment.is_empty() {
+            pipeline.set_fragment_function_descriptor(Some(&self.function(desc.fragment)));
+        }
+        pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
+        pipeline.set_raster_sample_count(desc.samples);
+        pipeline.set_alpha_to_coverage_state(match desc.alpha_to_coverage {
+            true => M4AlphaToCoverageState::Enabled,
+            false => M4AlphaToCoverageState::Disabled,
+        });
+        let attachments = pipeline.color_attachments();
+        for (index, target) in desc.colors.iter().enumerate() {
+            let attachment = attachments.object_at(index);
+            attachment.set_pixel_format(target.format);
+            attachment.set_write_mask(target.write);
+            match target.blend {
+                BlendMode::Fixed(blend) => {
+                    attachment.set_blending_state(M4BlendState::Enabled);
+                    attachment.set_blend_factors(
+                        blend.src_rgb,
+                        blend.dst_rgb,
+                        blend.rgb_op,
+                        blend.src_alpha,
+                        blend.dst_alpha,
+                        blend.alpha_op,
+                    );
+                }
+                _ => attachment.set_blending_state(M4BlendState::Disabled),
+            }
+        }
+        self.compiler
+            .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Blend {
+    pub src_rgb: BlendFactor,
+    pub dst_rgb: BlendFactor,
+    pub rgb_op: BlendOperation,
+    pub src_alpha: BlendFactor,
+    pub dst_alpha: BlendFactor,
+    pub alpha_op: BlendOperation,
+}
+
+impl Blend {
+    pub const ALPHA: Self = Self {
+        src_rgb: BlendFactor::SourceAlpha,
+        dst_rgb: BlendFactor::OneMinusSourceAlpha,
+        rgb_op: BlendOperation::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::OneMinusSourceAlpha,
+        alpha_op: BlendOperation::Add,
+    };
+    pub const PREMULTIPLIED: Self = Self {
+        src_rgb: BlendFactor::One,
+        ..Self::ALPHA
+    };
+    pub const ADDITIVE: Self = Self {
+        src_rgb: BlendFactor::One,
+        dst_rgb: BlendFactor::One,
+        rgb_op: BlendOperation::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::One,
+        alpha_op: BlendOperation::Add,
+    };
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BlendMode {
+    Opaque,
+    Fixed(Blend),
+    Programmable,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ColorTarget {
+    pub format: PixelFormat,
+    pub blend: BlendMode,
+    pub write: ColorWriteMask,
+}
+
+impl ColorTarget {
+    pub fn new(format: PixelFormat) -> Self {
+        Self {
+            format,
+            blend: BlendMode::Opaque,
+            write: ColorWriteMask::ALL,
+        }
+    }
+}
+
+pub struct RasterDesc<'a> {
+    pub vertex: &'a str,
+    pub fragment: &'a str,
+    pub colors: &'a [ColorTarget],
+    pub samples: usize,
+    pub alpha_to_coverage: bool,
+    pub label: &'a str,
+}
+
+impl<'a> RasterDesc<'a> {
+    pub fn new(vertex: &'a str, fragment: &'a str, colors: &'a [ColorTarget]) -> Self {
+        Self {
+            vertex,
+            fragment,
+            colors,
+            samples: 1,
+            alpha_to_coverage: false,
+            label: vertex,
+        }
+    }
+}
+
+pub fn depth_state(
+    device: &Device,
+    compare: CompareFunction,
+    write: bool,
+) -> Result<DepthStencilState, MetalError> {
+    let desc = DepthStencilDescriptor::new();
+    desc.set_depth_compare_function(compare);
+    desc.set_depth_write_enabled(write);
+    device.new_depth_stencil_state(&desc)
+}
+
+pub struct Pass {
+    pub desc: M4RenderPassDescriptor,
+}
+
+impl Pass {
+    pub fn new() -> Self {
+        Self {
+            desc: M4RenderPassDescriptor::new(),
+        }
+    }
+
+    pub fn color(self, index: usize, texture: &Texture, clear: Option<ClearColor>) -> Self {
+        let attachment = self
+            .desc
+            .color_attachments()
+            .object_at_indexed_subscript(index);
+        attachment.base().set_texture(Some(texture));
+        attachment.base().set_store_action(StoreAction::Store);
+        match clear {
+            Some(color) => {
+                attachment.base().set_load_action(LoadAction::Clear);
+                attachment.set_clear_color(color);
+            }
+            None => attachment.base().set_load_action(LoadAction::Load),
+        }
+        self
+    }
+
+    pub fn depth(self, texture: &Texture, clear: Option<f64>) -> Self {
+        let attachment = self.desc.depth_attachment();
+        attachment.base().set_texture(Some(texture));
+        attachment.base().set_store_action(StoreAction::DontCare);
+        match clear {
+            Some(depth) => {
+                attachment.base().set_load_action(LoadAction::Clear);
+                attachment.set_clear_depth(depth);
+            }
+            None => attachment.base().set_load_action(LoadAction::Load),
+        }
+        self
+    }
+}
+
+pub trait IndexFormat: Copy {
+    const INDEX_TYPE: IndexType;
+}
+
+impl IndexFormat for u16 {
+    const INDEX_TYPE: IndexType = IndexType::UInt16;
+}
+
+impl IndexFormat for u32 {
+    const INDEX_TYPE: IndexType = IndexType::UInt32;
+}
+
+pub struct Raster<'a> {
+    pub encoder: M4RenderCommandEncoder,
+    pub table: &'a M4ArgumentTable,
+    pub command_buffer: &'a mut M4CommandBuffer,
+}
+
+impl<'a> Raster<'a> {
+    pub fn new(
+        command_buffer: &'a mut M4CommandBuffer,
+        pass: &Pass,
+        table: &'a M4ArgumentTable,
+        viewport: Viewport,
+    ) -> Option<Self> {
+        let encoder = command_buffer.render_command_encoder_with_descriptor(&pass.desc)?;
+        encoder.set_argument_table(table, RenderStages::VERTEX | RenderStages::FRAGMENT);
+        encoder.set_viewport(viewport);
+        Some(Self {
+            encoder,
+            table,
+            command_buffer,
+        })
+    }
+
+    pub fn pipeline(&self, pipeline: &RenderPipelineState) {
+        self.encoder.set_render_pipeline_state(pipeline);
+    }
+
+    pub fn depth(&self, state: &DepthStencilState) {
+        self.encoder.set_depth_stencil_state(state);
+    }
+
+    pub fn cull(&self, mode: CullMode, winding: Winding) {
+        self.encoder.set_cull_mode(mode);
+        self.encoder.set_front_facing_winding(winding);
+    }
+
+    pub fn draw<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, start: usize, count: usize) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder.draw_primitives(primitive, start, count);
+    }
+
+    pub fn draw_indexed<T, I: IndexFormat>(
+        &self,
+        root: Gpu<'_, T>,
+        primitive: PrimitiveType,
+        indices: Gpu<'_, I>,
+        count: usize,
+    ) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder.draw_indexed_primitives(
+            primitive,
+            count,
+            I::INDEX_TYPE,
+            indices.0.get(),
+            count * size_of::<I>(),
+        );
+    }
+}
+
+impl Drop for Raster<'_> {
+    fn drop(&mut self) {
+        self.encoder.end_encoding();
     }
 }
