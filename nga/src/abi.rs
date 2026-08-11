@@ -46,6 +46,13 @@ macro_rules! vector {
     };
 }
 
+#[cfg(feature = "f16")]
+vector! {
+    f16x2: [f16; 2] align 4 = "half2" @ Half2,
+    f16x3: [f16; 3] align 8 = "half3" @ Half3,
+    f16x4: [f16; 4] align 8 = "half4" @ Half4,
+}
+
 vector! {
     f32x2: [f32; 2] align 8 = "float2" @ Float2,
     f32x3: [f32; 3] align 16 = "float3" @ Float3,
@@ -69,6 +76,12 @@ pub struct f32x4x4(pub [[f32; 4]; 4]);
 impl ConstantValue for bool {
     const DATA_TYPE: DataType = DataType::Bool;
     const MSL_TYPE: &'static str = "bool";
+}
+
+#[cfg(feature = "f16")]
+impl ConstantValue for f16 {
+    const DATA_TYPE: DataType = DataType::Half;
+    const MSL_TYPE: &'static str = "half";
 }
 
 impl ConstantValue for f32 {

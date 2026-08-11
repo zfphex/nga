@@ -241,12 +241,14 @@ Shader compilation is `std::process::Command` invoking `metal` and `metallib` fr
 
 ```
 nga-abi      no_std, zero deps — DeviceAbi trait, MSL-layout scalar/vector types
-             (f32x4, packed_f32x3, f16x4, u8x4, u16x2), Gpu/GpuMut
+             (f32x4, f16x4, …), Gpu/GpuMut
 nga-macros   proc-macro, zero deps — gpu_struct, derive(Constants)
 nga-alloc    no_std, zero deps — Bump, TLSF, Pool, RangeAllocator
 nga          the API surface (~300 lines of public signatures); deps: minmetal + above
 nga-examples triangle, gpu-driven meshlets, bindless deferred
 ```
+
+Packed vectors are not named types. `[T; N]` for `N` in 2..=4 over a scalar lowers to `packed_T{N}`, so `[f32; 3]` is `packed_float3` (12 bytes, align 4), `[u8; 4]` is `packed_uchar4`, `[u16; 2]` is `packed_ushort2`. The named `f32x3`/`f16x4` types keep MSL's aligned-vector rules (align 16 and 8), so the choice of spelling *is* the choice of layout. `f16` is a nightly type, so it sits behind the off-by-default `f16` cargo feature — without it `nga` builds on stable, and `#![feature(f16)]` is the only nightly gate in the tree. Using `f16x4` or `[f16; 4]` therefore needs both `features = ["f16"]` and `#![feature(f16)]` in the calling crate; with only the latter, rustc unhelpfully suggests importing `std::simd::f16x4`.
 
 `nga-abi` and `nga-alloc` can start as modules inside `nga` and split later if you want them reusable from a shader-side or CPU-side crate that shouldn't pull `minmetal`. `nga-macros` must be its own crate — that's a compiler requirement, not a choice.
 

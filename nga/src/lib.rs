@@ -1,4 +1,5 @@
 #![allow(non_camel_case_types)]
+#![cfg_attr(feature = "f16", feature(f16))]
 
 extern crate self as nga;
 

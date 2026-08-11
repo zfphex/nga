@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 #[gpu_struct]
 struct Vertex {
-    position: f32x3,
+    position: [f32; 3],
 }
 
 #[gpu_struct(align(16))]
@@ -299,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             meshlet_triangles.extend_from_slice(group_triangles);
         }
 
-        vertices.extend(positions.iter().map(|&p| Vertex { position: f32x3(p) }));
+        vertices.extend(positions.iter().map(|&p| Vertex { position: p }));
         models.push(Model {
             meshlet_start,
             meshlet_count: meshlets.len() as u32 - meshlet_start,

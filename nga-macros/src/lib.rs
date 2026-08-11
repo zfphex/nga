@@ -18,6 +18,7 @@ enum Ty {
 fn scalar(name: &str) -> Option<&'static str> {
     Some(match name {
         "f32" => "float",
+        "f16" => "half",
         "u32" => "uint",
         "i32" => "int",
         "u16" => "ushort",
@@ -27,6 +28,9 @@ fn scalar(name: &str) -> Option<&'static str> {
         "u64" => "ulong",
         "i64" => "long",
         "bool" => "bool",
+        "f16x2" => "half2",
+        "f16x3" => "half3",
+        "f16x4" => "half4",
         "f32x2" => "float2",
         "f32x3" => "float3",
         "f32x4" => "float4",
@@ -183,7 +187,7 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
             if let (Ty::Msl(t), 2..=4) = (&element, len)
                 && matches!(
                     t.as_str(),
-                    "float" | "uint" | "int" | "ushort" | "short" | "uchar" | "char"
+                    "float" | "half" | "uint" | "int" | "ushort" | "short" | "uchar" | "char"
                 )
             {
                 return Ok(Ty::Msl(format!("packed_{t}{len}")));

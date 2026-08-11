@@ -4,7 +4,7 @@ use nga::*;
 
 #[gpu_struct]
 struct Vertex {
-    position: f32x3,
+    position: [f32; 3],
 }
 
 #[gpu_struct]
@@ -171,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for p in positions {
             let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
             vertices.push(Vertex {
-                position: f32x3([p[0] / len, p[1] / len, p[2] / len]),
+                position: [p[0] / len, p[1] / len, p[2] / len],
             });
         }
         let tri_start = indices.len() as u32;
