@@ -27,7 +27,6 @@ struct nga_dispatch_threads { uint threads[3]; uint group[3]; };
 static_assert(sizeof(nga_commands) == 8, "nga_commands is not one resource id");
 static_assert(sizeof(nga_exec_range) == 8, "nga_exec_range does not match MTLIndirectCommandBufferExecutionRange");
 
-
 struct Vertex {
     packed_float2 position;
     packed_float2 uv;
@@ -41,6 +40,7 @@ struct Material {
 struct Data {
     device const Vertex* vertices;
     device const Material* materials;
+    device const nga_texture2d* textures;
     float4x4 mvp;
 };
 
@@ -54,11 +54,12 @@ static_assert(alignof(Material) == 4, "Material has the wrong alignment");
 static_assert(__builtin_offsetof(Material, texture_base) == 0, "Material::texture_base is at the wrong offset");
 static_assert(__builtin_offsetof(Material, tint) == 4, "Material::tint is at the wrong offset");
 
-static_assert(sizeof(Data) == 80, "Data has the wrong size");
+static_assert(sizeof(Data) == 96, "Data has the wrong size");
 static_assert(alignof(Data) == 16, "Data has the wrong alignment");
 static_assert(__builtin_offsetof(Data, vertices) == 0, "Data::vertices is at the wrong offset");
 static_assert(__builtin_offsetof(Data, materials) == 8, "Data::materials is at the wrong offset");
-static_assert(__builtin_offsetof(Data, mvp) == 16, "Data::mvp is at the wrong offset");
+static_assert(__builtin_offsetof(Data, textures) == 16, "Data::textures is at the wrong offset");
+static_assert(__builtin_offsetof(Data, mvp) == 32, "Data::mvp is at the wrong offset");
 
 struct VertexOut {
     float4 position [[position]];
@@ -75,11 +76,9 @@ vertex VertexOut vertex_main(device const Data* data [[buffer(0)]], uint vid [[v
     return out;
 }
 
-fragment float4 fragment_main(VertexOut in [[stage_in]],
-                              device const Data* data [[buffer(0)]],
-                              device const nga_texture2d* textures [[buffer(1)]]) {
+fragment float4 fragment_main(VertexOut in [[stage_in]], device const Data* data [[buffer(0)]]) {
     Material m = data->materials[in.material];
     uint layer = min(uint(in.uv.x * 3.0), 2u);
-    float3 c = textures[m.texture_base + layer].t.sample(nga_linear_clamp, in.uv).rgb;
+    float3 c = data->textures[m.texture_base + layer].t.sample(nga_linear_clamp, in.uv).rgb;
     return float4(c * m.tint, 1.0);
 }

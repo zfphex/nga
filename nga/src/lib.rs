@@ -415,6 +415,10 @@ pub struct AtomicU32(pub u32);
 #[derive(Clone, Copy, Debug)]
 pub struct Commands(pub ResourceID);
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Texture2d(pub ResourceID);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ExecRange {

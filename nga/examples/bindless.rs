@@ -18,6 +18,7 @@ struct Material {
 struct Data {
     vertices: Gpu<'static, Vertex>,
     materials: Gpu<'static, Material>,
+    textures: Gpu<'static, Texture2d>,
     mvp: f32x4x4,
 }
 
@@ -166,6 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data.alloc(Data {
             vertices: Gpu::new(vertex_buffer.gpu),
             materials: Gpu::new(material_buffer.gpu),
+            textures: Gpu::new(textures.storage.gpu),
             mvp: f32x4x4([[0.0; 4]; 4]),
         });
     }
@@ -177,9 +179,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     queue.add_residency_set(&residency);
 
     let table_desc = M4ArgumentTableDescriptor::new();
-    table_desc.set_max_buffer_bind_count(2);
+    table_desc.set_max_buffer_bind_count(1);
     let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
-    table.set_address(textures.storage.gpu, 1);
 
     let scale = window.scale_factor();
     let (mut drawable_width, mut drawable_height) = window.scaled_size();
