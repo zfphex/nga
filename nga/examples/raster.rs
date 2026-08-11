@@ -9,9 +9,13 @@ struct Vertex {
 }
 
 #[gpu_struct]
-struct Data {
+struct VertexData {
     vertices: Gpu<'static, Vertex>,
     mvp: f32x4x4,
+}
+
+#[gpu_struct]
+struct PixelData {
     tint: f32x4,
 }
 
@@ -60,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let source = format!(
         "{}{}\n{SHADERS}",
-        msl::header!(Vertex, Data),
+        msl::header!(Vertex, VertexData, PixelData),
         Options::msl()
     );
     msl::assert_matches(
@@ -134,12 +138,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vertices: Gpu<'static, Vertex> = Gpu::new(vertex_buffer.gpu);
     let index_ptr: Gpu<'static, u16> = Gpu::new(index_buffer.gpu);
 
-    let mut data: Pool<Data> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32 * 3)
+    let mut vertex_data: Pool<VertexData> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32 * 3)
+        .ok_or(MetalError::new("frame arena is too small"))?;
+    let mut pixel_data: Pool<PixelData> = Pool::new(&arena, FRAMES_IN_FLIGHT as u32 * 3)
         .ok_or(MetalError::new("frame arena is too small"))?;
     for _ in 0..FRAMES_IN_FLIGHT * 3 {
-        data.alloc(Data {
+        vertex_data.alloc(VertexData {
             vertices,
             mvp: f32x4x4([[0.0; 4]; 4]),
+        });
+        pixel_data.alloc(PixelData {
             tint: f32x4([1.0; 4]),
         });
     }
@@ -152,7 +160,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let table_desc = M4ArgumentTableDescriptor::new();
     table_desc.set_max_buffer_bind_count(1);
-    let table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
+    let vertex_table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
+    let fragment_table = device.new_m4_argument_table_with_descriptor(&table_desc)?;
 
     let scale = window.scale_factor();
     let (mut drawable_width, mut drawable_height) = window.scaled_size();
@@ -239,12 +248,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let slot = (frame % FRAMES_IN_FLIGHT) as u32 * 3;
-            data[slot].mvp = f32x4x4(scaled(1.0));
-            data[slot].tint = f32x4([1.0, 1.0, 1.0, 1.0]);
-            data[slot + 1].mvp = f32x4x4(scaled(1.6));
-            data[slot + 1].tint = f32x4([0.4, 0.8, 1.0, 0.35]);
-            data[slot + 2].mvp = f32x4x4(scaled(2.1));
-            data[slot + 2].tint = f32x4([1.0, 0.5, 0.2, 0.6]);
+            vertex_data[slot].mvp = f32x4x4(scaled(1.0));
+            pixel_data[slot].tint = f32x4([1.0, 1.0, 1.0, 1.0]);
+            vertex_data[slot + 1].mvp = f32x4x4(scaled(1.6));
+            pixel_data[slot + 1].tint = f32x4([0.4, 0.8, 1.0, 0.35]);
+            vertex_data[slot + 2].mvp = f32x4x4(scaled(2.1));
+            pixel_data[slot + 2].tint = f32x4([1.0, 0.5, 0.2, 0.6]);
 
             allocators[(frame % FRAMES_IN_FLIGHT) as usize].reset();
             command_buffer
@@ -263,19 +272,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             {
-                let Some(raster) = Raster::new(&mut command_buffer, &pass, &table, viewport) else {
+                let Some(raster) = Raster::new(
+                    &mut command_buffer,
+                    &pass,
+                    &vertex_table,
+                    &fragment_table,
+                    viewport,
+                ) else {
                     return;
                 };
                 raster.cull(CullMode::Back, Winding::Clockwise);
 
                 raster.pipeline(&opaque);
                 raster.depth(&depth_write);
-                raster.draw_indexed(data.gpu(slot), PrimitiveType::Triangle, index_ptr, indices.len());
+                raster.draw_indexed(
+                    vertex_data.gpu(slot),
+                    pixel_data.gpu(slot),
+                    PrimitiveType::Triangle,
+                    index_ptr,
+                    indices.len(),
+                );
 
                 raster.pipeline(&translucent);
                 raster.depth(&depth_test);
                 raster.draw_indexed(
-                    data.gpu(slot + 1),
+                    vertex_data.gpu(slot + 1),
+                    pixel_data.gpu(slot + 1),
                     PrimitiveType::Triangle,
                     index_ptr,
                     indices.len(),
@@ -284,7 +306,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 raster.pipeline(&screen);
                 raster.depth(&depth_off);
                 raster.draw_indexed(
-                    data.gpu(slot + 2),
+                    vertex_data.gpu(slot + 2),
+                    pixel_data.gpu(slot + 2),
                     PrimitiveType::Triangle,
                     index_ptr,
                     indices.len(),

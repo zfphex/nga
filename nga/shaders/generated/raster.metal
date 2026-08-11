@@ -34,9 +34,12 @@ struct Vertex {
     packed_float3 color;
 };
 
-struct Data {
+struct VertexData {
     device const Vertex* vertices;
     float4x4 mvp;
+};
+
+struct PixelData {
     float4 tint;
 };
 
@@ -45,38 +48,39 @@ static_assert(alignof(Vertex) == 4, "Vertex has the wrong alignment");
 static_assert(__builtin_offsetof(Vertex, position) == 0, "Vertex::position is at the wrong offset");
 static_assert(__builtin_offsetof(Vertex, color) == 12, "Vertex::color is at the wrong offset");
 
-static_assert(sizeof(Data) == 96, "Data has the wrong size");
-static_assert(alignof(Data) == 16, "Data has the wrong alignment");
-static_assert(__builtin_offsetof(Data, vertices) == 0, "Data::vertices is at the wrong offset");
-static_assert(__builtin_offsetof(Data, mvp) == 16, "Data::mvp is at the wrong offset");
-static_assert(__builtin_offsetof(Data, tint) == 80, "Data::tint is at the wrong offset");
+static_assert(sizeof(VertexData) == 80, "VertexData has the wrong size");
+static_assert(alignof(VertexData) == 16, "VertexData has the wrong alignment");
+static_assert(__builtin_offsetof(VertexData, vertices) == 0, "VertexData::vertices is at the wrong offset");
+static_assert(__builtin_offsetof(VertexData, mvp) == 16, "VertexData::mvp is at the wrong offset");
+
+static_assert(sizeof(PixelData) == 16, "PixelData has the wrong size");
+static_assert(alignof(PixelData) == 16, "PixelData has the wrong alignment");
+static_assert(__builtin_offsetof(PixelData, tint) == 0, "PixelData::tint is at the wrong offset");
 constant bool boost [[function_constant(0)]];
 constant float gamma [[function_constant(1)]];
 
 struct VertexOut {
     float4 position [[position]];
     float3 color;
-    float alpha;
 };
 
-vertex VertexOut vertex_main(device const Data* data [[buffer(0)]], uint vid [[vertex_id]]) {
+vertex VertexOut vertex_main(device const VertexData* data [[buffer(0)]], uint vid [[vertex_id]]) {
     Vertex v = data->vertices[vid];
     VertexOut out;
     out.position = data->mvp * float4(v.position, 1.0);
-    out.color = v.color * data->tint.rgb;
-    out.alpha = data->tint.a;
+    out.color = v.color;
     return out;
 }
 
-fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    float3 c = pow(in.color, float3(gamma));
+fragment float4 fragment_main(VertexOut in [[stage_in]], device const PixelData* data [[buffer(0)]]) {
+    float3 c = pow(in.color * data->tint.rgb, float3(gamma));
     if (boost) {
         c = min(c * 1.6, 1.0);
     }
-    return float4(c, in.alpha);
+    return float4(c, data->tint.a);
 }
 
-fragment float4 fragment_screen(VertexOut in [[stage_in]], float4 dst [[color(0)]]) {
-    float3 src = in.color * in.alpha;
+fragment float4 fragment_screen(VertexOut in [[stage_in]], device const PixelData* data [[buffer(0)]], float4 dst [[color(0)]]) {
+    float3 src = in.color * data->tint.rgb * data->tint.a;
     return float4(1.0 - (1.0 - dst.rgb) * (1.0 - src), 1.0);
 }
