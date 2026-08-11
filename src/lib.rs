@@ -432,6 +432,13 @@ impl Shaders {
         function.as_function_descriptor()
     }
 
+    pub fn compute(&self, name: &str) -> Result<ComputePipelineState, MetalError> {
+        let pipeline = M4ComputePipelineDescriptor::new();
+        pipeline.set_label(name);
+        pipeline.set_compute_function_descriptor(Some(&self.function(name)));
+        self.compiler.new_compute_pipeline_state(&pipeline, None)
+    }
+
     pub fn raster(&self, desc: &RasterDesc) -> Result<RenderPipelineState, MetalError> {
         let pipeline = M4RenderPipelineDescriptor::new();
         pipeline.set_label(desc.label);
@@ -618,12 +625,12 @@ impl IndexFormat for u32 {
 pub struct Raster<'a> {
     pub encoder: M4RenderCommandEncoder,
     pub table: &'a M4ArgumentTable,
-    pub command_buffer: &'a mut M4CommandBuffer,
+    pub command_buffer: &'a M4CommandBuffer,
 }
 
 impl<'a> Raster<'a> {
     pub fn new(
-        command_buffer: &'a mut M4CommandBuffer,
+        command_buffer: &'a M4CommandBuffer,
         pass: &Pass,
         table: &'a M4ArgumentTable,
         viewport: Viewport,
@@ -649,6 +656,20 @@ impl<'a> Raster<'a> {
     pub fn cull(&self, mode: CullMode, winding: Winding) {
         self.encoder.set_cull_mode(mode);
         self.encoder.set_front_facing_winding(winding);
+    }
+
+    pub fn barrier(&self, after: Stages, before: Stages, hazard: M4VisibilityOptions) {
+        self.encoder.barrier(after, before, hazard);
+    }
+
+    pub fn wait(&self, after_queue: Stages, before: Stages, hazard: M4VisibilityOptions) {
+        self.encoder
+            .barrier_after_queue_stages(after_queue, before, hazard);
+    }
+
+    pub fn signal(&self, after: Stages, before_queue: Stages, hazard: M4VisibilityOptions) {
+        self.encoder
+            .barrier_before_queue_stages(after, before_queue, hazard);
     }
 
     pub fn draw<T>(&self, root: Gpu<'_, T>, primitive: PrimitiveType, start: usize, count: usize) {
@@ -677,5 +698,202 @@ impl<'a> Raster<'a> {
 impl Drop for Raster<'_> {
     fn drop(&mut self) {
         self.encoder.end_encoding();
+    }
+}
+
+pub struct Compute<'a> {
+    pub encoder: M4ComputeCommandEncoder,
+    pub table: &'a M4ArgumentTable,
+    pub command_buffer: &'a M4CommandBuffer,
+}
+
+impl<'a> Compute<'a> {
+    pub fn new(command_buffer: &'a M4CommandBuffer, table: &'a M4ArgumentTable) -> Option<Self> {
+        let encoder = command_buffer.compute_command_encoder()?;
+        encoder.set_argument_table(Some(table));
+        Some(Self {
+            encoder,
+            table,
+            command_buffer,
+        })
+    }
+
+    pub fn pipeline(&self, pipeline: &ComputePipelineState) {
+        self.encoder.set_compute_pipeline_state(pipeline);
+    }
+
+    pub fn dispatch<T>(&self, root: Gpu<'_, T>, threads: usize, group: usize) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder
+            .dispatch_threads(Size::new(threads, 1, 1), Size::new(group, 1, 1));
+    }
+
+    pub fn barrier(&self, after: Stages, before: Stages, hazard: M4VisibilityOptions) {
+        self.encoder.barrier(after, before, hazard);
+    }
+
+    pub fn wait(&self, after_queue: Stages, before: Stages, hazard: M4VisibilityOptions) {
+        self.encoder
+            .barrier_after_queue_stages(after_queue, before, hazard);
+    }
+
+    pub fn signal(&self, after: Stages, before_queue: Stages, hazard: M4VisibilityOptions) {
+        self.encoder
+            .barrier_before_queue_stages(after, before_queue, hazard);
+    }
+}
+
+impl Drop for Compute<'_> {
+    fn drop(&mut self) {
+        self.encoder.end_encoding();
+    }
+}
+
+pub const FRAMES_IN_FLIGHT: u64 = 2;
+
+pub enum Retired {
+    Buffer(HeapBuffer),
+    Texture(HeapTexture),
+}
+
+pub struct Context {
+    pub device: Device,
+    pub queue: M4CommandQueue,
+    pub command_buffer: M4CommandBuffer,
+    pub table: M4ArgumentTable,
+    pub event: SharedEvent,
+    pub residency: ResidencySet,
+    pub heap: GpuHeap,
+    pub arenas: Vec<Arena>,
+    pub allocators: Vec<M4CommandAllocator>,
+    pub retired: Vec<(u64, Retired)>,
+    pub frame: u64,
+}
+
+impl Context {
+    pub fn new(device: &Device, arena_size: usize, heap_size: u64) -> Result<Self, MetalError> {
+        let queue = device.new_m4_command_queue().ok_or(MetalError::new(
+            "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
+        ))?;
+        let command_buffer = device
+            .new_m4_command_buffer()
+            .ok_or(MetalError::new("newCommandBuffer returned nil"))?;
+
+        let mut arenas = Vec::new();
+        let mut allocators = Vec::new();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            arenas.push(Arena::new(device, arena_size)?);
+            allocators.push(
+                device
+                    .new_m4_command_allocator()
+                    .ok_or(MetalError::new("newCommandAllocator returned nil"))?,
+            );
+        }
+
+        let heap = GpuHeap::new(device, heap_size)?;
+        let residency = device.new_residency_set(&ResidencySetDescriptor::new()?)?;
+        for arena in &arenas {
+            residency.add_allocation(&Allocation::from_buffer(&arena.buffer))?;
+        }
+        residency.add_allocation(&Allocation::from_heap(&heap.heap))?;
+        residency.commit()?;
+        queue.add_residency_set(&residency);
+
+        let table_desc = M4ArgumentTableDescriptor::new();
+        table_desc.set_max_buffer_bind_count(1);
+
+        Ok(Self {
+            table: device.new_m4_argument_table_with_descriptor(&table_desc)?,
+            event: device.new_shared_event()?,
+            device: device.clone(),
+            queue,
+            command_buffer,
+            residency,
+            heap,
+            arenas,
+            allocators,
+            retired: Vec::new(),
+            frame: 0,
+        })
+    }
+
+    pub fn resident(&self, allocation: &Allocation) -> Result<(), MetalError> {
+        self.residency.add_allocation(allocation)?;
+        self.residency.commit()
+    }
+
+    pub fn free_later(&mut self, retired: Retired) {
+        self.retired.push((self.frame, retired));
+    }
+
+    pub fn begin_frame(&mut self) -> Frame<'_> {
+        let index = self.frame;
+        self.frame += 1;
+        if index >= FRAMES_IN_FLIGHT {
+            self.event
+                .wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 1000);
+        }
+
+        let completed = self.event.signaled_value();
+        let heap = &mut self.heap;
+        let mut i = 0;
+        while i < self.retired.len() {
+            if self.retired[i].0 > completed {
+                i += 1;
+                continue;
+            }
+            match self.retired.swap_remove(i).1 {
+                Retired::Buffer(buffer) => heap.free(buffer.alloc),
+                Retired::Texture(texture) => heap.free(texture.alloc),
+            }
+        }
+
+        let slot = (index % FRAMES_IN_FLIGHT) as usize;
+        self.allocators[slot].reset();
+        self.arenas[slot].reset();
+        self.command_buffer
+            .begin_command_buffer_with_allocator(&self.allocators[slot]);
+
+        Frame {
+            arena: &self.arenas[slot],
+            command_buffer: &self.command_buffer,
+            table: &self.table,
+            queue: &self.queue,
+            event: &self.event,
+            value: index + 1,
+        }
+    }
+}
+
+pub struct Frame<'a> {
+    pub arena: &'a Arena,
+    pub command_buffer: &'a M4CommandBuffer,
+    pub table: &'a M4ArgumentTable,
+    pub queue: &'a M4CommandQueue,
+    pub event: &'a SharedEvent,
+    pub value: u64,
+}
+
+impl Frame<'_> {
+    pub fn raster(&mut self, pass: &Pass, viewport: Viewport) -> Option<Raster<'_>> {
+        Raster::new(self.command_buffer, pass, self.table, viewport)
+    }
+
+    pub fn compute(&mut self) -> Option<Compute<'_>> {
+        Compute::new(self.command_buffer, self.table)
+    }
+
+    pub fn submit(self, drawable: Option<&Drawable>) {
+        self.command_buffer.end_command_buffer();
+        if let Some(drawable) = drawable {
+            self.queue.wait_for_drawable(drawable);
+        }
+        self.queue
+            .commit(std::slice::from_ref(self.command_buffer));
+        self.queue.signal_event(&self.event.as_event(), self.value);
+        if let Some(drawable) = drawable {
+            self.queue.signal_drawable(drawable);
+            drawable.present();
+        }
     }
 }
