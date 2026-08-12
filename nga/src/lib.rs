@@ -1028,6 +1028,64 @@ impl Pass {
     }
 }
 
+#[link(name = "System", kind = "dylib")]
+unsafe extern "C" {
+    fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+}
+
+pub struct Timers {
+    pub heap: M4CounterHeap,
+    pub count: usize,
+    pub base: usize,
+    pub granularity: M4TimestampGranularity,
+    pub ticks: Vec<u64>,
+    pub ns_per_tick: f64,
+}
+
+impl Timers {
+    pub fn new(device: &Device, count: usize) -> Result<Self, MetalError> {
+        let total = count * FRAMES_IN_FLIGHT as usize;
+        let desc = M4CounterHeapDescriptor::new();
+        desc.set_type(M4CounterHeapType::Timestamp);
+        desc.set_count(total);
+        let heap = device.new_m4_counter_heap_with_descriptor(&desc)?;
+        heap.invalidate_counter_range(minmetal::Range::new(0, total));
+        let mut timebase = [0u32; 2];
+        assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
+        Ok(Self {
+            heap,
+            count,
+            base: 0,
+            granularity: M4TimestampGranularity::Precise,
+            ticks: vec![0; count],
+            ns_per_tick: timebase[0] as f64 / timebase[1] as f64,
+        })
+    }
+
+    pub fn begin(&mut self, frame: &Frame) {
+        self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as usize * self.count;
+        self.ticks.fill(0);
+        let range = minmetal::Range::new(self.base, self.count);
+        if let Some(data) = self.heap.resolve_counter_range(range) {
+            for (tick, entry) in self.ticks.iter_mut().zip(data.chunks_exact(8)) {
+                *tick = u64::from_ne_bytes(entry.try_into().unwrap());
+            }
+        }
+    }
+
+    pub fn ns(&self, start: usize, end: usize) -> f64 {
+        let (start, end) = (self.ticks[start], self.ticks[end]);
+        match start == 0 || end < start {
+            true => 0.0,
+            false => (end - start) as f64 * self.ns_per_tick,
+        }
+    }
+
+    pub fn ms(&self, start: usize, end: usize) -> f64 {
+        self.ns(start, end) / 1e6
+    }
+}
+
 pub trait IndexFormat: Copy {
     const INDEX_TYPE: IndexType;
 }
@@ -1220,6 +1278,16 @@ impl<'a> Raster<'a> {
         self.encoder
             .execute_commands_in_buffer_with_indirect_buffer(&commands.icb, range.0.get());
     }
+
+    pub fn timestamp(&self, timers: &Timers, after: RenderStages, index: usize) {
+        assert!(index < timers.count);
+        self.encoder.write_timestamp_with_granularity(
+            timers.granularity,
+            after,
+            &timers.heap,
+            timers.base + index,
+        );
+    }
 }
 
 impl Drop for Raster<'_> {
@@ -1406,6 +1474,15 @@ impl<'a> Compute<'a> {
             stride,
             stride * size.height,
             BlitOption::NONE,
+        );
+    }
+
+    pub fn timestamp(&self, timers: &Timers, index: usize) {
+        assert!(index < timers.count);
+        self.encoder.write_timestamp_with_granularity(
+            timers.granularity,
+            &timers.heap,
+            timers.base + index,
         );
     }
 
@@ -1663,6 +1740,12 @@ impl Recorder<'_> {
 
     pub fn compute(&mut self) -> Option<Compute<'_>> {
         Compute::new(self.command_buffer, self.table, self.arena)
+    }
+
+    pub fn timestamp(&mut self, timers: &Timers, index: usize) {
+        assert!(index < timers.count);
+        self.command_buffer
+            .write_timestamp_into_heap(&timers.heap, timers.base + index);
     }
 }
 
