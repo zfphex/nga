@@ -1,3 +1,4 @@
+use crate::{Gpu, GpuMut};
 use minmetal::{DataType, FunctionConstantValues};
 
 pub struct TypeAbi {
@@ -97,4 +98,19 @@ impl ConstantValue for u32 {
 impl ConstantValue for i32 {
     const DATA_TYPE: DataType = DataType::Int;
     const MSL_TYPE: &'static str = "int";
+}
+
+impl ConstantValue for u64 {
+    const DATA_TYPE: DataType = DataType::ULong;
+    const MSL_TYPE: &'static str = "ulong";
+}
+
+impl<T: ?Sized> ConstantValue for Gpu<'static, T> {
+    const DATA_TYPE: DataType = DataType::ULong;
+    const MSL_TYPE: &'static str = "ulong";
+}
+
+impl<T: ?Sized> ConstantValue for GpuMut<'static, T> {
+    const DATA_TYPE: DataType = DataType::ULong;
+    const MSL_TYPE: &'static str = "ulong";
 }

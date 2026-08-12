@@ -137,14 +137,14 @@ Samplers default to MSL `constexpr sampler` (embedded, as in the post). A dynami
 - **Compute / raster PSO creation takes IR + a small `RasterDesc`.** No root signature, no vertex layout, no bind group layouts — there's nothing to describe.
 - **Depth-stencil is a separate object** (`MTLDepthStencilState`), matching both Metal and the proposal.
 - **Blend is baked into the PSO.** Metal has no dynamic blend state, so we take the post's "mobile" branch: bake it, _or_ expose framebuffer fetch (`[[color(0)]]` fragment input) so users write parameterised blend formulas and collapse the permutations themselves. Expose this as `BlendMode::Fixed(BlendDesc)` vs `BlendMode::Programmable`.
-- **Function constants** map to specialization constants. A `#[derive(Constants)]` struct generates the index mapping, so the user writes a struct rather than an index-keyed API. Caveat: MSL function constants are scalars/vectors only — a "constant GPU pointer" must be a `ulong` cast in the shader.
+- **Function constants** map to specialization constants. A `#[derive(Constants)]` struct generates the index mapping, so the user writes a struct rather than an index-keyed API. MSL function constants are scalars/vectors only, so a `Gpu<'static, T>` field is emitted as a `ulong` constant plus a `constant`-space pointer initialised from it; the shader sees a typed pointer and the compiler folds the address.
 - Vertex buffers do not exist. Ever. Vertex fetch is `data->vertices[vid]`.
 
 **Root data** is one device address per stage in the argument table — index 0 for vertex/kernel, index 0 for fragment. Nothing else is ever bound per draw; the descriptor heap of §5 is a second address set once at init, not per-draw state. MSL receives `device const Data* data [[buffer(0)]]`; `const` is what lets Apple's compiler run uniformity analysis and preload into uniform registers, which is why constant buffers can be deleted outright.
 
 **Pipelines** take IR plus a small `RasterDesc`. No root signature, no vertex layout, no bind group layouts — there is nothing to describe. Depth-stencil is a separate object. Blend is baked into the PSO (Metal has no dynamic blend state), with framebuffer fetch exposed as the permutation-collapsing alternative, per the post's mobile branch. Vertex buffers do not exist: fetch is `data->vertices[vid]`.
 
-Function constants map to specialization constants via `#[derive(Constants)]`. Caveat worth stating up front: MSL function constants are scalars and vectors only, so a "constant GPU pointer" must be a `ulong` cast inside the shader.
+Function constants map to specialization constants via `#[derive(Constants)]`. MSL function constants are scalars and vectors only, so a `Gpu<'static, T>` field becomes a `ulong` constant plus a `constant`-space typed pointer initialised from it.
 
 ---
 

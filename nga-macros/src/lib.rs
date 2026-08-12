@@ -368,11 +368,24 @@ pub fn constants(item: TokenStream) -> TokenStream {
     let mut sets = String::new();
     for (index, field) in fields.iter().enumerate() {
         let ty: TokenStream = field.tokens.iter().cloned().collect();
-        format_string += &format!(
-            "constant {{}} {} [[function_constant({index})]];\\n",
-            field.name
-        );
-        types += &format!("<{ty} as ::nga::ConstantValue>::MSL_TYPE,");
+        let name = &field.name;
+        match parse_ty(&field.tokens, false) {
+            Ok(Ty::Ptr { mutable, pointee }) => {
+                let (Ty::Msl(t) | Ty::User(t)) = &*pointee else {
+                    unreachable!()
+                };
+                let qualifier = if mutable { "" } else { "const " };
+                format_string += &format!(
+                    "constant ulong nga_{name} [[function_constant({index})]];\\n\
+                     device {qualifier}{t}* constant {name} = (device {qualifier}{t}*)nga_{name};\\n"
+                );
+            }
+            _ => {
+                format_string +=
+                    &format!("constant {{}} {name} [[function_constant({index})]];\\n");
+                types += &format!("<{ty} as ::nga::ConstantValue>::MSL_TYPE,");
+            }
+        }
         sets += &format!(
             "::nga::set_constant(&values, {index}, self.{});",
             field.name
