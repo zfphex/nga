@@ -170,8 +170,8 @@ impl Arena {
         })
     }
 
-    pub fn reset(&self) {
-        self.head.store(0, Ordering::Relaxed);
+    pub fn reset(&mut self) {
+        *self.head.get_mut() = 0;
     }
 }
 
