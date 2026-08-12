@@ -1551,10 +1551,10 @@ pub enum Retired {
 
 pub struct Context {
     pub device: Device,
-    pub queue: M4CommandQueue,
+    pub queues: Vec<M4CommandQueue>,
     pub command_buffers: Vec<M4CommandBuffer>,
     pub tables: Vec<M4ArgumentTable>,
-    pub event: SharedEvent,
+    pub events: Vec<SharedEvent>,
     pub residency: ResidencySet,
     pub heap: GpuHeap,
     pub resources: ResourceHeap,
@@ -1571,12 +1571,19 @@ impl Context {
         arena_size: usize,
         heap_size: u64,
         resource_cap: u32,
+        queues: usize,
         threads: usize,
     ) -> Result<Self, MetalError> {
         debug_assert!(threads > 0);
-        let queue = device.new_m4_command_queue().ok_or(MetalError::new(
-            "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
-        ))?;
+        debug_assert!(queues > 0);
+        let mut queue_list = Vec::new();
+        let mut events = Vec::new();
+        for _ in 0..queues {
+            queue_list.push(device.new_m4_command_queue().ok_or(MetalError::new(
+                "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
+            ))?);
+            events.push(device.new_shared_event()?);
+        }
 
         let mut arenas = Vec::new();
         let mut allocators = Vec::new();
@@ -1603,7 +1610,9 @@ impl Context {
         }
         residency.add_allocation(&Allocation::from_heap(&heap.heap))?;
         residency.commit()?;
-        queue.add_residency_set(&residency);
+        for queue in &queue_list {
+            queue.add_residency_set(&residency);
+        }
 
         let table_desc = M4ArgumentTableDescriptor::new();
         table_desc.set_max_buffer_bind_count(2);
@@ -1616,9 +1625,9 @@ impl Context {
 
         Ok(Self {
             tables,
-            event: device.new_shared_event()?,
+            events,
             device: device.clone(),
-            queue,
+            queues: queue_list,
             command_buffers,
             residency,
             heap,
@@ -1644,11 +1653,17 @@ impl Context {
         let index = self.frame;
         self.frame += 1;
         if index >= FRAMES_IN_FLIGHT {
-            self.event
-                .wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 1000);
+            for event in &self.events {
+                event.wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 1000);
+            }
         }
 
-        let completed = self.event.signaled_value();
+        let completed = self
+            .events
+            .iter()
+            .map(|event| event.signaled_value())
+            .min()
+            .unwrap();
         self.resources.retire(completed);
         while self.retired.front().is_some_and(|&(frame, _)| frame <= completed) {
             match self.retired.pop_front().unwrap().1 {
@@ -1669,10 +1684,12 @@ impl Context {
             allocators: &self.allocators[slots.clone()],
             command_buffers: &self.command_buffers[slots.clone()],
             tables: &self.tables[slots],
-            queue: &self.queue,
-            event: &self.event,
+            queues: &self.queues,
+            events: &self.events,
+            counts: Vec::new(),
+            waits: Vec::new(),
+            signals: Vec::new(),
             value: index + 1,
-            used: 0,
         }
     }
 }
@@ -1682,21 +1699,33 @@ pub struct Frame<'a> {
     pub allocators: &'a [M4CommandAllocator],
     pub command_buffers: &'a [M4CommandBuffer],
     pub tables: &'a [M4ArgumentTable],
-    pub queue: &'a M4CommandQueue,
-    pub event: &'a SharedEvent,
+    pub queues: &'a [M4CommandQueue],
+    pub events: &'a [SharedEvent],
+    pub counts: Vec<usize>,
+    pub waits: Vec<(usize, Event, u64)>,
+    pub signals: Vec<(usize, Event, u64)>,
     pub value: u64,
-    pub used: usize,
 }
 
 impl Frame<'_> {
-    pub fn recorders(&mut self, count: usize) -> Vec<Recorder<'_>> {
-        debug_assert!(self.used == 0, "recorders already taken for this frame");
+    pub fn recorders(&mut self, counts: &[usize]) -> Vec<Recorder<'_>> {
+        debug_assert!(
+            self.counts.is_empty(),
+            "recorders already taken for this frame"
+        );
+        debug_assert!(
+            counts.len() <= self.queues.len(),
+            "{} queues addressed, Context::new was given {}",
+            counts.len(),
+            self.queues.len()
+        );
+        let count = counts.iter().sum();
         debug_assert!(
             count <= self.command_buffers.len(),
             "{count} recorders requested, Context::new was given {}",
             self.command_buffers.len()
         );
-        self.used = count;
+        self.counts = counts.to_vec();
         (0..count)
             .map(|i| {
                 self.command_buffers[i].begin_command_buffer_with_allocator(&self.allocators[i]);
@@ -1711,18 +1740,43 @@ impl Frame<'_> {
     }
 
     pub fn recorder(&mut self) -> Recorder<'_> {
-        self.recorders(1).pop().unwrap()
+        self.recorders(&[1]).pop().unwrap()
+    }
+
+    pub fn wait_event(&mut self, queue: usize, event: &SharedEvent, value: u64) {
+        debug_assert!(queue < self.queues.len());
+        self.waits.push((queue, event.as_event(), value));
+    }
+
+    pub fn signal_event(&mut self, queue: usize, event: &SharedEvent, value: u64) {
+        debug_assert!(queue < self.queues.len());
+        self.signals.push((queue, event.as_event(), value));
     }
 
     pub fn submit(self, drawable: Option<&Drawable>) {
-        if let Some(drawable) = drawable {
-            self.queue.wait_for_drawable(drawable);
-        }
-        self.queue.commit(&self.command_buffers[..self.used]);
-        self.queue.signal_event(&self.event.as_event(), self.value);
-        if let Some(drawable) = drawable {
-            self.queue.signal_drawable(drawable);
-            drawable.present();
+        let mut base = 0;
+        for (index, queue) in self.queues.iter().enumerate() {
+            let count = self.counts.get(index).copied().unwrap_or(0);
+            if index == 0 {
+                if let Some(drawable) = drawable {
+                    queue.wait_for_drawable(drawable);
+                }
+            }
+            for (_, event, value) in self.waits.iter().filter(|wait| wait.0 == index) {
+                queue.wait_for_event(event, *value);
+            }
+            queue.commit(&self.command_buffers[base..base + count]);
+            for (_, event, value) in self.signals.iter().filter(|signal| signal.0 == index) {
+                queue.signal_event(event, *value);
+            }
+            queue.signal_event(&self.events[index].as_event(), self.value);
+            if index == 0 {
+                if let Some(drawable) = drawable {
+                    queue.signal_drawable(drawable);
+                    drawable.present();
+                }
+            }
+            base += count;
         }
     }
 }
