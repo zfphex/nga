@@ -184,7 +184,7 @@ pub struct Pool<'a, T> {
     pub live: u32,
 }
 
-impl<'a, T> Pool<'a, T> {
+impl<'a, T: Copy> Pool<'a, T> {
     pub fn new(arena: &'a Arena, cap: u32) -> Option<Self> {
         debug_assert!(size_of::<T>() >= 4 && align_of::<T>() >= 4);
         let (cpu, gpu) =

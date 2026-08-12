@@ -10,6 +10,7 @@ struct Vertex {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Data {
     vertices: Gpu<'static, Vertex>,
     mvp: f32x4x4,
