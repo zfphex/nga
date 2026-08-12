@@ -8,5 +8,7 @@ f16 = []
 
 [dependencies]
 minmetal = { version = "0.1.0", path = "../../minmetal" }
-minwin = { version = "0.1.0", path = "../../minwin" }
 nga-macros = { version = "0.1.0", path = "../nga-macros" }
+
+[dev-dependencies]
+minwin = { version = "0.1.0", path = "../../minwin" }
