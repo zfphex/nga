@@ -284,33 +284,44 @@ pub struct GpuHeap {
     pub device: Device,
     pub heap: Heap,
     pub tlsf: Tlsf,
+    pub storage: StorageMode,
+    pub options: ResourceOptions,
 }
 
 impl GpuHeap {
-    pub fn new(device: &Device, size: u64) -> Result<Self, MetalError> {
+    pub fn new(device: &Device, size: u64, storage: StorageMode) -> Result<Self, MetalError> {
         let desc = HeapDescriptor::new();
         desc.set_heap_type(HeapType::Placement);
-        desc.set_storage_mode(StorageMode::Shared);
+        desc.set_storage_mode(storage);
         desc.set_hazard_tracking_mode(HazardTrackingMode::Untracked);
         desc.set_size(size as usize);
         Ok(Self {
             heap: device.new_heap(&desc)?,
             device: device.clone(),
             tlsf: Tlsf::new(size, 256),
+            storage,
+            options: ResourceOptions::new(
+                CpuCacheMode::DefaultCache,
+                storage,
+                HazardTrackingMode::Untracked,
+            ),
         })
     }
 
     pub fn alloc_buffer(&mut self, len: usize) -> Result<HeapBuffer, MetalError> {
-        let need = self
-            .device
-            .heap_buffer_size_and_align(len, SHARED_UNTRACKED);
+        assert_eq!(
+            self.storage,
+            StorageMode::Shared,
+            "alloc_buffer needs a shared heap — the CPU pointer would not be mappable"
+        );
+        let need = self.device.heap_buffer_size_and_align(len, self.options);
         let alloc = self
             .tlsf
             .alloc(need.size as u64, need.align as u64)
             .ok_or(MetalError::new("gpu heap is full"))?;
-        let buffer =
-            self.heap
-                .new_buffer_at_offset(len, SHARED_UNTRACKED, alloc.offset as usize)?;
+        let buffer = self
+            .heap
+            .new_buffer_at_offset(len, self.options, alloc.offset as usize)?;
         Ok(HeapBuffer {
             gpu: buffer.gpu_address()?,
             cpu: buffer.contents() as *mut u8,
@@ -320,8 +331,8 @@ impl GpuHeap {
     }
 
     pub fn alloc_texture(&mut self, desc: &TextureDescriptor) -> Result<HeapTexture, MetalError> {
-        desc.set_storage_mode(StorageMode::Shared);
-        desc.set_resource_options(SHARED_UNTRACKED);
+        desc.set_storage_mode(self.storage);
+        desc.set_resource_options(self.options);
         let need = self.device.heap_texture_size_and_align(desc);
         let alloc = self
             .tlsf
@@ -590,6 +601,20 @@ impl Shaders {
         self.compiler.new_compute_pipeline_state(&pipeline, None)
     }
 
+    pub fn tile(&self, desc: &TileDesc) -> Result<RenderPipelineState, MetalError> {
+        let pipeline = M4TileRenderPipelineDescriptor::new();
+        pipeline.set_label(desc.label);
+        pipeline
+            .set_tile_function_descriptor(Some(&self.function(desc.function, desc.constants)));
+        pipeline.set_raster_sample_count(desc.samples);
+        let attachments = pipeline.color_attachments();
+        for (index, format) in desc.colors.iter().enumerate() {
+            attachments.object_at(index).set_pixel_format(*format);
+        }
+        self.compiler
+            .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)
+    }
+
     pub fn raster(&self, desc: &RasterDesc) -> Result<RenderPipelineState, MetalError> {
         let pipeline = M4RenderPipelineDescriptor::new();
         pipeline.set_label(desc.label);
@@ -602,7 +627,8 @@ impl Shaders {
             true => M4IndirectCommandBufferSupportState::Enabled,
             false => M4IndirectCommandBufferSupportState::Disabled,
         });
-        pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
+        pipeline.set_rasterization_enabled(desc.raster);
+        pipeline.set_input_primitive_topology(desc.topology);
         pipeline.set_raster_sample_count(desc.samples);
         pipeline.set_alpha_to_coverage_state(match desc.alpha_to_coverage {
             true => M4AlphaToCoverageState::Enabled,
@@ -649,7 +675,7 @@ impl Shaders {
             true => M4IndirectCommandBufferSupportState::Enabled,
             false => M4IndirectCommandBufferSupportState::Disabled,
         });
-        pipeline.set_rasterization_enabled(!desc.colors.is_empty() || !desc.fragment.is_empty());
+        pipeline.set_rasterization_enabled(desc.raster);
         pipeline.set_raster_sample_count(desc.samples);
         pipeline.set_alpha_to_coverage_state(match desc.alpha_to_coverage {
             true => M4AlphaToCoverageState::Enabled,
@@ -743,6 +769,8 @@ pub struct RasterDesc<'a> {
     pub colors: &'a [ColorTarget],
     pub samples: usize,
     pub alpha_to_coverage: bool,
+    pub raster: bool,
+    pub topology: PrimitiveTopologyClass,
     pub label: &'a str,
     pub constants: Option<&'a dyn Constants>,
     pub indirect: bool,
@@ -756,6 +784,8 @@ impl<'a> RasterDesc<'a> {
             colors,
             samples: 1,
             alpha_to_coverage: false,
+            raster: true,
+            topology: PrimitiveTopologyClass::Unspecified,
             label: vertex,
             constants: None,
             indirect: false,
@@ -771,6 +801,7 @@ pub struct MeshDesc<'a> {
     pub payload: usize,
     pub samples: usize,
     pub alpha_to_coverage: bool,
+    pub raster: bool,
     pub label: &'a str,
     pub constants: Option<&'a dyn Constants>,
     pub indirect: bool,
@@ -792,9 +823,30 @@ impl<'a> MeshDesc<'a> {
             payload,
             samples: 1,
             alpha_to_coverage: false,
+            raster: true,
             label: mesh,
             constants: None,
             indirect: false,
+        }
+    }
+}
+
+pub struct TileDesc<'a> {
+    pub function: &'a str,
+    pub colors: &'a [PixelFormat],
+    pub samples: usize,
+    pub label: &'a str,
+    pub constants: Option<&'a dyn Constants>,
+}
+
+impl<'a> TileDesc<'a> {
+    pub fn new(function: &'a str, colors: &'a [PixelFormat]) -> Self {
+        Self {
+            function,
+            colors,
+            samples: 1,
+            label: function,
+            constants: None,
         }
     }
 }
@@ -807,6 +859,52 @@ pub fn depth_state(
     let desc = DepthStencilDescriptor::new();
     desc.set_depth_compare_function(compare);
     desc.set_depth_write_enabled(write);
+    device.new_depth_stencil_state(&desc)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StencilFace {
+    pub compare: CompareFunction,
+    pub fail: StencilOperation,
+    pub depth_fail: StencilOperation,
+    pub pass: StencilOperation,
+    pub read: u32,
+    pub write: u32,
+}
+
+impl StencilFace {
+    pub const KEEP: Self = Self {
+        compare: CompareFunction::Always,
+        fail: StencilOperation::Keep,
+        depth_fail: StencilOperation::Keep,
+        pass: StencilOperation::Keep,
+        read: 0xff,
+        write: 0xff,
+    };
+}
+
+pub fn stencil_state(
+    device: &Device,
+    compare: CompareFunction,
+    write: bool,
+    front: StencilFace,
+    back: StencilFace,
+) -> Result<DepthStencilState, MetalError> {
+    let desc = DepthStencilDescriptor::new();
+    desc.set_depth_compare_function(compare);
+    desc.set_depth_write_enabled(write);
+    let build = |face: StencilFace| {
+        let stencil = StencilDescriptor::new();
+        stencil.set_stencil_compare_function(face.compare);
+        stencil.set_stencil_failure_operation(face.fail);
+        stencil.set_depth_failure_operation(face.depth_fail);
+        stencil.set_depth_stencil_pass_operation(face.pass);
+        stencil.set_read_mask(face.read);
+        stencil.set_write_mask(face.write);
+        stencil
+    };
+    desc.set_front_face_stencil(&build(front));
+    desc.set_back_face_stencil(&build(back));
     device.new_depth_stencil_state(&desc)
 }
 
@@ -838,10 +936,32 @@ impl Pass {
         self
     }
 
-    pub fn depth(self, texture: &Texture, clear: Option<f64>) -> Self {
+    pub fn msaa(
+        self,
+        index: usize,
+        texture: &Texture,
+        resolve: &Texture,
+        clear: Option<ClearColor>,
+    ) -> Self {
+        let pass = self.color(index, texture, clear);
+        let attachment = pass
+            .desc
+            .color_attachments()
+            .object_at_indexed_subscript(index);
+        attachment.base().set_resolve_texture(Some(resolve));
+        attachment
+            .base()
+            .set_store_action(StoreAction::MultisampleResolve);
+        pass
+    }
+
+    pub fn depth(self, texture: &Texture, clear: Option<f64>, store: bool) -> Self {
         let attachment = self.desc.depth_attachment();
         attachment.base().set_texture(Some(texture));
-        attachment.base().set_store_action(StoreAction::DontCare);
+        attachment.base().set_store_action(match store {
+            true => StoreAction::Store,
+            false => StoreAction::DontCare,
+        });
         match clear {
             Some(depth) => {
                 attachment.base().set_load_action(LoadAction::Clear);
@@ -849,6 +969,61 @@ impl Pass {
             }
             None => attachment.base().set_load_action(LoadAction::Load),
         }
+        self
+    }
+
+    pub fn msaa_depth(
+        self,
+        texture: &Texture,
+        resolve: &Texture,
+        clear: Option<f64>,
+        filter: MultisampleDepthResolveFilter,
+    ) -> Result<Self, MetalError> {
+        let pass = self.depth(texture, clear, false);
+        let attachment = pass.desc.depth_attachment();
+        attachment.base().set_resolve_texture(Some(resolve));
+        attachment
+            .base()
+            .set_store_action(StoreAction::MultisampleResolve);
+        attachment.set_depth_resolve_filter(filter)?;
+        Ok(pass)
+    }
+
+    pub fn stencil(self, texture: &Texture, clear: Option<u32>, store: bool) -> Self {
+        let attachment = self.desc.stencil_attachment();
+        attachment.base().set_texture(Some(texture));
+        attachment.base().set_store_action(match store {
+            true => StoreAction::Store,
+            false => StoreAction::DontCare,
+        });
+        match clear {
+            Some(stencil) => {
+                attachment.base().set_load_action(LoadAction::Clear);
+                attachment.set_clear_stencil(stencil);
+            }
+            None => attachment.base().set_load_action(LoadAction::Load),
+        }
+        self
+    }
+
+    pub fn layers(self, count: usize) -> Self {
+        self.desc.set_render_target_array_length(count);
+        self
+    }
+
+    pub fn occlusion(self, buffer: &HeapBuffer, accumulate: bool) -> Self {
+        self.desc.set_visibility_result_buffer(Some(&buffer.buffer));
+        self.desc.set_visibility_result_type(match accumulate {
+            true => VisibilityResultType::Accumulate,
+            false => VisibilityResultType::Reset,
+        });
+        self
+    }
+
+    pub fn tile(self, width: usize, height: usize, imageblock_bytes: usize) -> Self {
+        self.desc.set_tile_width(width);
+        self.desc.set_tile_height(height);
+        self.desc.set_imageblock_sample_length(imageblock_bytes);
         self
     }
 }
@@ -883,6 +1058,7 @@ impl<'a> Raster<'a> {
             table,
             RenderStages::VERTEX
                 | RenderStages::FRAGMENT
+                | RenderStages::TILE
                 | RenderStages::OBJECT
                 | RenderStages::MESH,
         );
@@ -921,6 +1097,24 @@ impl<'a> Raster<'a> {
 
     pub fn scissors(&self, rects: &[ScissorRect]) {
         self.encoder.set_scissor_rects(rects);
+    }
+
+    pub fn stencil_reference(&self, value: u32) {
+        self.encoder.set_stencil_reference_value(value);
+    }
+
+    pub fn stencil_references(&self, front: u32, back: u32) {
+        self.encoder.set_stencil_reference_values(front, back);
+    }
+
+    pub fn occlusion(&self, mode: VisibilityResultMode, offset: usize) {
+        self.encoder.set_visibility_result_mode(mode, offset);
+    }
+
+    pub fn dispatch_tile<T>(&self, root: Gpu<'_, T>, width: usize, height: usize) {
+        self.table.set_address(root.0.get(), 0);
+        self.encoder
+            .dispatch_threads_per_tile(Size::new(width, height, 1));
     }
 
     pub fn depth_bias(&self, bias: f32, slope_scale: f32, clamp: f32) {
@@ -1323,7 +1517,7 @@ impl Context {
             );
         }
 
-        let mut heap = GpuHeap::new(device, heap_size)?;
+        let mut heap = GpuHeap::new(device, heap_size, StorageMode::Shared)?;
         let resources = ResourceHeap::new(&mut heap, resource_cap)?;
         let residency = device.new_residency_set(&ResidencySetDescriptor::new()?)?;
         for arena in &arenas {

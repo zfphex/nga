@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let depth_off = depth_state(&device, CompareFunction::Always, false)?;
 
     let arena = Arena::new(&device, 64 * 1024)?;
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024, StorageMode::Shared)?;
 
     let mut corners = Vec::new();
     for i in 0..8u32 {
@@ -249,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let pass = Pass::new()
                 .color(0, &texture, Some(ClearColor::new(0.04, 0.04, 0.06, 1.0)))
-                .depth(&depth.as_ref().unwrap().0.texture, Some(1.0));
+                .depth(&depth.as_ref().unwrap().0.texture, Some(1.0), false);
             let viewport = Viewport::new(
                 0.0,
                 0.0,

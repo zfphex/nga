@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compiler.new_render_pipeline_state(&pipeline_desc.as_pipeline_descriptor(), None)?;
 
     let arena = Arena::new(&device, 64 * 1024)?;
-    let mut heap = GpuHeap::new(&device, 16 * 1024 * 1024)?;
+    let mut heap = GpuHeap::new(&device, 16 * 1024 * 1024, StorageMode::Shared)?;
 
     let triangle = [
         Vertex {

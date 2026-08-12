@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let pass = Pass::new()
                 .color(0, &target, Some(ClearColor::new(0.03, 0.03, 0.05, 1.0)))
-                .depth(&depth.as_ref().unwrap().0.texture, Some(1.0));
+                .depth(&depth.as_ref().unwrap().0.texture, Some(1.0), false);
             let viewport = Viewport::new(
                 0.0,
                 0.0,

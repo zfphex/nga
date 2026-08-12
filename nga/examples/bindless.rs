@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paint_pipeline = compiler.new_compute_pipeline_state(&paint_desc, None)?;
 
     let arena = Arena::new(&device, 64 * 1024)?;
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024, StorageMode::Shared)?;
     let mut textures = ResourceHeap::new(&mut heap, 1024)?;
 
     let mut quads = Vec::new();
