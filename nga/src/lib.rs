@@ -309,7 +309,7 @@ impl GpuHeap {
     }
 
     pub fn alloc_buffer(&mut self, len: usize) -> Result<HeapBuffer, MetalError> {
-        assert_eq!(
+        debug_assert_eq!(
             self.storage,
             StorageMode::Shared,
             "alloc_buffer needs a shared heap — the CPU pointer would not be mappable"
@@ -405,7 +405,8 @@ impl ResourceHeap {
     }
 
     pub fn write(&mut self, range: HeapRange, slot: u32, resource: ResourceID) {
-        assert!(slot < range.len);
+        debug_assert!(slot < range.len);
+        debug_assert!(!self.pending.iter().any(|&(_, p)| p.block == range.block));
         unsafe {
             self.storage
                 .cpu
@@ -1051,7 +1052,7 @@ impl Timers {
         let heap = device.new_m4_counter_heap_with_descriptor(&desc)?;
         heap.invalidate_counter_range(minmetal::Range::new(0, total));
         let mut timebase = [0u32; 2];
-        assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
+        debug_assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
         Ok(Self {
             heap,
             count,
@@ -1280,7 +1281,7 @@ impl<'a> Raster<'a> {
     }
 
     pub fn timestamp(&self, timers: &Timers, after: RenderStages, index: usize) {
-        assert!(index < timers.count);
+        debug_assert!(index < timers.count);
         self.encoder.write_timestamp_with_granularity(
             timers.granularity,
             after,
@@ -1478,7 +1479,7 @@ impl<'a> Compute<'a> {
     }
 
     pub fn timestamp(&self, timers: &Timers, index: usize) {
-        assert!(index < timers.count);
+        debug_assert!(index < timers.count);
         self.encoder.write_timestamp_with_granularity(
             timers.granularity,
             &timers.heap,
@@ -1517,7 +1518,7 @@ impl<'a> Compute<'a> {
         stride: usize,
     ) -> Option<()> {
         let (width, height) = (texture.width() >> level, texture.height() >> level);
-        assert_eq!(bytes.len(), stride * height);
+        debug_assert_eq!(bytes.len(), stride * height);
         let staged = self.stage(bytes)?;
         self.encoder.copy_buffer_to_texture(
             &self.arena.buffer,
@@ -1572,7 +1573,7 @@ impl Context {
         resource_cap: u32,
         threads: usize,
     ) -> Result<Self, MetalError> {
-        assert!(threads > 0);
+        debug_assert!(threads > 0);
         let queue = device.new_m4_command_queue().ok_or(MetalError::new(
             "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
         ))?;
@@ -1689,8 +1690,8 @@ pub struct Frame<'a> {
 
 impl Frame<'_> {
     pub fn recorders(&mut self, count: usize) -> Vec<Recorder<'_>> {
-        assert!(self.used == 0, "recorders already taken for this frame");
-        assert!(
+        debug_assert!(self.used == 0, "recorders already taken for this frame");
+        debug_assert!(
             count <= self.command_buffers.len(),
             "{count} recorders requested, Context::new was given {}",
             self.command_buffers.len()
@@ -1743,7 +1744,7 @@ impl Recorder<'_> {
     }
 
     pub fn timestamp(&mut self, timers: &Timers, index: usize) {
-        assert!(index < timers.count);
+        debug_assert!(index < timers.count);
         self.command_buffer
             .write_timestamp_into_heap(&timers.heap, timers.base + index);
     }
