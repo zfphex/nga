@@ -251,6 +251,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut depth: Option<(HeapTexture, usize, usize)> = None;
     let mut time = 0.0f32;
+    let mut timers = Timers::new(&device, 4)?;
+    let mut frames = 0u64;
 
     while window.open() {
         let _pool = AutoreleasePool::new();
@@ -329,7 +331,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cull_radius = 1.1 + 0.9 * (time * 0.6).sin();
 
             let mut frame = ctx.begin_frame();
+            timers.begin(&frame);
+            frames += 1;
+            if frames % 60 == 0 {
+                eprintln!(
+                    "gpu {:.3} ms — encode {:.3} ms, draw {:.3} ms",
+                    timers.ms(0, 3),
+                    timers.ms(0, 1),
+                    timers.ms(1, 2),
+                );
+            }
+
             let mut rec = frame.recorder();
+            rec.timestamp(&timers, 0);
             let (Some(draws), Some(range)) = (
                 rec.arena.alloc_scratch::<DrawData>(OBJECTS),
                 rec.arena.alloc(ExecRange {
@@ -363,6 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 compute.pipeline(&encode);
                 compute.dispatch(encode_root.gpu, OBJECTS, GROUP);
+                compute.timestamp(&timers, 1);
             }
 
             let pass = Pass::new()
@@ -389,8 +404,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 raster.depth(&depth_write);
                 raster.pipeline(&solid);
                 raster.execute_indirect(&commands, range.gpu);
+                raster.timestamp(&timers, RenderStages::FRAGMENT, 2);
             }
 
+            rec.timestamp(&timers, 3);
             drop(rec);
 
             frame.submit(Some(&drawable));
