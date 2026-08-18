@@ -7,7 +7,8 @@ edition.workspace = true
 f16 = []
 
 [dependencies]
-minmetal = { version = "0.1.0", path = "../../minmetal" }
+# minmetal = { version = "0.1.0", path = "../../minmetal" }
+minmetal = { git = "https://github.com/zfphex/minmetal.git"}
 nga-macros = { version = "0.1.0", path = "../nga-macros" }
 
 [dev-dependencies]

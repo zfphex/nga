@@ -1,5 +1,5 @@
 [workspace]
-members = ["nga", "nga-macros"]
+members = ["nga", "nga-macros", "nga-vk"]
 resolver = "3"
 
 [workspace.package]

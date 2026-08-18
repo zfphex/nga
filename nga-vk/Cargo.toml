@@ -1,0 +1,10 @@
+[package]
+name = "nga-vk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded"] }
+
+[dev-dependencies]
+minwin = { version = "0.1.0", path = "../../minwin" }
