@@ -336,8 +336,8 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
     };
 
     let out = format!(
-        "impl ::nga::DeviceAbi for {name} {{
-             const ABI: ::nga::TypeAbi = ::nga::TypeAbi {{
+        "impl ::nga_mtl4::DeviceAbi for {name} {{
+             const ABI: ::nga_mtl4::TypeAbi = ::nga_mtl4::TypeAbi {{
                  name: \"{name}\",
                  decl: {decl:?},
                  size: ::core::mem::size_of::<{name}>(),
@@ -345,7 +345,7 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
                  fields: &[{offsets}],
              }};
          }}
-         const _: fn() = || {{ fn assert<T: ::nga::DeviceAbi>() {{}} {asserts} }};"
+         const _: fn() = || {{ fn assert<T: ::nga_mtl4::DeviceAbi>() {{}} {asserts} }};"
     );
     let prefix: TokenStream = format!("{repr} #[derive(Clone, Copy)]").parse().unwrap();
     Ok(prefix
@@ -383,22 +383,22 @@ pub fn constants(item: TokenStream) -> TokenStream {
             _ => {
                 format_string +=
                     &format!("constant {{}} {name} [[function_constant({index})]];\\n");
-                types += &format!("<{ty} as ::nga::ConstantValue>::MSL_TYPE,");
+                types += &format!("<{ty} as ::nga_mtl4::ConstantValue>::MSL_TYPE,");
             }
         }
         sets += &format!(
-            "::nga::set_constant(&values, {index}, self.{});",
+            "::nga_mtl4::set_constant(&values, {index}, self.{});",
             field.name
         );
     }
 
     format!(
-        "impl ::nga::Constants for {name} {{
+        "impl ::nga_mtl4::Constants for {name} {{
              fn msl() -> ::std::string::String {{
                  ::std::format!(\"{format_string}\", {types})
              }}
-             fn values(&self) -> ::nga::FunctionConstantValues {{
-                 let values = ::nga::FunctionConstantValues::new();
+             fn values(&self) -> ::nga_mtl4::FunctionConstantValues {{
+                 let values = ::nga_mtl4::FunctionConstantValues::new();
                  {sets}
                  values
              }}

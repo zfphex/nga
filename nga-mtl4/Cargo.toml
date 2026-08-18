@@ -1,5 +1,5 @@
 [package]
-name = "nga"
+name = "nga-mtl4"
 version.workspace = true
 edition.workspace = true
 
@@ -9,7 +9,7 @@ f16 = []
 [dependencies]
 # minmetal = { version = "0.1.0", path = "../../minmetal" }
 minmetal = { git = "https://github.com/zfphex/minmetal.git"}
-nga-macros = { version = "0.1.0", path = "../nga-macros" }
+nga-mtl4-macros = { version = "0.1.0", path = "../nga-mtl4-macros" }
 
 [dev-dependencies]
 minwin = { version = "0.1.0", path = "../../minwin" }

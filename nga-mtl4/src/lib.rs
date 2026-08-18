@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
 #![cfg_attr(feature = "f16", feature(f16))]
 
-extern crate self as nga;
+extern crate self as nga_mtl4;
 
 pub mod abi;
 pub mod msl;
@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub use abi::*;
 pub use minmetal::FunctionConstantValues;
 pub use msl::MSL_PRELUDE;
-pub use nga_macros::{Constants, gpu_struct};
+pub use nga_mtl4_macros::{Constants, gpu_struct};
 pub use tlsf::{Alloc, Tlsf};
 
 #[repr(transparent)]

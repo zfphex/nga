@@ -1,6 +1,6 @@
 use minmetal::*;
 use minwin::*;
-use nga::*;
+use nga_mtl4::*;
 
 #[gpu_struct]
 struct Instance {
@@ -11,69 +11,109 @@ struct Instance {
 }
 
 #[gpu_struct]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
-
-#[gpu_struct]
 struct SimData {
     instances: GpuMut<'static, Instance>,
     time: f32,
     count: u32,
 }
 
+#[gpu_struct(align(16))]
+struct DrawData {
+    instance: Gpu<'static, Instance>,
+    mvp: f32x4x4,
+}
+
 #[gpu_struct]
-struct BuildData {
-    instances: Gpu<'static, Instance>,
-    vertices: GpuMut<'static, Vertex>,
+struct PrepareData {
+    encode: GpuMut<'static, Dispatch>,
+    ring: GpuMut<'static, Draw>,
     count: u32,
+    group: u32,
+    segments: u32,
     pad: u32,
 }
 
 #[gpu_struct(align(16))]
-struct DrawData {
-    vertices: Gpu<'static, Vertex>,
+struct BoundaryData {
     mvp: f32x4x4,
+    radius: f32,
+    segments: u32,
 }
 
-const SHADERS: &str = include_str!("../shaders/sync.metal");
+#[gpu_struct(align(16))]
+struct EncodeData {
+    commands: Commands,
+    instances: Gpu<'static, Instance>,
+    draws: GpuMut<'static, DrawData>,
+    range: GpuMut<'static, ExecRange>,
+    mvp: f32x4x4,
+    cull_radius: f32,
+    count: u32,
+}
 
-const COUNT: usize = 1024;
+const SHADERS: &str = include_str!("../shaders/gpu_driven.metal");
+
+const COUNT: usize = 4096;
 const GROUP: usize = 64;
+const SEGMENTS: u32 = 192;
 const DEPTH_FORMAT: PixelFormat = PixelFormat::Depth32Float;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut window = create_window("nga M4 — sync", None, 900, 700, true, WindowStyle::Standard);
+    let mut window = create_window(
+        "nga M6 — gpu driven",
+        None,
+        900,
+        700,
+        true,
+        WindowStyle::Standard,
+    );
 
     let device = Device::required_system_default()?;
     eprintln!("device: {}", device.name());
 
-    let mut ctx = Context::new(&device, 64 * 1024, 64 * 1024 * 1024, 1024, 1, 1)?;
+    let mut ctx = Context::new(&device, 4 * 1024 * 1024, 64 * 1024 * 1024, 1024, 1, 1)?;
 
     let source = format!(
         "{}\n{SHADERS}",
-        msl::header!(Instance, Vertex, SimData, BuildData, DrawData)
+        msl::header!(
+            Instance,
+            SimData,
+            DrawData,
+            PrepareData,
+            BoundaryData,
+            EncodeData
+        )
     );
-    msl::dump("sync", &format!("{MSL_PRELUDE}{source}"));
+    msl::dump("gpu_driven", &format!("{MSL_PRELUDE}{source}"));
 
     let shaders = Shaders::new(&device, &source)?;
+    let prepare = shaders.compute("prepare", None)?;
     let simulate = shaders.compute("simulate", None)?;
-    let build = shaders.compute("build_vertices", None)?;
-    let draw = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
-        &[ColorTarget::new(PixelFormat::Bgra8Unorm)],
+    let encode = shaders.compute("encode", None)?;
+    let draw = shaders.raster(&RasterDesc {
+        indirect: true,
+        ..RasterDesc::new(
+            "vertex_main",
+            "fragment_main",
+            &[ColorTarget::new(PixelFormat::Bgra8Unorm)],
+        )
+    })?;
+    let boundary = shaders.raster(&RasterDesc::new(
+        "boundary_main",
+        "boundary_fragment",
+        &[ColorTarget {
+            blend: BlendMode::Fixed(Blend::ALPHA),
+            ..ColorTarget::new(PixelFormat::Bgra8Unorm)
+        }],
     ))?;
     let depth_write = depth_state(&device, CompareFunction::Less, true)?;
-    let vertices_ready = device.new_fence()?;
+
+    let commands = IndirectCommands::draws(&device, COUNT, false)?;
+    ctx.resident(&Allocation::from_indirect_command_buffer(&commands.icb))?;
 
     let instances = ctx.heap.alloc_buffer(COUNT * size_of::<Instance>())?;
-    let vertices = ctx.heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
     let instances_rw: GpuMut<'static, Instance> = GpuMut::new(instances.gpu);
     let instances_ro: Gpu<'static, Instance> = Gpu::new(instances.gpu);
-    let vertices_rw: GpuMut<'static, Vertex> = GpuMut::new(vertices.gpu);
-    let vertices_ro: Gpu<'static, Vertex> = Gpu::new(vertices.gpu);
 
     let scale = window.scale_factor();
     let (mut drawable_width, mut drawable_height) = window.scaled_size();
@@ -138,26 +178,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 [0.0, 0.0, 0.0, 1.0],
             ]);
 
+            let cull_radius = 0.75 + 0.7 * (time * 0.7).sin();
+
             let mut frame = ctx.begin_frame();
             let mut rec = frame.recorder();
-            let Some(sim_root) = rec.arena.alloc(SimData {
-                instances: instances_rw,
-                time,
-                count: COUNT as u32,
-            }) else {
+            let (Some(sim_root), Some(draws), Some(range)) = (
+                rec.arena.alloc(SimData {
+                    instances: instances_rw,
+                    time,
+                    count: COUNT as u32,
+                }),
+                rec.arena.alloc_scratch::<DrawData>(COUNT),
+                rec.arena.alloc(ExecRange {
+                    location: 0,
+                    length: 0,
+                }),
+            ) else {
                 return;
             };
-            let Some(build_root) = rec.arena.alloc(BuildData {
-                instances: instances_ro,
-                vertices: vertices_rw,
+            let (Some(encode_args), Some(ring_args), Some(boundary_root)) = (
+                rec.arena.alloc_scratch::<Dispatch>(1),
+                rec.arena.alloc_scratch::<Draw>(1),
+                rec.arena.alloc(BoundaryData {
+                    mvp,
+                    radius: cull_radius,
+                    segments: SEGMENTS,
+                }),
+            ) else {
+                return;
+            };
+            let Some(prepare_root) = rec.arena.alloc(PrepareData {
+                encode: GpuMut::new(encode_args.gpu.0.get()),
+                ring: GpuMut::new(ring_args.gpu.0.get()),
                 count: COUNT as u32,
+                group: GROUP as u32,
+                segments: SEGMENTS,
                 pad: 0,
             }) else {
                 return;
             };
-            let Some(draw_root) = rec.arena.alloc(DrawData {
-                vertices: vertices_ro,
+            let Some(encode_root) = rec.arena.alloc(EncodeData {
+                commands: commands.handle,
+                instances: instances_ro,
+                draws: GpuMut::new(draws.gpu.0.get()),
+                range: GpuMut::new(range.gpu.0.get()),
                 mvp,
+                cull_radius,
+                count: COUNT as u32,
             }) else {
                 return;
             };
@@ -166,6 +233,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(compute) = rec.compute() else {
                     return;
                 };
+                compute.pipeline(&prepare);
+                compute.dispatch(prepare_root.gpu, 1, 1);
                 compute.pipeline(&simulate);
                 compute.dispatch(sim_root.gpu, COUNT, GROUP);
                 compute.barrier(
@@ -173,14 +242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Stages::DISPATCH,
                     M4VisibilityOptions::DEVICE,
                 );
-                compute.pipeline(&build);
-                compute.dispatch(build_root.gpu, COUNT, GROUP);
-                compute.barrier(
-                    Stages::DISPATCH,
-                    Stages::DISPATCH,
-                    M4VisibilityOptions::DEVICE,
-                );
-                compute.signal_fence(&vertices_ready, Stages::DISPATCH);
+                compute.pipeline(&encode);
+                compute.dispatch_indirect(encode_root.gpu, encode_args.gpu.elements(), GROUP);
             }
 
             let pass = Pass::new()
@@ -199,10 +262,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(raster) = rec.raster(&pass, viewport) else {
                     return;
                 };
-                raster.wait_fence(&vertices_ready, Stages::VERTEX);
-                raster.pipeline(&draw);
+                raster.wait(
+                    Stages::DISPATCH,
+                    Stages::VERTEX,
+                    M4VisibilityOptions::DEVICE,
+                );
                 raster.depth(&depth_write);
-                raster.draw(draw_root.gpu, PrimitiveType::Triangle, 0, COUNT * 3);
+                raster.pipeline(&draw);
+                raster.execute_indirect(&commands, range.gpu);
+                raster.pipeline(&boundary);
+                raster.draw_indirect(
+                    boundary_root.gpu,
+                    PrimitiveType::TriangleStrip,
+                    ring_args.gpu.elements(),
+                );
             }
 
             drop(rec);

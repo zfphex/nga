@@ -1,6 +1,6 @@
 use minmetal::*;
 use minwin::*;
-use nga::*;
+use nga_mtl4::*;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

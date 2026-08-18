@@ -1,6 +1,6 @@
 use minmetal::*;
 use minwin::*;
-use nga::*;
+use nga_mtl4::*;
 use std::collections::HashMap;
 
 #[gpu_struct]
