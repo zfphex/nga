@@ -9,6 +9,7 @@ Every example runs with **zero validation errors** under `VK_LAYER_KHRONOS_valid
 | Example | Ports? | What it proves |
 | --- | --- | --- |
 | `triangle` | yes | BDA root pointer, dynamic rendering, timeline semaphore |
+| `triangle_shader_object` | yes | the same frame with no `VkPipeline` at all |
 | `raster` | yes | `GpuHeap`/TLSF, depth + blend as dynamic state, specialization constants |
 | `sync` | yes | compute→compute→raster barriers |
 | `bindless` | yes | descriptor buffers, GPU-painted storage image |
@@ -210,6 +211,57 @@ A formula that genuinely needs the previous value cannot be ported.
 
 ---
 
+## `VK_EXT_shader_object`: the closest Vulkan gets to Metal 4
+
+`examples/triangle_shader_object.rs` is `triangle` with no `VkPipeline` anywhere. It renders an
+identical frame with zero validation errors, so the diff between the two files is a clean
+measurement of what the extension costs and saves.
+
+**What it deletes.** Pipeline creation collapses to one call naming two entry points:
+
+```rust
+let shaders = ShaderObjects::raster(&device, SHADERS, "vertex_main", "fragment_main")?;
+```
+
+Gone entirely: `VkGraphicsPipelineCreateInfo` and its ten sub-structs, the colour-target format
+list, `VkPipelineRenderingCreateInfo`, the dynamic-state array, and the blend/depth/multisample
+descriptions. `RasterDesc` has nothing left to describe — the target formats a PSO must be built
+against are simply not needed, which means a shader object is genuinely reusable across passes
+with different attachment formats. A `VkPipeline` never is.
+
+That is the real prize, and it is exactly Metal 4's model: `MTL4RenderPipelineDescriptor` is
+little more than its function descriptors plus target formats, and `nga`'s `Shaders::raster`
+already reads that way.
+
+**What it costs.** All that state does not vanish; it moves to the command buffer. `bind` makes
+**20 calls** — one `vkCmdBindShadersEXT` plus 19 state setters — and none are optional. Omitting
+any one is undefined behaviour, not a default:
+
+```
+cmd_set_vertex_input            cmd_set_rasterizer_discard_enable   cmd_set_rasterization_samples
+cmd_set_primitive_topology      cmd_set_polygon_mode                cmd_set_sample_mask
+cmd_set_primitive_restart_enable cmd_set_cull_mode                  cmd_set_alpha_to_coverage_enable
+cmd_set_viewport_with_count     cmd_set_front_face                  cmd_set_logic_op_enable
+cmd_set_scissor_with_count      cmd_set_depth_bias_enable           cmd_set_color_blend_enable
+                                cmd_set_depth_test_enable           cmd_set_color_write_mask
+                                cmd_set_depth_write_enable
+                                cmd_set_stencil_test_enable
+```
+
+It also needs four more device features on top of `shaderObject` — the `extendedDynamicState3`
+bits for polygon mode, rasterization samples, sample mask, alpha-to-coverage and logic-op — since
+those setters have no pipeline fallback once there is no pipeline.
+
+**Verdict.** Creation-side, this is a clear win and the better match for the design: no PSO
+permutations, no format coupling, no descriptor structs. Record-side it is worse than the
+dynamic-state pipeline used everywhere else in `nga-vk`, which sets 10 states rather than 19
+because the pipeline still carries the rest. For a renderer that already treats depth and blend
+as state objects, shader objects mostly trade a build-time cost for a per-draw one. Worth it when
+pipeline permutations are the problem; not worth it here, which is why the other six examples
+keep their pipelines.
+
+---
+
 ## Not portable on this hardware
 
 - **`meshlets`** — no `VK_EXT_mesh_shader` on Pascal (Turing+ only). The mapping is otherwise
@@ -231,7 +283,7 @@ A formula that genuinely needs the previous value cannot be ported.
 | No persistent binding objects | yes | yes (descriptor buffers are plain memory) |
 | Stage-only barriers | yes | yes for buffers, **no for images** |
 | Dynamic depth/blend state | yes | yes |
-| Minimal PSO state | yes | yes |
+| Minimal PSO state | yes | yes (and `VK_EXT_shader_object` removes the PSO entirely) |
 | CPU writes directly to GPU memory | yes (UMA) | **partly** (214 MiB BAR; no working host image copy) |
 | GPU-side command encoding | yes | **no** |
 | Timeline semaphores | yes | yes |

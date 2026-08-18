@@ -135,6 +135,8 @@ pub struct Device {
     pub swapchain_ext: ash::khr::swapchain::Device,
     pub descriptor_buffer_ext: ash::ext::descriptor_buffer::Device,
     pub host_image_copy_ext: ash::ext::host_image_copy::Device,
+    pub shader_object_ext: ash::ext::shader_object::Device,
+    pub dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device,
     pub descriptor_sizes: DescriptorSizes,
     /// Sampled images, storage images, samplers. Fixed by `SLANG_PRELUDE`, created once, and
     /// shared by every pipeline layout so pipelines stay interchangeable under one binding
@@ -243,6 +245,7 @@ impl Device {
             ash::ext::descriptor_buffer::NAME.as_ptr(),
             ash::ext::host_image_copy::NAME.as_ptr(),
             ash::ext::extended_dynamic_state3::NAME.as_ptr(),
+            ash::ext::shader_object::NAME.as_ptr(),
         ];
 
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
@@ -267,7 +270,14 @@ impl Device {
         let mut dynamic_state3 = vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default()
             .extended_dynamic_state3_color_blend_enable(true)
             .extended_dynamic_state3_color_blend_equation(true)
-            .extended_dynamic_state3_color_write_mask(true);
+            .extended_dynamic_state3_color_write_mask(true)
+            .extended_dynamic_state3_polygon_mode(true)
+            .extended_dynamic_state3_rasterization_samples(true)
+            .extended_dynamic_state3_sample_mask(true)
+            .extended_dynamic_state3_alpha_to_coverage_enable(true)
+            .extended_dynamic_state3_logic_op_enable(true);
+        let mut shader_object =
+            vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .shader_int64(true)
             .multi_draw_indirect(true)
@@ -291,7 +301,8 @@ impl Device {
                     .push_next(&mut features13)
                     .push_next(&mut descriptor_buffer)
                     .push_next(&mut host_image_copy)
-                    .push_next(&mut dynamic_state3),
+                    .push_next(&mut dynamic_state3)
+                    .push_next(&mut shader_object),
                 None,
             )?
         };
@@ -324,6 +335,8 @@ impl Device {
                 sampler: descriptor_props.sampler_descriptor_size,
                 offset_alignment: descriptor_props.descriptor_buffer_offset_alignment,
             },
+            shader_object_ext: ash::ext::shader_object::Device::new(&instance, &device),
+            dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device::new(&instance, &device),
             swapchain_ext: ash::khr::swapchain::Device::new(&instance, &device),
             descriptor_buffer_ext: ash::ext::descriptor_buffer::Device::new(&instance, &device),
             host_image_copy_ext: ash::ext::host_image_copy::Device::new(&instance, &device),
@@ -642,8 +655,9 @@ impl TextureDesc {
 /// Two Vulkan-only concerns that `nga` never meets: every allocation is aligned to
 /// `bufferImageGranularity` so a buffer and an image can never share a granularity page, and
 /// the memory is `DEVICE_LOCAL` without `HOST_VISIBLE`, because the host-visible device-local
-/// heap on this GPU is only 214 MiB. Buffer contents therefore arrive by staged copy and
-/// texture contents by `VK_EXT_host_image_copy`.
+/// heap on this GPU is only 214 MiB. Both buffer and texture contents therefore arrive by
+/// staged copy — `VK_EXT_host_image_copy` would have spared textures that, but it is unusable
+/// on this driver (see `upload` and `examples/probe.rs`).
 pub struct GpuHeap {
     pub memory: vk::DeviceMemory,
     pub tlsf: Tlsf,
@@ -652,7 +666,6 @@ pub struct GpuHeap {
     pub staging: Arena,
     pub pool: vk::CommandPool,
     pub queue: vk::Queue,
-    pub host_image_copy: ash::ext::host_image_copy::Device,
 }
 
 impl GpuHeap {
@@ -712,7 +725,6 @@ impl GpuHeap {
             staging: Arena::new(device, 8 * 1024 * 1024)?,
             pool,
             queue: device.queue(),
-            host_image_copy: device.host_image_copy_ext.clone(),
         })
     }
 
@@ -1528,6 +1540,155 @@ impl<'a> RasterDesc<'a> {
     }
 }
 
+/// `VK_EXT_shader_object` with no `VkPipeline` anywhere — the closest Vulkan gets to the post's
+/// "shader IR in, drawable thing out" ideal, and to Metal 4's model where a pipeline is little
+/// more than its functions plus target formats.
+///
+/// The trade is visible in `bind`: everything a `VkGraphicsPipelineCreateInfo` used to bake in
+/// must now be set on the command buffer, every time. Creation gets dramatically simpler;
+/// recording gets substantially noisier.
+pub struct ShaderObjects {
+    pub shaders: [vk::ShaderEXT; 2],
+    pub layout: vk::PipelineLayout,
+    pub topology: vk::PrimitiveTopology,
+    pub device: ash::Device,
+    pub ext: ash::ext::shader_object::Device,
+    pub dynamic3: ash::ext::extended_dynamic_state3::Device,
+}
+
+impl ShaderObjects {
+    pub fn raster(
+        device: &Device,
+        spirv: &[u8],
+        vertex: &str,
+        fragment: &str,
+    ) -> Result<Self, VkError> {
+        let vertex = std::ffi::CString::new(vertex).unwrap();
+        let fragment = std::ffi::CString::new(fragment).unwrap();
+        let ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::ALL)
+            .size(PUSH_SIZE)];
+
+        // Shader objects take the set layouts and push ranges directly rather than a
+        // VkPipelineLayout — but `vkCmdPushConstants` still needs one, so it is kept anyway.
+        let infos = [
+            vk::ShaderCreateInfoEXT::default()
+                .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .next_stage(vk::ShaderStageFlags::FRAGMENT)
+                .code_type(vk::ShaderCodeTypeEXT::SPIRV)
+                .code(spirv)
+                .name(&vertex)
+                .set_layouts(&device.set_layouts)
+                .push_constant_ranges(&ranges),
+            vk::ShaderCreateInfoEXT::default()
+                .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .code_type(vk::ShaderCodeTypeEXT::SPIRV)
+                .code(spirv)
+                .name(&fragment)
+                .set_layouts(&device.set_layouts)
+                .push_constant_ranges(&ranges),
+        ];
+        let shaders = unsafe { device.shader_object_ext.create_shaders(&infos, None) }
+            .map_err(|(_, result)| VkError::from(result))?;
+
+        let layout = unsafe {
+            device.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&device.set_layouts)
+                    .push_constant_ranges(&ranges),
+                None,
+            )?
+        };
+
+        Ok(Self {
+            shaders: [shaders[0], shaders[1]],
+            layout,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            device: device.device.clone(),
+            ext: device.shader_object_ext.clone(),
+            dynamic3: device.dynamic_state3_ext.clone(),
+        })
+    }
+
+    /// Binds the two stages and then supplies, by hand, every piece of state a graphics
+    /// pipeline would have carried. Nothing here is optional: omitting any one of these is
+    /// undefined behaviour rather than a default.
+    pub fn bind(&self, command_buffer: vk::CommandBuffer, width: u32, height: u32) {
+        let stages = [
+            vk::ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::FRAGMENT,
+        ];
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: height as f32,
+            width: width as f32,
+            height: -(height as f32),
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D::default().extent(vk::Extent2D { width, height });
+
+        unsafe {
+            self.ext
+                .cmd_bind_shaders(command_buffer, &stages, &self.shaders);
+
+            // Vertex input: nothing, because vertices are pulled through a device pointer.
+            self.ext.cmd_set_vertex_input(command_buffer, &[], &[]);
+            self.ext
+                .cmd_set_primitive_topology(command_buffer, self.topology);
+            self.ext
+                .cmd_set_primitive_restart_enable(command_buffer, false);
+
+            self.ext
+                .cmd_set_viewport_with_count(command_buffer, &[viewport]);
+            self.ext
+                .cmd_set_scissor_with_count(command_buffer, &[scissor]);
+
+            self.ext
+                .cmd_set_rasterizer_discard_enable(command_buffer, false);
+            self.dynamic3
+                .cmd_set_polygon_mode(command_buffer, vk::PolygonMode::FILL);
+            self.ext
+                .cmd_set_cull_mode(command_buffer, vk::CullModeFlags::NONE);
+            self.ext
+                .cmd_set_front_face(command_buffer, vk::FrontFace::COUNTER_CLOCKWISE);
+            self.ext.cmd_set_depth_bias_enable(command_buffer, false);
+
+            self.ext.cmd_set_depth_test_enable(command_buffer, false);
+            self.ext.cmd_set_depth_write_enable(command_buffer, false);
+            self.ext.cmd_set_stencil_test_enable(command_buffer, false);
+
+            self.dynamic3
+                .cmd_set_rasterization_samples(command_buffer, vk::SampleCountFlags::TYPE_1);
+            self.dynamic3
+                .cmd_set_sample_mask(command_buffer, vk::SampleCountFlags::TYPE_1, &[!0]);
+            self.dynamic3
+                .cmd_set_alpha_to_coverage_enable(command_buffer, false);
+            self.dynamic3.cmd_set_logic_op_enable(command_buffer, false);
+            self.dynamic3
+                .cmd_set_color_blend_enable(command_buffer, 0, &[0]);
+            self.dynamic3.cmd_set_color_write_mask(
+                command_buffer,
+                0,
+                &[vk::ColorComponentFlags::RGBA],
+            );
+        }
+    }
+}
+
+impl Drop for ShaderObjects {
+    fn drop(&mut self) {
+        unsafe {
+            for &shader in &self.shaders {
+                self.ext.destroy_shader(shader, None);
+            }
+            self.device.destroy_pipeline_layout(self.layout, None);
+        }
+    }
+}
+
 /// One SPIR-V module holds every entry point, the way one `MTLLibrary` holds every function,
 /// so pipelines name their stages by string exactly as they do under Metal.
 pub struct Shaders {
@@ -1956,6 +2117,10 @@ impl<'a> Raster<'a> {
         heap.bind(self.command_buffer, self.layout, true);
     }
 
+    pub fn shaders(&self, shaders: &ShaderObjects, width: u32, height: u32) {
+        shaders.bind(self.command_buffer, width, height);
+    }
+
     pub fn depth(&self, state: &DepthState) {
         unsafe {
             self.device
@@ -2080,9 +2245,7 @@ impl Stages {
     pub const VERTEX: Self = Self(vk::PipelineStageFlags2::VERTEX_SHADER);
     pub const FRAGMENT: Self = Self(vk::PipelineStageFlags2::FRAGMENT_SHADER);
     pub const BLIT: Self = Self(vk::PipelineStageFlags2::ALL_TRANSFER);
-    pub const COLOR_OUT: Self = Self(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
     pub const INDIRECT: Self = Self(vk::PipelineStageFlags2::DRAW_INDIRECT);
-    pub const ALL: Self = Self(vk::PipelineStageFlags2::ALL_COMMANDS);
 }
 
 /// Metal's `MTL4VisibilityOptions`. Vulkan expresses the same thing as access masks, which is
@@ -2272,6 +2435,17 @@ impl Context {
         arena_size: usize,
         threads: usize,
     ) -> Result<Self, VkError> {
+        Self::with_layout(device, shaders.layout, arena_size, threads)
+    }
+
+    /// Every pipeline layout in `nga-vk` is the same shape, so a `Context` only needs one —
+    /// which is what lets the shader-object path reuse all of this unchanged.
+    pub fn with_layout(
+        device: &Device,
+        layout: vk::PipelineLayout,
+        arena_size: usize,
+        threads: usize,
+    ) -> Result<Self, VkError> {
         debug_assert!(threads > 0);
         let slots = FRAMES_IN_FLIGHT as usize * threads;
         let mut pools = Vec::new();
@@ -2313,7 +2487,7 @@ impl Context {
             command_buffers,
             arenas,
             timeline,
-            layout: shaders.layout,
+            layout,
             threads,
             frame: 0,
         })
