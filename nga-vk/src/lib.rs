@@ -137,6 +137,9 @@ pub struct Device {
     pub host_image_copy_ext: ash::ext::host_image_copy::Device,
     pub shader_object_ext: ash::ext::shader_object::Device,
     pub dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device,
+    pub maintenance6_ext: ash::khr::maintenance6::Device,
+    pub commands: Commands,
+    pub max_multi_draw: u32,
     pub descriptor_sizes: DescriptorSizes,
     /// Sampled images, storage images, samplers. Fixed by `SLANG_PRELUDE`, created once, and
     /// shared by every pipeline layout so pipelines stay interchangeable under one binding
@@ -144,6 +147,16 @@ pub struct Device {
     pub set_layouts: [vk::DescriptorSetLayout; 3],
     pub bindless_cap: u32,
     pub debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
+}
+
+/// The two command-level extensions a `Raster` reaches for, cloned out of `Device` so that
+/// recording does not need to borrow it. Both exist to spend fewer driver calls per draw:
+/// `VK_EXT_multi_draw` collapses a run of draws into one, and `VK_KHR_maintenance5` binds an
+/// index buffer with an explicit size instead of an implicit whole-buffer one.
+#[derive(Clone)]
+pub struct Commands {
+    pub maintenance5: ash::khr::maintenance5::Device,
+    pub multi_draw: ash::ext::multi_draw::Device,
 }
 
 /// `VK_EXT_descriptor_buffer` descriptors are driver-sized, unlike Metal's fixed 8-byte
@@ -249,6 +262,10 @@ impl Device {
             ash::ext::memory_budget::NAME.as_ptr(),
             ash::ext::extended_dynamic_state3::NAME.as_ptr(),
             ash::ext::shader_object::NAME.as_ptr(),
+            ash::ext::multi_draw::NAME.as_ptr(),
+            ash::ext::dynamic_rendering_unused_attachments::NAME.as_ptr(),
+            ash::khr::maintenance5::NAME.as_ptr(),
+            ash::khr::maintenance6::NAME.as_ptr(),
         ];
 
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
@@ -281,6 +298,14 @@ impl Device {
             .extended_dynamic_state3_logic_op_enable(true);
         let mut shader_object =
             vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
+        let mut multi_draw = vk::PhysicalDeviceMultiDrawFeaturesEXT::default().multi_draw(true);
+        let mut unused_attachments =
+            vk::PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT::default()
+                .dynamic_rendering_unused_attachments(true);
+        let mut maintenance5 =
+            vk::PhysicalDeviceMaintenance5FeaturesKHR::default().maintenance5(true);
+        let mut maintenance6 =
+            vk::PhysicalDeviceMaintenance6FeaturesKHR::default().maintenance6(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .shader_int64(true)
             .multi_draw_indirect(true)
@@ -305,13 +330,20 @@ impl Device {
                     .push_next(&mut descriptor_buffer)
                     .push_next(&mut host_image_copy)
                     .push_next(&mut dynamic_state3)
-                    .push_next(&mut shader_object),
+                    .push_next(&mut shader_object)
+                    .push_next(&mut multi_draw)
+                    .push_next(&mut unused_attachments)
+                    .push_next(&mut maintenance5)
+                    .push_next(&mut maintenance6),
                 None,
             )?
         };
 
         let mut descriptor_props = vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
-        let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut descriptor_props);
+        let mut multi_draw_props = vk::PhysicalDeviceMultiDrawPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut descriptor_props)
+            .push_next(&mut multi_draw_props);
         unsafe { instance.get_physical_device_properties2(physical, &mut props) };
         let name = unsafe { CStr::from_ptr(props.properties.device_name.as_ptr()) }
             .to_string_lossy()
@@ -340,6 +372,12 @@ impl Device {
             },
             shader_object_ext: ash::ext::shader_object::Device::new(&instance, &device),
             dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device::new(&instance, &device),
+            maintenance6_ext: ash::khr::maintenance6::Device::new(&instance, &device),
+            commands: Commands {
+                maintenance5: ash::khr::maintenance5::Device::new(&instance, &device),
+                multi_draw: ash::ext::multi_draw::Device::new(&instance, &device),
+            },
+            max_multi_draw: multi_draw_props.max_multi_draw_count,
             swapchain_ext: ash::khr::swapchain::Device::new(&instance, &device),
             descriptor_buffer_ext: ash::ext::descriptor_buffer::Device::new(&instance, &device),
             host_image_copy_ext: ash::ext::host_image_copy::Device::new(&instance, &device),
@@ -2324,6 +2362,7 @@ impl IndexFormat for u32 {
 
 pub struct Raster<'a> {
     pub device: &'a ash::Device,
+    pub commands: &'a Commands,
     pub command_buffer: vk::CommandBuffer,
     pub layout: vk::PipelineLayout,
     pub push: Cell<Push>,
@@ -2332,6 +2371,7 @@ pub struct Raster<'a> {
 impl<'a> Raster<'a> {
     pub fn new(
         device: &'a ash::Device,
+        commands: &'a Commands,
         command_buffer: vk::CommandBuffer,
         layout: vk::PipelineLayout,
         pass: &Pass,
@@ -2453,6 +2493,7 @@ impl<'a> Raster<'a> {
 
         let raster = Self {
             device,
+            commands,
             command_buffer,
             layout,
             push: Cell::new(Push::default()),
@@ -2540,14 +2581,64 @@ impl<'a> Raster<'a> {
         indices: &HeapBuffer,
         count: u32,
     ) {
-        unsafe {
-            self.device
-                .cmd_bind_index_buffer(self.command_buffer, indices.buffer, 0, I::VK_TYPE);
-        }
+        self.bind_indices::<I>(indices);
         self.bind(root);
         unsafe {
             self.device
                 .cmd_draw_indexed(self.command_buffer, count, 1, 0, 0, 0)
+        };
+    }
+
+    /// `vkCmdBindIndexBuffer2` takes the range explicitly, so an out-of-bounds index faults
+    /// against the allocation rather than against whatever the heap suballocated after it.
+    fn bind_indices<I: IndexFormat>(&self, indices: &HeapBuffer) {
+        unsafe {
+            self.commands.maintenance5.cmd_bind_index_buffer2(
+                self.command_buffer,
+                indices.buffer,
+                0,
+                indices.len as u64,
+                I::VK_TYPE,
+            )
+        };
+    }
+
+    /// One driver call for a run of draws that share every piece of state, including the root
+    /// pointer. This is the CPU-side counterpart to `draw_indirect_count`: the ranges are known
+    /// at record time rather than computed on the GPU, but the per-draw cost is a `[u32; 2]`
+    /// write instead of a command-buffer round trip. `Device::max_multi_draw` bounds `draws`.
+    pub fn draw_multi<T>(&self, root: Gpu<'_, T>, draws: &[vk::MultiDrawInfoEXT]) {
+        self.bind(root);
+        unsafe {
+            (self.commands.multi_draw.fp().cmd_draw_multi_ext)(
+                self.command_buffer,
+                draws.len() as u32,
+                draws.as_ptr(),
+                1,
+                0,
+                size_of::<vk::MultiDrawInfoEXT>() as u32,
+            )
+        };
+    }
+
+    pub fn draw_multi_indexed<T, I: IndexFormat>(
+        &self,
+        root: Gpu<'_, T>,
+        indices: &HeapBuffer,
+        draws: &[vk::MultiDrawIndexedInfoEXT],
+    ) {
+        self.bind_indices::<I>(indices);
+        self.bind(root);
+        unsafe {
+            (self.commands.multi_draw.fp().cmd_draw_multi_indexed_ext)(
+                self.command_buffer,
+                draws.len() as u32,
+                draws.as_ptr(),
+                1,
+                0,
+                size_of::<vk::MultiDrawIndexedInfoEXT>() as u32,
+                std::ptr::null(),
+            )
         };
     }
 
@@ -2790,6 +2881,7 @@ pub const FRAMES_IN_FLIGHT: u64 = 2;
 
 pub struct Context {
     pub device: ash::Device,
+    pub commands: Commands,
     pub queue: vk::Queue,
     pub pools: Vec<vk::CommandPool>,
     pub command_buffers: Vec<vk::CommandBuffer>,
@@ -2889,6 +2981,7 @@ impl Context {
 
         Ok(Self {
             device: device.device.clone(),
+            commands: device.commands.clone(),
             queue: device.queue(),
             pools,
             command_buffers,
@@ -2928,6 +3021,7 @@ impl Context {
 
         Ok(Frame {
             device: &self.device,
+            commands: &self.commands,
             queue: self.queue,
             arenas: &self.arenas[slots.clone()],
             command_buffers: &self.command_buffers[slots],
@@ -2954,6 +3048,7 @@ impl Drop for Context {
 
 pub struct Frame<'a> {
     pub device: &'a ash::Device,
+    pub commands: &'a Commands,
     pub queue: vk::Queue,
     pub arenas: &'a [Arena],
     pub command_buffers: &'a [vk::CommandBuffer],
@@ -2993,6 +3088,7 @@ impl Frame<'_> {
                 };
                 Recorder {
                     device: self.device,
+                    commands: self.commands,
                     arena: &self.arenas[index],
                     command_buffer,
                     layout: self.layout,
@@ -3018,6 +3114,7 @@ impl Frame<'_> {
         };
         Recorder {
             device: self.device,
+            commands: self.commands,
             arena: &self.arenas[index],
             command_buffer,
             layout: self.layout,
@@ -3111,6 +3208,7 @@ impl Frame<'_> {
 
 pub struct Recorder<'a> {
     pub device: &'a ash::Device,
+    pub commands: &'a Commands,
     pub arena: &'a Arena,
     pub command_buffer: vk::CommandBuffer,
     pub layout: vk::PipelineLayout,
@@ -3125,6 +3223,7 @@ impl Recorder<'_> {
     pub fn raster(&mut self, pass: &Pass, width: u32, height: u32) -> Raster<'_> {
         Raster::new(
             self.device,
+            self.commands,
             self.command_buffer,
             self.layout,
             pass,
