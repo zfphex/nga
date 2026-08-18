@@ -1,4 +1,5 @@
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use nga_vk::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -6,7 +7,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name);
 
     let combos: [(&str, vk::ImageUsageFlags); 4] = [
-        ("SAMPLED|TRANSFER_DST", vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST),
+        (
+            "SAMPLED|TRANSFER_DST",
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        ),
         (
             "SAMPLED|TRANSFER_DST|STORAGE",
             vk::ImageUsageFlags::SAMPLED
@@ -107,7 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "family {index}: {:2} queues  {:34} {}",
             family.queue_count,
             flags.join("|"),
-            if dedicated { "<- dedicated copy engine" } else { "" },
+            if dedicated {
+                "<- dedicated copy engine"
+            } else {
+                ""
+            },
         );
     }
 
@@ -165,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!();
     let mut host = vk::FormatProperties3::default();
-    let mut props = vk::FormatProperties2::default().push_next(&mut host);
+    let mut props = vk::FormatProperties2::default().push(&mut host);
     unsafe {
         device.instance.get_physical_device_format_properties2(
             device.physical,

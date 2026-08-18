@@ -31,7 +31,10 @@ fn main() {
             .arg("-fvk-use-scalar-layout")
             .arg("-o")
             .arg(&spirv)
-            .args(["-reflection-json", out.join(format!("{stem}.json")).to_str().unwrap()])
+            .args([
+                "-reflection-json",
+                out.join(format!("{stem}.json")).to_str().unwrap(),
+            ])
             .output()
             .unwrap_or_else(|e| panic!("could not run {}: {e}", slangc.display()));
 

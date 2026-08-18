@@ -72,7 +72,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "gpu_driven",
         &format!(
             "{SLANG_PRELUDE}{}",
-            slang::header!(Instance, DrawArgs, SimData, EncodeData, DrawData, BoundaryData)
+            slang::header!(
+                Instance,
+                DrawArgs,
+                SimData,
+                EncodeData,
+                DrawData,
+                BoundaryData
+            )
         ),
     );
 

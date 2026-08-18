@@ -48,7 +48,9 @@ pub fn header(types: &[TypeAbi]) -> String {
 
 pub fn declare(ty: &TypeAbi) -> String {
     let body = ty.decl.trim_start_matches('\n');
-    let open = body.find('{').expect("a gpu_struct decl always has a brace");
+    let open = body
+        .find('{')
+        .expect("a gpu_struct decl always has a brace");
     let mut out = String::from(&body[..=open]);
     out.push('\n');
 

@@ -1,4 +1,4 @@
-# Port `nga` (Metal 4) to `nga-vk` (Vulkan 1.3 + Slang)
+# Port `nga` (Metal 4) to `nga-vk` (Vulkan 1.4 + Slang)
 
 ## Context
 

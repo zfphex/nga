@@ -1,6 +1,6 @@
 # nga-vk — where Vulkan follows Metal, and where it doesn't
 
-Findings from porting `nga` (Metal 4 + MSL) to Vulkan 1.3 + Slang. This file is the deliverable;
+Findings from porting `nga` (Metal 4 + MSL) to Vulkan 1.4 + Slang. This file is the deliverable;
 the code exists to produce it.
 
 Hardware: NVIDIA GTX 1070 Ti (Pascal), driver 582.66, Vulkan 1.4.312. Vulkan SDK 1.4.357.
@@ -335,7 +335,7 @@ keep their pipelines.
 
 ## Verdict against the post's design principles
 
-| Principle | Metal 4 | Vulkan 1.3 + Slang |
+| Principle | Metal 4 | Vulkan 1.4 + Slang |
 | --- | --- | --- |
 | Single 64-bit root pointer | yes | **yes, simpler** (push constant, no table object) |
 | Native pointers in shaders | yes | **yes, via Slang** |

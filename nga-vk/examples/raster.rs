@@ -35,7 +35,14 @@ fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut window = create_window("nga-vk M3 — raster", None, 900, 700, true, WindowStyle::Standard);
+    let mut window = create_window(
+        "nga-vk M3 — raster",
+        None,
+        900,
+        700,
+        true,
+        WindowStyle::Standard,
+    );
 
     let device = Device::new(cfg!(debug_assertions))?;
     eprintln!("device: {}", device.name);

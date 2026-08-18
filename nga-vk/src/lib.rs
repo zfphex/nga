@@ -5,6 +5,7 @@ pub mod slang;
 pub mod tlsf;
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use std::cell::Cell;
 use std::ffi::{CStr, c_char};
 use std::marker::PhantomData;
@@ -134,10 +135,8 @@ pub struct Device {
     pub win32_surface_ext: ash::khr::win32_surface::Instance,
     pub swapchain_ext: ash::khr::swapchain::Device,
     pub descriptor_buffer_ext: ash::ext::descriptor_buffer::Device,
-    pub host_image_copy_ext: ash::ext::host_image_copy::Device,
     pub shader_object_ext: ash::ext::shader_object::Device,
     pub dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device,
-    pub maintenance6_ext: ash::khr::maintenance6::Device,
     pub commands: Commands,
     pub max_multi_draw: u32,
     pub descriptor_sizes: DescriptorSizes,
@@ -149,13 +148,11 @@ pub struct Device {
     pub debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
-/// The two command-level extensions a `Raster` reaches for, cloned out of `Device` so that
-/// recording does not need to borrow it. Both exist to spend fewer driver calls per draw:
-/// `VK_EXT_multi_draw` collapses a run of draws into one, and `VK_KHR_maintenance5` binds an
-/// index buffer with an explicit size instead of an implicit whole-buffer one.
+/// The command-level extension a `Raster` reaches for, cloned out of `Device` so that recording
+/// does not need to borrow it. `VK_EXT_multi_draw` collapses a run of draws into one, spending
+/// fewer driver calls per draw.
 #[derive(Clone)]
 pub struct Commands {
-    pub maintenance5: ash::khr::maintenance5::Device,
     pub multi_draw: ash::ext::multi_draw::Device,
 }
 
@@ -195,6 +192,16 @@ impl Device {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| VkError::new(format!("could not load vulkan-1.dll: {e}")))?;
 
+        let loader_version =
+            unsafe { entry.try_enumerate_instance_version()? }.unwrap_or(vk::API_VERSION_1_0);
+        if loader_version < vk::API_VERSION_1_4 {
+            return Err(VkError::new(format!(
+                "loader supports only vulkan {}.{}, 1.4 required",
+                vk::api_version_major(loader_version),
+                vk::api_version_minor(loader_version)
+            )));
+        }
+
         let mut layers: Vec<*const c_char> = Vec::new();
         let mut extensions = vec![
             ash::khr::surface::NAME.as_ptr(),
@@ -207,7 +214,7 @@ impl Device {
 
         let app = vk::ApplicationInfo::default()
             .application_name(c"nga-vk")
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(vk::API_VERSION_1_4);
         let instance = unsafe {
             entry.create_instance(
                 &vk::InstanceCreateInfo::default()
@@ -219,7 +226,7 @@ impl Device {
         };
 
         let debug = validation.then(|| {
-            let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            let loader = ash::ext::debug_utils::Instance::load(&entry, &instance);
             let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(
                     vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
@@ -235,13 +242,18 @@ impl Device {
             (loader, messenger)
         });
 
-        let surface_ext = ash::khr::surface::Instance::new(&entry, &instance);
-        let win32_surface_ext = ash::khr::win32_surface::Instance::new(&entry, &instance);
+        let surface_ext = ash::khr::surface::Instance::load(&entry, &instance);
+        let win32_surface_ext = ash::khr::win32_surface::Instance::load(&entry, &instance);
 
         let devices = unsafe { instance.enumerate_physical_devices()? };
         let (physical, queue_family) = devices
             .iter()
             .find_map(|&physical| {
+                if unsafe { instance.get_physical_device_properties(physical) }.api_version
+                    < vk::API_VERSION_1_4
+                {
+                    return None;
+                }
                 let families =
                     unsafe { instance.get_physical_device_queue_family_properties(physical) };
                 let family = families.iter().position(|family| {
@@ -253,21 +265,24 @@ impl Device {
                 })?;
                 Some((physical, family as u32))
             })
-            .ok_or(VkError::new("no device with a graphics+compute queue"))?;
+            .ok_or(VkError::new(
+                "no vulkan 1.4 device with a graphics+compute queue",
+            ))?;
 
         let device_extensions = [
             ash::khr::swapchain::NAME.as_ptr(),
             ash::ext::descriptor_buffer::NAME.as_ptr(),
-            ash::ext::host_image_copy::NAME.as_ptr(),
             ash::ext::memory_budget::NAME.as_ptr(),
             ash::ext::extended_dynamic_state3::NAME.as_ptr(),
             ash::ext::shader_object::NAME.as_ptr(),
             ash::ext::multi_draw::NAME.as_ptr(),
             ash::ext::dynamic_rendering_unused_attachments::NAME.as_ptr(),
-            ash::khr::maintenance5::NAME.as_ptr(),
-            ash::khr::maintenance6::NAME.as_ptr(),
         ];
 
+        let mut features14 = vk::PhysicalDeviceVulkan14Features::default()
+            .maintenance5(true)
+            .maintenance6(true)
+            .host_image_copy(true);
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -285,8 +300,6 @@ impl Device {
             vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
         let mut descriptor_buffer =
             vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default().descriptor_buffer(true);
-        let mut host_image_copy =
-            vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
         let mut dynamic_state3 = vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default()
             .extended_dynamic_state3_color_blend_enable(true)
             .extended_dynamic_state3_color_blend_equation(true)
@@ -302,10 +315,6 @@ impl Device {
         let mut unused_attachments =
             vk::PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT::default()
                 .dynamic_rendering_unused_attachments(true);
-        let mut maintenance5 =
-            vk::PhysicalDeviceMaintenance5FeaturesKHR::default().maintenance5(true);
-        let mut maintenance6 =
-            vk::PhysicalDeviceMaintenance6FeaturesKHR::default().maintenance6(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .shader_int64(true)
             .multi_draw_indirect(true)
@@ -324,17 +333,15 @@ impl Device {
                     .queue_create_infos(&queue_info)
                     .enabled_extension_names(&device_extensions)
                     .enabled_features(&features)
-                    .push_next(&mut features11)
-                    .push_next(&mut features12)
-                    .push_next(&mut features13)
-                    .push_next(&mut descriptor_buffer)
-                    .push_next(&mut host_image_copy)
-                    .push_next(&mut dynamic_state3)
-                    .push_next(&mut shader_object)
-                    .push_next(&mut multi_draw)
-                    .push_next(&mut unused_attachments)
-                    .push_next(&mut maintenance5)
-                    .push_next(&mut maintenance6),
+                    .push(&mut features11)
+                    .push(&mut features12)
+                    .push(&mut features13)
+                    .push(&mut features14)
+                    .push(&mut descriptor_buffer)
+                    .push(&mut dynamic_state3)
+                    .push(&mut shader_object)
+                    .push(&mut multi_draw)
+                    .push(&mut unused_attachments),
                 None,
             )?
         };
@@ -342,8 +349,8 @@ impl Device {
         let mut descriptor_props = vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
         let mut multi_draw_props = vk::PhysicalDeviceMultiDrawPropertiesEXT::default();
         let mut props = vk::PhysicalDeviceProperties2::default()
-            .push_next(&mut descriptor_props)
-            .push_next(&mut multi_draw_props);
+            .push(&mut descriptor_props)
+            .push(&mut multi_draw_props);
         unsafe { instance.get_physical_device_properties2(physical, &mut props) };
         let name = unsafe { CStr::from_ptr(props.properties.device_name.as_ptr()) }
             .to_string_lossy()
@@ -370,17 +377,14 @@ impl Device {
                 sampler: descriptor_props.sampler_descriptor_size,
                 offset_alignment: descriptor_props.descriptor_buffer_offset_alignment,
             },
-            shader_object_ext: ash::ext::shader_object::Device::new(&instance, &device),
-            dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device::new(&instance, &device),
-            maintenance6_ext: ash::khr::maintenance6::Device::new(&instance, &device),
+            shader_object_ext: ash::ext::shader_object::Device::load(&instance, &device),
+            dynamic_state3_ext: ash::ext::extended_dynamic_state3::Device::load(&instance, &device),
             commands: Commands {
-                maintenance5: ash::khr::maintenance5::Device::new(&instance, &device),
-                multi_draw: ash::ext::multi_draw::Device::new(&instance, &device),
+                multi_draw: ash::ext::multi_draw::Device::load(&instance, &device),
             },
             max_multi_draw: multi_draw_props.max_multi_draw_count,
-            swapchain_ext: ash::khr::swapchain::Device::new(&instance, &device),
-            descriptor_buffer_ext: ash::ext::descriptor_buffer::Device::new(&instance, &device),
-            host_image_copy_ext: ash::ext::host_image_copy::Device::new(&instance, &device),
+            swapchain_ext: ash::khr::swapchain::Device::load(&instance, &device),
+            descriptor_buffer_ext: ash::ext::descriptor_buffer::Device::load(&instance, &device),
             surface_ext,
             win32_surface_ext,
             physical,
@@ -441,7 +445,7 @@ impl Device {
     /// its 214 MiB is never all ours.
     pub fn budget(&self, heap: u32) -> u64 {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
-        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push(&mut budget);
         unsafe {
             self.instance
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
@@ -578,7 +582,7 @@ impl Arena {
                     &vk::MemoryAllocateInfo::default()
                         .allocation_size(requirements.size)
                         .memory_type_index(index)
-                        .push_next(&mut flags),
+                        .push(&mut flags),
                     None,
                 )
             };
@@ -858,10 +862,9 @@ impl Uploader {
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
         let timeline = unsafe {
-            device.device.create_semaphore(
-                &vk::SemaphoreCreateInfo::default().push_next(&mut kind),
-                None,
-            )?
+            device
+                .device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default().push(&mut kind), None)?
         };
         Ok(Self {
             ring: Arena::new(device, ring, Placement::Upload)?,
@@ -1076,7 +1079,7 @@ impl GpuHeap {
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(size)
                     .memory_type_index(index)
-                    .push_next(&mut flags),
+                    .push(&mut flags),
                 None,
             )?
         };
@@ -1508,7 +1511,7 @@ impl ResourceHeap {
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(requirements.size)
                     .memory_type_index(index)
-                    .push_next(&mut flags),
+                    .push(&mut flags),
                 None,
             )?
         };
@@ -2216,7 +2219,7 @@ impl Shaders {
             .dynamic_state(&dynamic)
             .flags(vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT)
             .layout(self.layout)
-            .push_next(&mut rendering);
+            .push(&mut rendering);
 
         let pipelines = unsafe {
             self.device
@@ -2593,7 +2596,7 @@ impl<'a> Raster<'a> {
     /// against the allocation rather than against whatever the heap suballocated after it.
     fn bind_indices<I: IndexFormat>(&self, indices: &HeapBuffer) {
         unsafe {
-            self.commands.maintenance5.cmd_bind_index_buffer2(
+            self.device.cmd_bind_index_buffer2(
                 self.command_buffer,
                 indices.buffer,
                 0,
@@ -2973,10 +2976,9 @@ impl Context {
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
         let timeline = unsafe {
-            device.device.create_semaphore(
-                &vk::SemaphoreCreateInfo::default().push_next(&mut kind),
-                None,
-            )?
+            device
+                .device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default().push(&mut kind), None)?
         };
 
         Ok(Self {

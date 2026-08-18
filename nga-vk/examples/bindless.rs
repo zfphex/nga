@@ -122,8 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (fx, fy) = (x as f32 / TEX as f32, y as f32 / TEX as f32);
                     let value = match layer {
                         0 => ((x / 8 + y / 8) % 2) as f32,
-                        1 => (((fx - 0.5).powi(2) + (fy - 0.5).powi(2)).sqrt() * 12.0).sin() * 0.5
-                            + 0.5,
+                        1 => {
+                            (((fx - 0.5).powi(2) + (fy - 0.5).powi(2)).sqrt() * 12.0).sin() * 0.5
+                                + 0.5
+                        }
                         _ => fx * fy,
                     };
                     let rgb = [

@@ -156,11 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let compute = rec.compute();
                             compute.pipeline(simulate);
                             compute.dispatch(sim_root, SLICE, GROUP);
-                            compute.barrier(
-                                Stages::DISPATCH,
-                                Stages::DISPATCH,
-                                Visibility::Device,
-                            );
+                            compute.barrier(Stages::DISPATCH, Stages::DISPATCH, Visibility::Device);
                             compute.pipeline(build);
                             compute.dispatch(build_root, SLICE, GROUP);
                             compute.barrier(Stages::DISPATCH, Stages::VERTEX, Visibility::Device);

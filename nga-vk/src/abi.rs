@@ -42,8 +42,9 @@ pub trait ConstantValue: Copy {
     const SPEC_SIZE: usize = size_of::<Self>();
 
     fn write(self, out: &mut Vec<u8>) {
-        let bytes =
-            unsafe { std::slice::from_raw_parts(&self as *const Self as *const u8, size_of::<Self>()) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(&self as *const Self as *const u8, size_of::<Self>())
+        };
         out.extend_from_slice(bytes);
     }
 }
@@ -56,7 +57,11 @@ pub fn set_constant<T: ConstantValue>(values: &mut Specialization, index: u32, v
             .size(T::SPEC_SIZE),
     );
     value.write(&mut values.data);
-    debug_assert_eq!(values.data.len() % 4, 0, "specialization payload must stay word-aligned");
+    debug_assert_eq!(
+        values.data.len() % 4,
+        0,
+        "specialization payload must stay word-aligned"
+    );
 }
 
 pub trait Constants {

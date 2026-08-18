@@ -43,7 +43,14 @@ const GROUP: usize = 64;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut window = create_window("nga-vk M4 — sync", None, 900, 700, true, WindowStyle::Standard);
+    let mut window = create_window(
+        "nga-vk M4 — sync",
+        None,
+        900,
+        700,
+        true,
+        WindowStyle::Standard,
+    );
 
     let device = Device::new(cfg!(debug_assertions))?;
     eprintln!("device: {}", device.name);
