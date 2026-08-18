@@ -233,7 +233,9 @@ impl Device {
                     unsafe { instance.get_physical_device_queue_family_properties(physical) };
                 let family = families.iter().position(|family| {
                     family.queue_flags.contains(
-                        vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+                        vk::QueueFlags::GRAPHICS
+                            | vk::QueueFlags::COMPUTE
+                            | vk::QueueFlags::TRANSFER,
                     )
                 })?;
                 Some((physical, family as u32))
@@ -244,6 +246,7 @@ impl Device {
             ash::khr::swapchain::NAME.as_ptr(),
             ash::ext::descriptor_buffer::NAME.as_ptr(),
             ash::ext::host_image_copy::NAME.as_ptr(),
+            ash::ext::memory_budget::NAME.as_ptr(),
             ash::ext::extended_dynamic_state3::NAME.as_ptr(),
             ash::ext::shader_object::NAME.as_ptr(),
         ];
@@ -375,6 +378,43 @@ impl Device {
         unsafe { self.device.get_device_queue(self.queue_family, 0) }
     }
 
+    /// Memory types matching `flags` and carrying none of `without`, best first. A list
+    /// rather than one index, because the heap being full is a different failure from the
+    /// heap not existing: the 214 MiB BAR window fills long before it disappears, so the
+    /// caller retries the next candidate on `ERROR_OUT_OF_DEVICE_MEMORY`.
+    pub fn memory_types(
+        &self,
+        mask: u32,
+        flags: vk::MemoryPropertyFlags,
+        without: vk::MemoryPropertyFlags,
+    ) -> Vec<u32> {
+        (0..self.memory.memory_type_count)
+            .filter(|&index| {
+                let properties = self.memory.memory_types[index as usize].property_flags;
+                mask & (1 << index) != 0
+                    && properties.contains(flags)
+                    && !properties.intersects(without)
+            })
+            .collect()
+    }
+
+    /// `VK_EXT_memory_budget` reports what is actually free right now, which for the BAR heap
+    /// is the number that matters — it is shared with every other process on the desktop, so
+    /// its 214 MiB is never all ours.
+    pub fn budget(&self, heap: u32) -> u64 {
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical, &mut properties)
+        };
+        budget.heap_budget[heap as usize].saturating_sub(budget.heap_usage[heap as usize])
+    }
+
+    pub fn heap_of(&self, memory_type: u32) -> u32 {
+        self.memory.memory_types[memory_type as usize].heap_index
+    }
+
     pub fn memory_type(&self, mask: u32, flags: vk::MemoryPropertyFlags) -> Option<u32> {
         (0..self.memory.memory_type_count).find(|&index| {
             mask & (1 << index) != 0
@@ -401,10 +441,51 @@ impl Drop for Device {
     }
 }
 
+/// Where an `Arena`'s memory lives. Metal has one answer to this question — `Shared` under
+/// UMA — so `nga` has no such enum. On discrete Windows the three are physically different
+/// memory with opposite performance, and picking the wrong one is silent, so it is explicit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Placement {
+    /// Host-visible *device-local*: the BAR window. CPU writes land in VRAM and the GPU reads
+    /// them at full speed. Without ReBAR this is 214 MiB shared with every other process, so
+    /// it is reserved for per-frame root data and nothing else.
+    Bar,
+    /// Host-visible system RAM without `HOST_CACHED` — write-combined. Uncached CPU reads from
+    /// it are catastrophically slow, sequential writes are fast, and the GPU reads it once over
+    /// PCIe. That is exactly the staging-source access pattern, and it costs no BAR.
+    Upload,
+    /// Host-visible system RAM *with* `HOST_CACHED`, for GPU-to-CPU readback, where the CPU is
+    /// the reader and wants a cache.
+    Readback,
+}
+
+impl Placement {
+    /// Preferred property flags first, then the flags every host-visible type has. The BAR
+    /// fallback matters on a machine whose host-visible device-local heap does not exist;
+    /// the `Upload`/`Readback` fallback matters because `HOST_CACHED` is not guaranteed.
+    fn candidates(self) -> [(vk::MemoryPropertyFlags, vk::MemoryPropertyFlags); 2] {
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let none = vk::MemoryPropertyFlags::empty();
+        match self {
+            Placement::Bar => [
+                (host | vk::MemoryPropertyFlags::DEVICE_LOCAL, none),
+                (host, none),
+            ],
+            Placement::Upload => [(host, vk::MemoryPropertyFlags::HOST_CACHED), (host, none)],
+            Placement::Readback => [
+                (host | vk::MemoryPropertyFlags::HOST_CACHED, none),
+                (host, none),
+            ],
+        }
+    }
+}
+
 /// The Metal `Arena` writes structs straight into GPU memory and hands out the address.
 /// On discrete Windows that only works inside the host-visible device-local BAR window,
 /// which is 214 MiB on this GPU with no ReBAR — enough for root data, too small for meshes.
+/// So the arena is no longer one kind of memory: see `Placement`.
 pub struct Arena {
+    pub placement: Placement,
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub base: u64,
@@ -418,10 +499,11 @@ unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
 impl Arena {
-    pub fn new(device: &Device, size: usize) -> Result<Self, VkError> {
+    pub fn new(device: &Device, size: usize, placement: Placement) -> Result<Self, VkError> {
         let usage = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST
             | vk::BufferUsageFlags::INDIRECT_BUFFER
             | vk::BufferUsageFlags::INDEX_BUFFER;
         let info = vk::BufferCreateInfo::default()
@@ -431,29 +513,58 @@ impl Arena {
         let buffer = unsafe { device.device.create_buffer(&info, None)? };
         let requirements = unsafe { device.device.get_buffer_memory_requirements(buffer) };
 
-        let host_local = vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT
-            | vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let index = device
-            .memory_type(requirements.memory_type_bits, host_local)
-            .or_else(|| {
-                device.memory_type(
-                    requirements.memory_type_bits,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                )
-            })
-            .ok_or(VkError::new("no host-visible memory type for the arena"))?;
+        let mut indices = Vec::new();
+        for (flags, without) in placement.candidates() {
+            for index in device.memory_types(requirements.memory_type_bits, flags, without) {
+                if !indices.contains(&index) {
+                    indices.push(index);
+                }
+            }
+        }
+        if indices.is_empty() {
+            unsafe { device.device.destroy_buffer(buffer, None) };
+            return Err(VkError::new(format!(
+                "no host-visible memory type for a {placement:?} arena"
+            )));
+        }
 
+        // A full heap and an absent heap are different failures. The BAR window is 214 MiB and
+        // shared with the desktop, so the first candidate can simply be out of room — that is a
+        // reason to take the next one, not to give up.
         let mut flags =
             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-        let memory = unsafe {
-            device.device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(index)
-                    .push_next(&mut flags),
-                None,
-            )?
+        let mut allocated = Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        for &index in &indices {
+            allocated = unsafe {
+                device.device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(requirements.size)
+                        .memory_type_index(index)
+                        .push_next(&mut flags),
+                    None,
+                )
+            };
+            match allocated {
+                Ok(_) => break,
+                Err(
+                    vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+                ) => continue,
+                Err(_) => break,
+            }
+        }
+        let memory = match allocated {
+            Ok(memory) => memory,
+            Err(result) => {
+                unsafe { device.device.destroy_buffer(buffer, None) };
+                let free = indices
+                    .iter()
+                    .map(|&index| device.budget(device.heap_of(index)))
+                    .max()
+                    .unwrap_or(0);
+                return Err(VkError::new(format!(
+                    "{placement:?} arena of {size} bytes did not fit: {result:?}, largest                      candidate heap has {free} bytes free"
+                )));
+            }
         };
         unsafe { device.device.bind_buffer_memory(buffer, memory, 0)? };
         let cpu = unsafe {
@@ -468,6 +579,7 @@ impl Arena {
         };
 
         Ok(Self {
+            placement,
             buffer,
             memory,
             base,
@@ -650,6 +762,222 @@ impl TextureDesc {
     }
 }
 
+/// Batches ahead of this many submissions are made to wait, so a command buffer is never
+/// re-recorded while the GPU is still reading it.
+pub const UPLOAD_BATCHES: usize = 4;
+
+/// Staging ring size. Large enough that a frame's worth of uploads never wraps, small enough
+/// that it is unremarkable in system RAM — and it costs no BAR, which is the whole point.
+pub const UPLOAD_RING: usize = 32 * 1024 * 1024;
+
+/// `vkCmdUpdateBuffer`'s hard limit. Below it the data rides in the command buffer and the
+/// staging ring is not touched at all.
+pub const UPDATE_LIMIT: usize = 65536;
+
+/// The thing Metal never needs: a machine for getting bytes into memory the CPU cannot see.
+///
+/// Under UMA an upload is a memcpy that has already happened by the time the call returns.
+/// On discrete hardware without ReBAR the destination is unmappable, so every byte goes
+/// CPU -> write-combined system RAM -> DMA -> VRAM. The only question is what that costs, and
+/// the answer is entirely about batching: a copy recorded here is a memcpy plus a few words in
+/// a command buffer, whereas a copy that submits and waits is a full device drain. So nothing
+/// here submits until `flush`, and `flush` signals a timeline instead of idling the queue.
+///
+/// The ring is `Placement::Upload` — deliberately *not* the BAR window. Staging memory is read
+/// once by the DMA engine and never by a shader, so spending the scarce 214 MiB on it would be
+/// the worst trade available.
+pub struct Uploader {
+    pub ring: Arena,
+    pub pool: vk::CommandPool,
+    pub buffers: Vec<vk::CommandBuffer>,
+    pub timeline: vk::Semaphore,
+    pub queue: vk::Queue,
+    pub device: ash::Device,
+    pub head: usize,
+    pub submitted: u64,
+    pub recording: bool,
+}
+
+impl Uploader {
+    pub fn new(device: &Device, ring: usize) -> Result<Self, VkError> {
+        let pool = unsafe {
+            device.device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(device.queue_family)
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                None,
+            )?
+        };
+        let buffers = unsafe {
+            device.device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(UPLOAD_BATCHES as u32),
+            )?
+        };
+        let mut kind = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let timeline = unsafe {
+            device.device.create_semaphore(
+                &vk::SemaphoreCreateInfo::default().push_next(&mut kind),
+                None,
+            )?
+        };
+        Ok(Self {
+            ring: Arena::new(device, ring, Placement::Upload)?,
+            pool,
+            buffers,
+            timeline,
+            queue: device.queue(),
+            device: device.device.clone(),
+            head: 0,
+            submitted: 0,
+            recording: false,
+        })
+    }
+
+    /// The open batch, started on first use. Recording is free; only `flush` costs a submission.
+    pub fn open(&mut self) -> Result<vk::CommandBuffer, VkError> {
+        let command_buffer = self.buffers[self.submitted as usize % UPLOAD_BATCHES];
+        if !self.recording {
+            let batches = UPLOAD_BATCHES as u64;
+            if self.submitted >= batches {
+                self.wait(self.submitted + 1 - batches)?;
+            }
+            unsafe {
+                self.device
+                    .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;
+                self.device.begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )?
+            };
+            self.recording = true;
+        }
+        Ok(command_buffer)
+    }
+
+    /// Bump-allocate staging space, returning the offset into `ring.buffer` and where to write.
+    ///
+    /// The ring wraps by draining: when a request does not fit, the open batch is submitted and
+    /// every outstanding one is waited on, then the head resets. That is the one blocking path
+    /// left, it is bounded by the work already recorded rather than by the whole device, and a
+    /// ring sized for the frame's uploads never reaches it. Chunking is what keeps a single
+    /// oversized upload from needing a ring as large as itself.
+    pub fn stage(&mut self, size: usize, align: usize) -> Result<(u64, *mut u8), VkError> {
+        if size > self.ring.size {
+            return Err(VkError::new(format!(
+                "staged copy of {size} bytes exceeds the {} byte upload ring",
+                self.ring.size
+            )));
+        }
+        let mut offset = (self.head + align - 1) & !(align - 1);
+        if offset + size > self.ring.size {
+            self.flush()?;
+            self.wait(self.submitted)?;
+            self.head = 0;
+            offset = 0;
+        }
+        self.head = offset + size;
+        Ok((offset as u64, unsafe { self.ring.cpu.add(offset) }))
+    }
+
+    /// How much ring is left before a wrap forces a wait.
+    pub fn available(&self) -> usize {
+        self.ring.size - self.head
+    }
+
+    /// How much of `want` to stage next, so a copy larger than the ring streams through it.
+    /// The remaining tail is used when it is worth using; below a quarter of the ring it is
+    /// not, since a runt copy would wrap on the very next iteration anyway — better to ask for
+    /// a full chunk and let `stage` wrap once.
+    pub fn chunk(&self, want: usize) -> usize {
+        let tail = self.available();
+        let room = match tail * 4 >= self.ring.size {
+            true => tail,
+            false => self.ring.size,
+        };
+        want.min(room)
+    }
+
+    /// Submits whatever is recorded and returns the timeline value that marks it complete.
+    /// Callers that can express "the GPU waits" should wait on that value rather than blocking.
+    pub fn flush(&mut self) -> Result<u64, VkError> {
+        if !self.recording {
+            return Ok(self.submitted);
+        }
+        let command_buffer = self.buffers[self.submitted as usize % UPLOAD_BATCHES];
+
+        // One barrier per batch rather than per copy: everything staged here is read later by
+        // some stage or other, and at batch granularity the coarse mask costs nothing.
+        unsafe {
+            self.device.cmd_pipeline_barrier2(
+                command_buffer,
+                &vk::DependencyInfo::default().memory_barriers(&[vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(
+                        vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                    )]),
+            );
+            self.device.end_command_buffer(command_buffer)?;
+        }
+
+        let value = self.submitted + 1;
+        let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let signals = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(self.timeline)
+            .value(value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+        unsafe {
+            self.device.queue_submit2(
+                self.queue,
+                &[vk::SubmitInfo2::default()
+                    .command_buffer_infos(&infos)
+                    .signal_semaphore_infos(&signals)],
+                vk::Fence::null(),
+            )?
+        };
+        self.submitted = value;
+        self.recording = false;
+        Ok(value)
+    }
+
+    pub fn wait(&self, value: u64) -> Result<(), VkError> {
+        let semaphores = [self.timeline];
+        let values = [value];
+        unsafe {
+            self.device.wait_semaphores(
+                &vk::SemaphoreWaitInfo::default()
+                    .semaphores(&semaphores)
+                    .values(&values),
+                u64::MAX,
+            )?
+        };
+        Ok(())
+    }
+
+    /// Load-time convenience: submit the batch and block until it lands. One wait for an entire
+    /// asset load, where the old immediate path drained the device once per resource.
+    pub fn flush_wait(&mut self) -> Result<(), VkError> {
+        let value = self.flush()?;
+        self.wait(value)
+    }
+}
+
+impl Drop for Uploader {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_command_pool(self.pool, None);
+            self.device.destroy_semaphore(self.timeline, None);
+        }
+    }
+}
+
 /// `MTLHeap` + TLSF, rebuilt on one `VkDeviceMemory`.
 ///
 /// Two Vulkan-only concerns that `nga` never meets: every allocation is aligned to
@@ -658,14 +986,15 @@ impl TextureDesc {
 /// heap on this GPU is only 214 MiB. Both buffer and texture contents therefore arrive by
 /// staged copy — `VK_EXT_host_image_copy` would have spared textures that, but it is unusable
 /// on this driver (see `upload` and `examples/probe.rs`).
+///
+/// Every staged copy is *recorded*, not submitted. Call `flush` (or `flush_wait`) once the
+/// batch is built; nothing reaches the GPU before that.
 pub struct GpuHeap {
     pub memory: vk::DeviceMemory,
     pub tlsf: Tlsf,
     pub granularity: u64,
     pub device: ash::Device,
-    pub staging: Arena,
-    pub pool: vk::CommandPool,
-    pub queue: vk::Queue,
+    pub uploader: Uploader,
 }
 
 impl GpuHeap {
@@ -679,6 +1008,10 @@ impl GpuHeap {
     );
 
     pub fn new(device: &Device, size: u64) -> Result<Self, VkError> {
+        Self::with_ring(device, size, UPLOAD_RING)
+    }
+
+    pub fn with_ring(device: &Device, size: u64, ring: usize) -> Result<Self, VkError> {
         // `VK_KHR_maintenance4` answers "which heaps fit this?" from a create-info, with no
         // object created — the exact complaint the post levels at Vulkan's allocator design.
         let probe = vk::BufferCreateInfo::default()
@@ -709,22 +1042,13 @@ impl GpuHeap {
                 None,
             )?
         };
-        let pool = unsafe {
-            device.device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family),
-                None,
-            )?
-        };
-
         let granularity = device.limits.buffer_image_granularity.max(256);
         Ok(Self {
             memory,
             tlsf: Tlsf::new(size, granularity),
             granularity,
             device: device.device.clone(),
-            staging: Arena::new(device, 8 * 1024 * 1024)?,
-            pool,
-            queue: device.queue(),
+            uploader: Uploader::new(device, ring)?,
         })
     }
 
@@ -825,31 +1149,62 @@ impl GpuHeap {
     }
 
     /// `nga`'s `HeapBuffer::write` is a memcpy, because Metal heaps are host-visible under UMA.
-    /// Here the destination is device-local, so the bytes go through a staging arena and a
-    /// one-shot copy. This is the half of `StorageMode::Shared` that Vulkan cannot give back.
+    /// Here the destination is device-local, so the bytes go through the upload ring and a
+    /// recorded copy. This is the half of `StorageMode::Shared` that Vulkan cannot give back —
+    /// but it is recorded, not submitted, so what it costs is a memcpy and not a device drain.
+    ///
+    /// Writes at or below `UPDATE_LIMIT` skip the ring entirely: `vkCmdUpdateBuffer` embeds the
+    /// data in the command buffer itself, which is both fewer moving parts and no ring pressure.
     pub fn write<T: Copy>(&mut self, buffer: &HeapBuffer, offset: usize, values: &[T]) {
+        self.try_write(buffer, offset, values)
+            .expect("staged buffer write failed")
+    }
+
+    pub fn try_write<T: Copy>(
+        &mut self,
+        buffer: &HeapBuffer,
+        offset: usize,
+        values: &[T],
+    ) -> Result<(), VkError> {
         let bytes = size_of_val(values);
         debug_assert!(offset + bytes <= buffer.len);
-        self.staging.reset();
-        let staged = self
-            .staging
-            .alloc_slice(values)
-            .expect("staging arena is too small for this upload");
-        let source = self.staging.buffer;
-        let source_offset = staged.gpu.0.get() - self.staging.base;
-        let destination = buffer.buffer;
-        self.immediate(|device, command_buffer| unsafe {
-            device.cmd_copy_buffer(
-                command_buffer,
-                source,
-                destination,
-                &[vk::BufferCopy {
-                    src_offset: source_offset,
-                    dst_offset: offset as u64,
-                    size: bytes as u64,
-                }],
-            );
-        });
+        if bytes == 0 {
+            return Ok(());
+        }
+        let source = unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, bytes) };
+
+        if bytes <= UPDATE_LIMIT && bytes.is_multiple_of(4) && offset.is_multiple_of(4) {
+            let command_buffer = self.uploader.open()?;
+            unsafe {
+                self.device
+                    .cmd_update_buffer(command_buffer, buffer.buffer, offset as u64, source)
+            };
+            return Ok(());
+        }
+
+        // Chunked against whatever the ring has left, so a write larger than the ring streams
+        // through it rather than failing — the old path simply panicked past 8 MiB.
+        let mut written = 0;
+        while written < bytes {
+            let chunk = self.uploader.chunk(bytes - written);
+            let (staged, cpu) = self.uploader.stage(chunk, 16)?;
+            unsafe { std::ptr::copy_nonoverlapping(source.as_ptr().add(written), cpu, chunk) };
+            let command_buffer = self.uploader.open()?;
+            unsafe {
+                self.device.cmd_copy_buffer(
+                    command_buffer,
+                    self.uploader.ring.buffer,
+                    buffer.buffer,
+                    &[vk::BufferCopy {
+                        src_offset: staged,
+                        dst_offset: (offset + written) as u64,
+                        size: chunk as u64,
+                    }],
+                )
+            };
+            written += chunk;
+        }
+        Ok(())
     }
 
     /// `VK_EXT_host_image_copy` was meant to go here: CPU memory straight into the image with
@@ -859,65 +1214,115 @@ impl GpuHeap {
     /// the extension is advertised and `R8G8B8A8_UNORM` claims `HOST_IMAGE_TRANSFER` support.
     /// See `examples/probe.rs`. So uploads stage through a buffer, exactly like `write`.
     pub fn upload(&mut self, texture: &HeapTexture, bytes: &[u8]) -> Result<(), VkError> {
-        self.staging.reset();
-        let staged = self
-            .staging
-            .alloc_slice(bytes)
-            .ok_or(VkError::new("staging arena is too small for this texture"))?;
-        let source = self.staging.buffer;
-        let source_offset = staged.gpu.0.get() - self.staging.base;
-        let image = texture.image;
         let (width, height) = (texture.width, texture.height);
-        let old = texture.layout.get();
+        let texels = width as usize * height as usize;
+        if texels == 0 || bytes.is_empty() {
+            return Ok(());
+        }
+        if !bytes.len().is_multiple_of(texels) {
+            return Err(VkError::new(format!(
+                "{} bytes is not a whole number of texels for a {width}x{height} image",
+                bytes.len()
+            )));
+        }
+        // The texel size comes from the caller's own slice rather than a format table: an upload
+        // is by definition the whole image, so the division is exact and every format works.
+        let row = bytes.len() / height as usize;
+        if row > self.uploader.ring.size {
+            return Err(VkError::new(format!(
+                "one image row is {row} bytes, larger than the {} byte upload ring",
+                self.uploader.ring.size
+            )));
+        }
 
-        self.immediate(|device, command_buffer| unsafe {
-            device.cmd_pipeline_barrier2(
+        let image = texture.image;
+        let old = texture.layout.get();
+        let command_buffer = self.uploader.open()?;
+        unsafe {
+            self.device.cmd_pipeline_barrier2(
                 command_buffer,
                 &vk::DependencyInfo::default().image_memory_barriers(&[Self::barrier(
                     image,
                     old,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 )]),
-            );
-            device.cmd_copy_buffer_to_image(
-                command_buffer,
-                source,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[vk::BufferImageCopy {
-                    buffer_offset: source_offset,
-                    image_subresource: vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    image_extent: vk::Extent3D {
-                        width,
-                        height,
-                        depth: 1,
-                    },
-                    ..Default::default()
-                }],
-            );
-        });
+            )
+        };
         texture.layout.set(vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+
+        // Rows are the chunking unit, so a texture far larger than the ring still streams
+        // through it. `bufferRowLength` stays 0 because each chunk is tightly packed.
+        let mut first = 0u32;
+        while first < height {
+            let remaining = (height - first) as usize * row;
+            let rows = ((self.uploader.chunk(remaining) / row).max(1) as u32).min(height - first);
+            let size = rows as usize * row;
+            let (staged, cpu) = self.uploader.stage(size, 16)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr().add(first as usize * row), cpu, size)
+            };
+            let command_buffer = self.uploader.open()?;
+            unsafe {
+                self.device.cmd_copy_buffer_to_image(
+                    command_buffer,
+                    self.uploader.ring.buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[vk::BufferImageCopy {
+                        buffer_offset: staged,
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_offset: vk::Offset3D {
+                            x: 0,
+                            y: first as i32,
+                            z: 0,
+                        },
+                        image_extent: vk::Extent3D {
+                            width,
+                            height: rows,
+                            depth: 1,
+                        },
+                        ..Default::default()
+                    }],
+                )
+            };
+            first += rows;
+        }
         Ok(())
     }
 
+    /// Submit the recorded batch and block until it lands. The load-time entry point: one wait
+    /// for a whole scene, where the old path drained the device once per resource.
+    pub fn flush(&mut self) -> Result<(), VkError> {
+        self.uploader.flush_wait()
+    }
+
+    /// Submit without blocking, returning the timeline value to wait on. Pair with
+    /// `Frame::after_uploads` to let the GPU do the waiting instead of the CPU.
+    pub fn flush_async(&mut self) -> Result<u64, VkError> {
+        self.uploader.flush()
+    }
+
     /// Metal has no image layouts, so this method has no counterpart at all. Without
-    /// `VK_KHR_unified_image_layouts` — absent on this driver — and with host image copy
-    /// unusable, every transition costs a queue submission.
-    pub fn transition(&self, texture: &HeapTexture, layout: vk::ImageLayout) {
+    /// `VK_KHR_unified_image_layouts` — absent on this driver — a transition is unavoidable,
+    /// but it is only a barrier: recording it into the open upload batch makes it free, where
+    /// submitting one command buffer per transition made it the most expensive call here.
+    pub fn transition(&mut self, texture: &HeapTexture, layout: vk::ImageLayout) {
         let image = texture.image;
         let old = texture.layout.get();
-        self.immediate(|device, command_buffer| unsafe {
+        let command_buffer = self.uploader.open().expect("upload batch");
+        let device = &self.device;
+        unsafe {
             device.cmd_pipeline_barrier2(
                 command_buffer,
                 &vk::DependencyInfo::default()
                     .image_memory_barriers(&[Self::barrier(image, old, layout)]),
-            );
-        });
+            )
+        };
         texture.layout.set(layout);
     }
 
@@ -945,46 +1350,11 @@ impl GpuHeap {
     pub fn free(&mut self, alloc: Alloc) {
         self.tlsf.free(alloc.block);
     }
-
-    fn immediate(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
-        unsafe {
-            let command_buffer = self
-                .device
-                .allocate_command_buffers(
-                    &vk::CommandBufferAllocateInfo::default()
-                        .command_pool(self.pool)
-                        .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_buffer_count(1),
-                )
-                .unwrap()[0];
-            self.device
-                .begin_command_buffer(
-                    command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .unwrap();
-            record(&self.device, command_buffer);
-            self.device.end_command_buffer(command_buffer).unwrap();
-            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
-            self.device
-                .queue_submit2(
-                    self.queue,
-                    &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
-                    vk::Fence::null(),
-                )
-                .unwrap();
-            self.device.queue_wait_idle(self.queue).unwrap();
-            self.device
-                .free_command_buffers(self.pool, &[command_buffer]);
-        }
-    }
 }
 
 impl Drop for GpuHeap {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_command_pool(self.pool, None);
             self.device.free_memory(self.memory, None);
         }
     }
@@ -1090,7 +1460,9 @@ impl ResourceHeap {
                 requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             )
-            .ok_or(VkError::new("no host-visible memory for the descriptor buffer"))?;
+            .ok_or(VkError::new(
+                "no host-visible memory for the descriptor buffer",
+            ))?;
         let mut flags =
             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
         let memory = unsafe {
@@ -1113,7 +1485,12 @@ impl ResourceHeap {
                 .device
                 .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         };
-        Ok((buffer, memory, NonNull::new(cpu as *mut u8).unwrap(), address))
+        Ok((
+            buffer,
+            memory,
+            NonNull::new(cpu as *mut u8).unwrap(),
+            address,
+        ))
     }
 
     pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, VkError> {
@@ -1241,7 +1618,8 @@ impl ResourceHeap {
             false => vk::PipelineBindPoint::COMPUTE,
         };
         unsafe {
-            self.ext.cmd_bind_descriptor_buffers(command_buffer, &bindings);
+            self.ext
+                .cmd_bind_descriptor_buffers(command_buffer, &bindings);
             self.ext.cmd_set_descriptor_buffer_offsets(
                 command_buffer,
                 point,
@@ -1453,9 +1831,7 @@ impl Swapchain {
     pub fn destroy(&mut self, device: &Device) {
         unsafe {
             self.destroy_views(device);
-            device
-                .swapchain_ext
-                .destroy_swapchain(self.swapchain, None);
+            device.swapchain_ext.destroy_swapchain(self.swapchain, None);
             device.surface_ext.destroy_surface(self.surface, None);
         }
     }
@@ -1616,10 +1992,7 @@ impl ShaderObjects {
     /// pipeline would have carried. Nothing here is optional: omitting any one of these is
     /// undefined behaviour rather than a default.
     pub fn bind(&self, command_buffer: vk::CommandBuffer, width: u32, height: u32) {
-        let stages = [
-            vk::ShaderStageFlags::VERTEX,
-            vk::ShaderStageFlags::FRAGMENT,
-        ];
+        let stages = [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT];
         let viewport = vk::Viewport {
             x: 0.0,
             y: height as f32,
@@ -1700,7 +2073,10 @@ pub struct Shaders {
 
 impl Shaders {
     pub fn new(device: &Device, spirv: &[u8]) -> Result<Self, VkError> {
-        debug_assert!(spirv.len() % 4 == 0, "SPIR-V is not a whole number of words");
+        debug_assert!(
+            spirv.len() % 4 == 0,
+            "SPIR-V is not a whole number of words"
+        );
         let words: Vec<u32> = spirv
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
@@ -1755,8 +2131,7 @@ impl Shaders {
         }
 
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let assembly =
-            vk::PipelineInputAssemblyStateCreateInfo::default().topology(desc.topology);
+        let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(desc.topology);
         let viewport = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
@@ -1784,8 +2159,7 @@ impl Shaders {
             vk::DynamicState::STENCIL_OP,
             vk::DynamicState::STENCIL_REFERENCE,
         ];
-        let dynamic =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let formats: Vec<_> = desc.colors.iter().map(|target| target.format).collect();
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
@@ -2047,9 +2421,7 @@ impl<'a> Raster<'a> {
                         false => vk::AttachmentStoreOp::DONT_CARE,
                     });
                 info = match attachment.clear {
-                    Some(clear) => info
-                        .load_op(vk::AttachmentLoadOp::CLEAR)
-                        .clear_value(clear),
+                    Some(clear) => info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(clear),
                     None => info.load_op(vk::AttachmentLoadOp::LOAD),
                 };
                 info
@@ -2090,7 +2462,11 @@ impl<'a> Raster<'a> {
         raster.depth(&depth_state(vk::CompareOp::ALWAYS, false));
         unsafe {
             device.cmd_set_stencil_test_enable(command_buffer, false);
-            device.cmd_set_stencil_reference(command_buffer, vk::StencilFaceFlags::FRONT_AND_BACK, 0);
+            device.cmd_set_stencil_reference(
+                command_buffer,
+                vk::StencilFaceFlags::FRONT_AND_BACK,
+                0,
+            );
             device.cmd_set_stencil_op(
                 command_buffer,
                 vk::StencilFaceFlags::FRONT_AND_BACK,
@@ -2165,12 +2541,8 @@ impl<'a> Raster<'a> {
         count: u32,
     ) {
         unsafe {
-            self.device.cmd_bind_index_buffer(
-                self.command_buffer,
-                indices.buffer,
-                0,
-                I::VK_TYPE,
-            );
+            self.device
+                .cmd_bind_index_buffer(self.command_buffer, indices.buffer, 0, I::VK_TYPE);
         }
         self.bind(root);
         unsafe {
@@ -2448,6 +2820,40 @@ impl Context {
     ) -> Result<Self, VkError> {
         debug_assert!(threads > 0);
         let slots = FRAMES_IN_FLIGHT as usize * threads;
+
+        // Arenas are BAR-resident, and there are `FRAMES_IN_FLIGHT * threads` of them. Without
+        // ReBAR that window is 214 MiB *shared with every other process*, so the interesting
+        // number is the live budget, not the heap size. Failing here beats an
+        // ERROR_OUT_OF_DEVICE_MEMORY several arenas into the loop with no hint as to why.
+        let total = arena_size * slots;
+        let probe = vk::BufferCreateInfo::default()
+            .size(arena_size.max(1) as u64)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+        let mut requirements = vk::MemoryRequirements2::default();
+        unsafe {
+            device.device.get_device_buffer_memory_requirements(
+                &vk::DeviceBufferMemoryRequirements::default().create_info(&probe),
+                &mut requirements,
+            )
+        };
+        let bar = device.memory_types(
+            requirements.memory_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::empty(),
+        );
+        if let Some(&index) = bar.first() {
+            let free = device.budget(device.heap_of(index));
+            if total as u64 > free {
+                return Err(VkError::new(format!(
+                    "{slots} arenas of {arena_size} bytes need {total} bytes of the host-visible \
+                     device-local heap, which has {free} free. Shrink the arena, lower the thread \
+                     count, or move bulk data to a GpuHeap."
+                )));
+            }
+        }
+
         let mut pools = Vec::new();
         let mut command_buffers = Vec::new();
         let mut arenas = Vec::new();
@@ -2468,16 +2874,17 @@ impl Context {
             };
             pools.push(pool);
             command_buffers.push(buffers[0]);
-            arenas.push(Arena::new(device, arena_size)?);
+            arenas.push(Arena::new(device, arena_size, Placement::Bar)?);
         }
 
         let mut kind = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
         let timeline = unsafe {
-            device
-                .device
-                .create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut kind), None)?
+            device.device.create_semaphore(
+                &vk::SemaphoreCreateInfo::default().push_next(&mut kind),
+                None,
+            )?
         };
 
         Ok(Self {
@@ -2528,6 +2935,7 @@ impl Context {
             layout: self.layout,
             recording: 0,
             value: index + 1,
+            upload: None,
         })
     }
 }
@@ -2553,13 +2961,17 @@ pub struct Frame<'a> {
     pub layout: vk::PipelineLayout,
     pub recording: usize,
     pub value: u64,
+    pub upload: Option<(vk::Semaphore, u64)>,
 }
 
 impl Frame<'_> {
     /// One recorder per thread, each with its own `VkCommandPool`-backed command buffer and
     /// its own arena slot. `nga` takes a count per queue; with one queue this is `&[n]`.
     pub fn recorders(&mut self, counts: &[usize]) -> Vec<Recorder<'_>> {
-        debug_assert!(self.recording == 0, "recorders already taken for this frame");
+        debug_assert!(
+            self.recording == 0,
+            "recorders already taken for this frame"
+        );
         let count: usize = counts.iter().sum();
         debug_assert!(
             count <= self.command_buffers.len(),
@@ -2613,6 +3025,13 @@ impl Frame<'_> {
         }
     }
 
+    /// Make this frame wait on an upload batch on the GPU rather than on the CPU. Pair with
+    /// `GpuHeap::flush_async`: the uploads are in flight while the frame is being recorded, and
+    /// nothing blocks. `GpuHeap::flush` is the blocking equivalent, for load time.
+    pub fn after_uploads(&mut self, value: u64, uploader: &Uploader) {
+        self.upload = Some((uploader.timeline, value));
+    }
+
     pub fn submit(self, drawable: Option<&Drawable>) -> Result<(), VkError> {
         if let Some(drawable) = drawable {
             let command_buffer = self.command_buffers[self.recording - 1];
@@ -2655,6 +3074,14 @@ impl Frame<'_> {
                 .value(self.value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
         ];
+        if let Some((semaphore, value)) = self.upload {
+            waits.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .value(value)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
+        }
         if let Some(drawable) = drawable {
             waits.push(
                 vk::SemaphoreSubmitInfo::default()

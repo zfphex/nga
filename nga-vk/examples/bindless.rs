@@ -176,6 +176,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let material_buffer = heap.alloc_buffer(size_of_val(materials.as_slice()))?;
     heap.write(&material_buffer, 0, &materials);
 
+    // Every copy and transition above was recorded, not submitted. One flush lands the lot,
+    // where the old path drained the device once per texture.
+    heap.flush()?;
+
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
     let mut time = 0.0f32;

@@ -98,7 +98,8 @@ SAMPLED|HOST_TRANSFER|STORAGE          maintenance4 bits 0x0000   object bits 0x
 R8G8B8A8_UNORM optimal supports HOST_IMAGE_TRANSFER: true
 ```
 
-So texture upload stages through a buffer, and every layout transition costs a queue submission.
+So texture upload stages through a buffer. A layout transition is then only a barrier, which is
+free as long as it is *recorded* rather than submitted — see §3.
 
 ### 3. `StorageMode::Shared` does not exist on discrete Windows
 
@@ -108,6 +109,65 @@ comfortably; `GpuHeap` does not and is device-local, so `HeapBuffer::write` — 
 becomes a staged copy. Vulkan also imposes `bufferImageGranularity` (1024 here), so every heap
 allocation is aligned to it to keep buffers and images off the same granularity page; `MTLHeap`
 never asks for this.
+
+`cargo run --example probe` prints the whole topology. On this machine:
+
+```
+heap 0:   8060.00 MiB total,   7287.59 MiB free  DEVICE_LOCAL
+heap 1:   8146.38 MiB total,   7472.27 MiB free
+heap 2:    214.00 MiB total,    205.38 MiB free  DEVICE_LOCAL   <- the BAR window
+
+Bar      (host-visible VRAM)   -> type 10 heap 2,    205.38 MiB free
+Upload   (write-combined RAM)  -> type  8 heap 1,   7472.27 MiB free
+Readback (cached RAM)          -> type  9 heap 1,   7472.27 MiB free
+```
+
+Note the BAR figure is a *budget*, not a size: the window is shared with every other process on
+the desktop, so ~9 MiB of it is already gone before the program starts.
+
+Three consequences the Metal design has no equivalent of:
+
+**Placement is explicit.** `Arena::new` takes a `Placement`, because "host-visible" names three
+physically different kinds of memory here and the wrong one is silently slow. `Bar` is the window
+above and is reserved for per-frame root data. `Upload` is write-combined system RAM — fast
+sequential CPU writes, read once by the DMA engine, and it costs no BAR, which is exactly what a
+staging buffer wants. `Readback` is cached system RAM for the other direction. An earlier version
+allocated staging from `Bar`, which spent the scarcest memory on the one buffer no shader ever
+reads.
+
+**The BAR budget is checked up front.** `Context` allocates `FRAMES_IN_FLIGHT * threads` arenas, so
+a large arena and a high thread count silently exceed 214 MiB. `Context::with_layout` compares the
+total against `VK_EXT_memory_budget` and fails with the numbers rather than returning
+`ERROR_OUT_OF_DEVICE_MEMORY` several arenas into the loop. `Arena::new` also treats a full heap as
+a reason to try the next candidate memory type, not a reason to give up — a full heap and an
+absent heap are different failures.
+
+**Uploads batch instead of blocking.** This is the one that mattered most. Every staged copy used
+to submit its own command buffer and then `vkQueueWaitIdle`, so loading a scene drained the whole
+device once per resource, and staging was capped at 8 MiB with a panic past it. `Uploader` records
+into an open batch over a wrapping ring and submits once on `flush`, signalling a timeline instead
+of idling:
+
+| | before | now |
+| --- | --- | --- |
+| cost of one `write`/`upload`/`transition` | submit + full device drain | memcpy + a few command words |
+| a 32-texture load | 64+ drains | **1 submission** |
+| write larger than staging | panic at 8 MiB | chunked through the ring |
+| staging memory | 8 MiB of the BAR window | 32 MiB of system RAM |
+| ≤ 64 KiB write | staged copy | `vkCmdUpdateBuffer`, ring untouched |
+
+`GpuHeap::flush` blocks once for the whole batch, which is what load-time code wants.
+`flush_async` returns the timeline value instead, and `Frame::after_uploads` makes the *GPU* wait
+on it, so streaming uploads never block the CPU at all. `tests/upload.rs` covers the boundaries by
+reading the bytes back: the `vkCmdUpdateBuffer` cutoff, a write three times the ring size, an
+image taller than the ring, and that a whole batch is one submission.
+
+**Still on the table: the copy engine.** `probe` reports a dedicated transfer family (2 queues,
+`transfer` without `graphics` or `compute`) that could DMA in parallel with rendering. The uploader
+records on the graphics queue instead, because moving it costs queue-family ownership transfers
+(or `SharingMode::CONCURRENT`) and a split of transitions — graphics-stage barriers are not legal
+on a transfer queue. With all uploads currently at load time there is nothing to overlap, so it is
+the right change only once assets stream during rendering.
 
 ### 4. Metal's stage-agnostic visibility flag doesn't survive
 
@@ -285,6 +345,7 @@ keep their pipelines.
 | Dynamic depth/blend state | yes | yes |
 | Minimal PSO state | yes | yes (and `VK_EXT_shader_object` removes the PSO entirely) |
 | CPU writes directly to GPU memory | yes (UMA) | **partly** (214 MiB BAR; no working host image copy) |
+| Upload without a stall | free (memcpy) | batched: one submission per flush, none per resource |
 | GPU-side command encoding | yes | **no** |
 | Timeline semaphores | yes | yes |
 

@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
-    let mesh = Arena::new(&device, 64 * 1024)?;
+    let mesh = Arena::new(&device, 64 * 1024, Placement::Bar)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
     let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
 

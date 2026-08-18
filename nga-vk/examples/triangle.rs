@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The mesh lives in the arena for now; a device-local `GpuHeap` with staged uploads
     // arrives with the raster example, because only the arena fits the 214 MiB BAR window.
-    let mesh = Arena::new(&device, 64 * 1024)?;
+    let mesh = Arena::new(&device, 64 * 1024, Placement::Bar)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
     let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
 

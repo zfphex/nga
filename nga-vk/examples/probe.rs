@@ -73,6 +73,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    eprintln!();
+    eprintln!("--- queue families ---");
+    let families = unsafe {
+        device
+            .instance
+            .get_physical_device_queue_family_properties(device.physical)
+    };
+    for (index, family) in families.iter().enumerate() {
+        let mut flags = Vec::new();
+        for (bit, name) in [
+            (vk::QueueFlags::GRAPHICS, "graphics"),
+            (vk::QueueFlags::COMPUTE, "compute"),
+            (vk::QueueFlags::TRANSFER, "transfer"),
+            (vk::QueueFlags::SPARSE_BINDING, "sparse"),
+            (vk::QueueFlags::VIDEO_DECODE_KHR, "video-decode"),
+            (vk::QueueFlags::VIDEO_ENCODE_KHR, "video-encode"),
+        ] {
+            if family.queue_flags.contains(bit) {
+                flags.push(name);
+            }
+        }
+        // A family with TRANSFER and no GRAPHICS is a dedicated copy engine: it can DMA while
+        // the graphics queue renders. `nga-vk` does not use one yet — see NOTES.md.
+        let dedicated = family.queue_flags.contains(vk::QueueFlags::TRANSFER)
+            && !family.queue_flags.intersects(
+                vk::QueueFlags::GRAPHICS
+                    | vk::QueueFlags::COMPUTE
+                    | vk::QueueFlags::VIDEO_DECODE_KHR
+                    | vk::QueueFlags::VIDEO_ENCODE_KHR,
+            );
+        eprintln!(
+            "family {index}: {:2} queues  {:34} {}",
+            family.queue_count,
+            flags.join("|"),
+            if dedicated { "<- dedicated copy engine" } else { "" },
+        );
+    }
+
+    eprintln!();
+    eprintln!("--- memory heaps ---");
+    for heap in 0..device.memory.memory_heap_count {
+        let properties = device.memory.memory_heaps[heap as usize];
+        let local = properties.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
+        eprintln!(
+            "heap {heap}: {:>9.2} MiB total, {:>9.2} MiB free  {}",
+            properties.size as f64 / (1 << 20) as f64,
+            device.budget(heap) as f64 / (1 << 20) as f64,
+            if local { "DEVICE_LOCAL" } else { "" },
+        );
+    }
+
+    eprintln!();
+    eprintln!("--- placements ---");
+    // What `Placement` actually resolves to on this machine. The BAR line is the one that
+    // decides how much per-frame arena the library can afford: without ReBAR it is ~214 MiB
+    // shared with every other process, and the free figure is what is left right now.
+    let mask = u32::MAX;
+    for (name, flags, without) in [
+        (
+            "Bar      (host-visible VRAM)",
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::empty(),
+        ),
+        (
+            "Upload   (write-combined RAM)",
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_CACHED,
+        ),
+        (
+            "Readback (cached RAM)",
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_CACHED,
+            vk::MemoryPropertyFlags::empty(),
+        ),
+    ] {
+        match device.memory_types(mask, flags, without).first() {
+            Some(&index) => {
+                let heap = device.heap_of(index);
+                eprintln!(
+                    "{name:30} -> type {index:2} heap {heap}, {:>9.2} MiB free",
+                    device.budget(heap) as f64 / (1 << 20) as f64,
+                );
+            }
+            None => eprintln!("{name:30} -> unavailable"),
+        }
+    }
+
+    eprintln!();
     let mut host = vk::FormatProperties3::default();
     let mut props = vk::FormatProperties2::default().push_next(&mut host);
     unsafe {
