@@ -55,7 +55,12 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "minwin",
+ "nga-vk-macros",
 ]
+
+[[package]]
+name = "nga-vk-macros"
+version = "0.1.0"
 
 [[package]]
 name = "windows-link"

@@ -5,7 +5,7 @@ pub struct TypeAbi {
     pub decl: &'static str,
     pub size: usize,
     pub align: usize,
-    pub fields: &'static [(&'static str, usize)],
+    pub fields: &'static [(&'static str, usize, usize)],
 }
 
 pub trait DeviceAbi: Copy {
@@ -36,18 +36,27 @@ impl Default for Specialization {
 
 pub trait ConstantValue: Copy {
     const SLANG_TYPE: &'static str;
+
+    /// SPIR-V booleans are `VkBool32` in a specialization block, so the payload width is not
+    /// always `size_of::<Self>()`.
+    const SPEC_SIZE: usize = size_of::<Self>();
+
+    fn write(self, out: &mut Vec<u8>) {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(&self as *const Self as *const u8, size_of::<Self>()) };
+        out.extend_from_slice(bytes);
+    }
 }
 
 pub fn set_constant<T: ConstantValue>(values: &mut Specialization, index: u32, value: T) {
-    let bytes =
-        unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>()) };
     values.entries.push(
         vk::SpecializationMapEntry::default()
             .constant_id(index)
             .offset(values.data.len() as u32)
-            .size(size_of::<T>()),
+            .size(T::SPEC_SIZE),
     );
-    values.data.extend_from_slice(bytes);
+    value.write(&mut values.data);
+    debug_assert_eq!(values.data.len() % 4, 0, "specialization payload must stay word-aligned");
 }
 
 pub trait Constants {
@@ -94,6 +103,11 @@ pub struct f32x4x4(pub [[f32; 4]; 4]);
 
 impl ConstantValue for bool {
     const SLANG_TYPE: &'static str = "bool";
+    const SPEC_SIZE: usize = 4;
+
+    fn write(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self as u32).to_ne_bytes());
+    }
 }
 
 impl ConstantValue for f32 {

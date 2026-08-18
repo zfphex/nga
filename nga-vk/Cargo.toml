@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
+nga-vk-macros = { version = "0.1.0", path = "../nga-vk-macros" }
 
 [dev-dependencies]
 minwin = { version = "0.1.0", path = "../../minwin" }
