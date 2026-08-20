@@ -18,14 +18,14 @@ struct Data {
     mvp: f32x4x4,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
+const SHADERS: &[u8] = nga::shader!("triangle");
 
 const SIZE: u32 = 128;
 
 #[test]
 fn raster_draws_into_a_texture() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
-        eprintln!("no Vulkan 1.4 device; skipping");
+        eprintln!("no supported device; skipping");
         return Ok(());
     };
 

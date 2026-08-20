@@ -20,7 +20,7 @@ struct Options {
     gamma: f32,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/raster.spv"));
+const SHADERS: &[u8] = nga::shader!("raster");
 const DEPTH_FORMAT: Format = Format::D32Float;
 
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -47,7 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    let mut surface = Surface::new(&device, window.hwnd, width as u32, height as u32)?;
+    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
+    #[cfg(not(target_vendor = "apple"))]
+    let handle = window.hwnd;
+    #[cfg(target_vendor = "apple")]
+    let handle = window.ns_view as isize;
+    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
     slang::dump(
         "raster",

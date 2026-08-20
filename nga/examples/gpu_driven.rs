@@ -46,7 +46,7 @@ struct BoundaryData {
     segments: u32,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gpu_driven.spv"));
+const SHADERS: &[u8] = nga::shader!("gpu_driven");
 const COUNT: usize = 4096;
 const GROUP: usize = 64;
 const SEGMENTS: u32 = 128;
@@ -65,7 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    let mut surface = Surface::new(&device, window.hwnd, width as u32, height as u32)?;
+    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
+    #[cfg(not(target_vendor = "apple"))]
+    let handle = window.hwnd;
+    #[cfg(target_vendor = "apple")]
+    let handle = window.ns_view as isize;
+    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
     slang::dump(
         "gpu_driven",
@@ -190,6 +195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Metal resets the indirect command buffer's execution range with a dedicated
                 // `reset` command. Vulkan's equivalent is just zeroing the count word.
                 compute.fill_buffer(&counter, 0, size_of::<u32>(), 0);
+                // Every draw slot the encode pass does not claim this frame has to read as
+                // `instance_count == 0`: Vulkan stops at the count, but the Metal backend
+                // replays all `COUNT` slots because there is no GPU-side count to stop at.
+                compute.fill_buffer(&draws, 0, draws.len(), 0);
                 compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::ALL);
 
                 compute.pipeline(simulate);

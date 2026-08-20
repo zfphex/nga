@@ -12,14 +12,14 @@ struct Data {
     size: [u32; 2],
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gradient.spv"));
+const SHADERS: &[u8] = nga::shader!("gradient");
 
 const SIZE: u32 = 64;
 
 #[test]
 fn compute_writes_a_bindless_storage_texture() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
-        eprintln!("no Vulkan 1.4 device; skipping");
+        eprintln!("no supported device; skipping");
         return Ok(());
     };
 

@@ -15,7 +15,7 @@ struct Data {
     size: [u32; 2],
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sample.spv"));
+const SHADERS: &[u8] = nga::shader!("sample");
 
 const TEX: u32 = 8;
 const SIZE: u32 = 96;
@@ -26,7 +26,7 @@ const COLORS: [[u8; 4]; 3] = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 25
 #[test]
 fn shader_samples_through_bindless_handles() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
-        eprintln!("no Vulkan 1.4 device; skipping");
+        eprintln!("no supported device; skipping");
         return Ok(());
     };
 

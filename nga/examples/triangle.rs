@@ -17,7 +17,7 @@ struct Data {
     mvp: f32x4x4,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
+const SHADERS: &[u8] = nga::shader!("triangle");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = create_window("nga triangle", None, 800, 600, true, WindowStyle::Standard);
@@ -26,7 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    let mut surface = Surface::new(&device, window.hwnd, width as u32, height as u32)?;
+    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
+    #[cfg(not(target_vendor = "apple"))]
+    let handle = window.hwnd;
+    #[cfg(target_vendor = "apple")]
+    let handle = window.ns_view as isize;
+    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
     let mut shaders = Shaders::new(&device, SHADERS)?;
     let pipeline = shaders.raster(&RasterDesc::new(

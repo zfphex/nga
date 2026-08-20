@@ -28,7 +28,7 @@ struct Paint {
     time: f32,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bindless.spv"));
+const SHADERS: &[u8] = nga::shader!("bindless");
 const QUADS: u32 = 4;
 const LAYERS: u32 = 3;
 const TEX: u32 = 64;
@@ -51,7 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let (mut width, mut height) = window.scaled_size();
-    let mut surface = Surface::new(&device, window.hwnd, width as u32, height as u32)?;
+    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
+    #[cfg(not(target_vendor = "apple"))]
+    let handle = window.hwnd;
+    #[cfg(target_vendor = "apple")]
+    let handle = window.ns_view as isize;
+    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
     slang::dump(
         "bindless",

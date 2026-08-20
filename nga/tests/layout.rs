@@ -8,6 +8,9 @@
 //! through a `PhysicalStorageBuffer` pointer — which is every struct in this design — appear
 //! only as `OpMemberDecorate ... Offset` in the module.
 
+// The SPIR-V reader below is dead weight on an Apple host, where no `.spv` is produced at all.
+#![cfg_attr(target_vendor = "apple", allow(dead_code))]
+
 use nga::*;
 use std::collections::HashMap;
 use std::mem::offset_of;
@@ -83,6 +86,9 @@ fn decode(words: &[u32]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// SPIR-V only: `build.rs` emits it on every host except an Apple one, where the Metal target
+/// is the whole point. The Metal half of the same check is the test below.
+#[cfg(not(target_vendor = "apple"))]
 #[test]
 fn rust_and_slang_agree_on_field_offsets() {
     let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
@@ -194,17 +200,20 @@ fn metal_output_packs_the_same_way() {
 /// slangc emits on any host.
 #[test]
 fn handles_are_eight_bytes_on_both_targets() {
-    let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/material.spv"));
-    let found = spirv_offsets(spirv);
-    for (field, expected) in [("albedo", 0), ("samp", 8), ("target", 16), ("uv", 24)] {
-        let key = ("Material".to_string(), field.to_string());
-        let &offset = found
-            .get(&key)
-            .unwrap_or_else(|| panic!("Material::{field} is not in the module"));
-        assert_eq!(
-            offset, expected,
-            "Material::{field} moved to {offset}; a Vulkan handle is no longer 8 bytes"
-        );
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/material.spv"));
+        let found = spirv_offsets(spirv);
+        for (field, expected) in [("albedo", 0), ("samp", 8), ("target", 16), ("uv", 24)] {
+            let key = ("Material".to_string(), field.to_string());
+            let &offset = found
+                .get(&key)
+                .unwrap_or_else(|| panic!("Material::{field} is not in the module"));
+            assert_eq!(
+                offset, expected,
+                "Material::{field} moved to {offset}; a Vulkan handle is no longer 8 bytes"
+            );
+        }
     }
 
     let metal = include_str!(concat!(env!("OUT_DIR"), "/material.metal"));

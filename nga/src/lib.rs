@@ -829,4 +829,23 @@ impl<T> IndexMut<u32> for Pool<'_, T> {
     }
 }
 
+/// The compiled shader for `name`, as bytes. SPIR-V on the Vulkan backend, MSL source on the
+/// Metal one — both land in `OUT_DIR` from the same `.slang` file, and this is the only place
+/// the extension is spelled.
+#[cfg(not(target_vendor = "apple"))]
+#[macro_export]
+macro_rules! shader {
+    ($name:literal) => {
+        include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv")) as &[u8]
+    };
+}
+
+#[cfg(target_vendor = "apple")]
+#[macro_export]
+macro_rules! shader {
+    ($name:literal) => {
+        include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".metal")) as &[u8]
+    };
+}
+
 pub const FRAMES_IN_FLIGHT: u64 = 2;

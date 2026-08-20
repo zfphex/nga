@@ -10,14 +10,14 @@ struct Data {
     count: u32,
 }
 
-const SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.spv"));
+const SHADERS: &[u8] = nga::shader!("fill");
 
 const COUNT: usize = 256;
 
 #[test]
 fn fill_writes_every_element() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
-        eprintln!("no Vulkan 1.4 device; skipping");
+        eprintln!("no supported device; skipping");
         return Ok(());
     };
 
