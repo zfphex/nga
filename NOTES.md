@@ -220,17 +220,60 @@ Descriptor size is driver-defined and must be queried: 4 bytes here for all thre
 Metal's fixed 8. And a texture written and sampled in the same frame stays in `GENERAL`, so its
 sampled descriptor must record that layout. `write_texture_in` exists only because of layouts.
 
-### 7. GPU-side command encoding is gone
+### 7. GPU-side command encoding is gone from core Vulkan
 
 `gpu_driven.metal` constructs `render_command cmd(data->commands.cb, slot)` inside a kernel and
-gives each encoded draw its own root pointer. Vulkan has no GPU-side encoder.
-`VK_NV_device_generated_commands` exists on this GPU but is vendor-locked.
+gives each encoded draw its own root pointer. Core Vulkan has no GPU-side encoder.
 
 The portable reformulation is a GPU-written `VkDrawIndirectCommand` array plus a GPU-written count
 consumed by `vkCmdDrawIndirectCount`. It only works because every draw shares one pipeline and
 one push constant, so per-draw data has to be smuggled through `first_instance`, which the vertex
 stage reads back as `gl_BaseInstance`. Metal needs no such trick. Resetting the count is
 `vkCmdFillBuffer` rather than Metal's dedicated ICB reset.
+
+#### What `VK_NV_device_generated_commands` would buy
+
+Vendor-locked, but this GPU has it: `VK_NV_device_generated_commands` rev 3 and
+`VK_NV_device_generated_commands_compute` rev 2 on driver 582.66. The cross-vendor
+`VK_EXT_device_generated_commands` (Vulkan 1.3.296) is *not* exposed here; it is a redesign
+around indirect execution sets rather than a rename, and Pascal is on a maintenance driver
+branch. Mapping `gpu_meshes` onto the NV form, command field by field:
+
+| Metal ICB command | NV token | Fit |
+| --- | --- | --- |
+| `set_render_pipeline_state(handle)` | `SHADER_GROUP_NV` | partial: an index, not a handle |
+| `set_vertex_buffer(draw, 1)` (per-draw root) | `PUSH_CONSTANT_NV` | exact, and cleaner |
+| `draw_primitives(type, start, count, 1, 0)` | `DRAW_NV` = `VkDrawIndirectCommand` | exact but for `type` |
+| a reset slot replays as nothing | `sequencesCountBuffer` | better: a real GPU-written count |
+| `IndirectCommands::dispatches` | `DISPATCH_NV` + `PIPELINE_NV` | exact; pipeline by address |
+| `IndirectCommands::meshes` | `DRAW_TASKS_NV` | needs NV mesh shaders, so dead on Pascal |
+
+Two things fall out that matter more than the parity itself. The push-constant token is a direct
+hit on this design: the root pointer is already one 64-bit push constant, and each generated
+sequence may write its own range, which is Metal's per-command root pointer exactly and would
+delete the `first_instance` smuggling above. And there is no encoder object to emulate: the
+input is a plain buffer of structs laid out per the `VkIndirectCommandsLayoutNV`, so a Slang
+kernel writes `{ groupIndex }`, `{ u64 root }`, `{ vertexCount, instanceCount, firstVertex,
+firstInstance }` with ordinary pointer stores. `Commands` becomes a device address rather than a
+resource id, and the shader stays in the pointer style the rest of the API uses.
+
+The gap is per-command render state. Shader groups vary the stages and vertex input; every group
+shares the parent pipeline's input assembly, rasterization and blend. The only per-sequence state
+token is `STATE_FLAGS_NV`, which carries front-face and nothing else. `gpu_meshes` switches
+`Topology::LineList` against triangles per object, and that is not expressible in one stream.
+The outs are one `vkCmdExecuteGeneratedCommandsNV` per topology, each with its own GPU-written
+count (the host still decides nothing, it just records two calls), or expanding the wireframe
+into triangle geometry so topology stays fixed. The pipeline set also freezes at creation:
+`SHADER_GROUP_NV` indexes groups declared in `VkGraphicsPipelineShaderGroupsCreateInfoNV`, all
+created with `VK_PIPELINE_CREATE_INDIRECT_BINDABLE_BIT_NV`, where Metal's `PipelineHandle` is a
+free 64-bit id. `RasterDesc::indirect()` already maps onto that bit; declaring the group set
+upfront has no Metal counterpart.
+
+So `Feature::IndirectCommands` could answer true on NVIDIA with the split-by-topology form, and
+the shared Rust API survives. The divergence is confined to the encode shader source, MSL
+`render_command` against Slang struct stores. The extra machinery is the layout object, a
+preprocess buffer sized by `vkGetGeneratedCommandsMemoryRequirementsNV`, and a reset that becomes
+`vkCmdFillBuffer` on the count.
 
 ### 8. Presentation is not `wait_for_drawable`
 
@@ -329,6 +372,9 @@ keep their pipelines.
 - **`meshlets`.** No `VK_EXT_mesh_shader` on Pascal (Turing+ only). The mapping is otherwise
   close: object shader → task shader, `mesh_grid_properties::set_threadgroups_per_grid` →
   `DispatchMesh`, `out.set_primitive_count` → `SetMeshOutputsEXT`, and payloads match.
+- **`gpu_meshes`.** No `VK_EXT_device_generated_commands` here, and the NV form that is present
+  cannot vary topology per generated command, so the single-stream version of the example has no
+  Vulkan spelling. Section 7 has the full mapping and what a port would cost.
 - **`tbdr`.** Vulkan has no tile shading or imageblocks on desktop at all. `tile_vignette` reads
   and writes the imageblock in place; the nearest reformulation is
   `VK_KHR_dynamic_rendering_local_read` (which is supported here) or an extra full-screen pass.
@@ -348,7 +394,7 @@ keep their pipelines.
 | Minimal PSO state | yes | yes (and `VK_EXT_shader_object` removes the PSO entirely) |
 | CPU writes directly to GPU memory | yes (UMA) | partly (214 MiB BAR; no working host image copy) |
 | Upload without a stall | free (memcpy) | batched: one submission per flush, none per resource |
-| GPU-side command encoding | yes | no |
+| GPU-side command encoding | yes | not in core; `VK_NV_device_generated_commands` covers most of it |
 | Timeline semaphores | yes | yes |
 
 The design survives the port. Six of the eight `nga` examples run unmodified in structure, and two
