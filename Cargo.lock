@@ -36,6 +36,16 @@ name = "minwin"
 version = "0.1.0"
 
 [[package]]
+name = "nga"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "minmetal",
+ "minwin",
+ "nga-slang",
+]
+
+[[package]]
 name = "nga-mtl4"
 version = "0.1.0"
 dependencies = [
@@ -46,6 +56,10 @@ dependencies = [
 
 [[package]]
 name = "nga-mtl4-macros"
+version = "0.1.0"
+
+[[package]]
+name = "nga-slang"
 version = "0.1.0"
 
 [[package]]

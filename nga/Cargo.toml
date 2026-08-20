@@ -1,0 +1,16 @@
+[package]
+name = "nga"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nga-slang = { version = "0.1.0", path = "../nga-slang" }
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+ash = { git = "https://github.com/ash-rs/ash", default-features = false, features = ["loaded"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+minmetal = { git = "https://github.com/zfphex/minmetal.git" }
+
+[dev-dependencies]
+minwin = { version = "0.1.0", path = "../../minwin" }
