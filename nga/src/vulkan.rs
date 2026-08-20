@@ -7,22 +7,25 @@
 //! compiler cannot check that — this list is the checklist, and it is kept in the same order
 //! in both files:
 //!
-//! `Device`, `Arena`, `GpuHeap`, `HeapBuffer`, `HeapTexture`, `TextureDesc`, `ResourceHeap`,
-//! `HeapRange`, `Shaders`, `Pipeline`, `Surface`, `Drawable`, `Pass`, `Raster`, `Compute`,
-//! `Context`, `Frame`, `Recorder`, `Fence`.
+//! `Device`, `Arena`, `GpuHeap`, `Retired`, `HeapBuffer`, `HeapTexture`, `TextureDesc`,
+//! `ResourceHeap`, `HeapRange`, `Shaders`, `Pipeline`, `Surface`, `Drawable`, `Pass`, `Raster`,
+//! `MultiDraw`, `MultiDrawIndexed`, `Compute`, `Context`, `Frame`, `Recorder`, `Fence`,
+//! `Timers`, `Occlusion`.
 //!
 //! Nothing from `ash` appears in a public signature. Every handle that crosses the boundary is
 //! a newtype declared here with private fields, so `pub use backend::*` cannot leak one.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, CompareOp, Constant, Constants, Cull,
-    DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox, GpuMut, Handle,
-    Hazard, IndexFormat, Memory, RasterDesc, Sampler, SamplerDesc, Scalar, Scissor, Stage,
-    Texture2d, Texture2dRW, Tlsf, Topology, Usage, Viewport, Winding,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
+    Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
+    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, Sampler,
+    SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage,
+    Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::ffi::{CStr, c_char};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -32,6 +35,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// can be passed around as freely as the `MTLRenderPipelineState` the Metal side hands out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pipeline(vk::Pipeline);
+
+impl Pipeline {
+    /// Always zero. Only Metal lets a shader name a pipeline in a command it encodes; see
+    /// `metal.rs` and [`IndirectCommands`].
+    pub fn handle(&self) -> PipelineHandle {
+        PipelineHandle(Handle(0))
+    }
+}
 
 /// A sampler *object* living in the heap. `Sampler` in `lib.rs` is the bindless handle that
 /// points at one of these, which is why this needs a different name.
@@ -429,7 +440,7 @@ pub struct Device {
     pub(crate) win32_surface_ext: ash::khr::win32_surface::Instance,
     pub(crate) swapchain_ext: ash::khr::swapchain::Device,
     pub(crate) descriptor_buffer_ext: ash::ext::descriptor_buffer::Device,
-    pub(crate) commands: Commands,
+    pub(crate) commands: Extensions,
     pub(crate) descriptor_sizes: DescriptorSizes,
     /// Sampled images, storage images, samplers. Fixed by `SLANG_PRELUDE`, created once, and
     /// shared by every pipeline layout so pipelines stay interchangeable under one binding
@@ -445,7 +456,7 @@ pub struct Device {
 /// does not need to borrow it. `VK_EXT_multi_draw` collapses a run of draws into one, spending
 /// fewer driver calls per draw.
 #[derive(Clone)]
-pub(crate) struct Commands {
+pub(crate) struct Extensions {
     pub(crate) multi_draw: ash::ext::multi_draw::Device,
 }
 
@@ -581,6 +592,7 @@ impl Device {
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .timeline_semaphore(true)
+            .host_query_reset(true)
             .draw_indirect_count(true)
             .scalar_block_layout(true)
             .runtime_descriptor_array(true)
@@ -597,6 +609,7 @@ impl Device {
                 .dynamic_rendering_unused_attachments(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .shader_int64(true)
+            .occlusion_query_precise(true)
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
             .fill_mode_non_solid(true)
@@ -657,7 +670,7 @@ impl Device {
                 sampler: descriptor_props.sampler_descriptor_size,
                 offset_alignment: descriptor_props.descriptor_buffer_offset_alignment,
             },
-            commands: Commands {
+            commands: Extensions {
                 multi_draw: ash::ext::multi_draw::Device::load(&instance, &device),
             },
             max_multi_draw_count: multi_draw_props.max_multi_draw_count,
@@ -1369,6 +1382,7 @@ pub struct GpuHeap {
     pub(crate) granularity: u64,
     pub(crate) device: ash::Device,
     pub(crate) uploader: Uploader,
+    pub(crate) retired: VecDeque<(u64, Retired)>,
 }
 
 impl GpuHeap {
@@ -1423,6 +1437,7 @@ impl GpuHeap {
             granularity,
             device: device.device.clone(),
             uploader: Uploader::new(device, ring)?,
+            retired: VecDeque::new(),
         })
     }
 
@@ -1748,6 +1763,36 @@ impl GpuHeap {
         }
         self.tlsf.free(texture.alloc.block);
     }
+
+    /// Hand a resource over to be released once the frame that last used it has finished.
+    ///
+    /// `frame` is [`Context::frame`] at the point of the hand-over. Freeing something the GPU is
+    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch — the borrow ends when
+    /// recording does, not when the command buffer retires.
+    pub fn free_later(&mut self, frame: u64, retired: Retired) {
+        self.retired.push_back((frame, retired));
+    }
+
+    /// Release everything handed over during a frame that has since completed. `completed` is
+    /// [`Context::completed`]; call this once a frame, before allocating.
+    pub fn retire(&mut self, completed: u64) {
+        while self
+            .retired
+            .front()
+            .is_some_and(|&(frame, _)| frame < completed)
+        {
+            match self.retired.pop_front().unwrap().1 {
+                Retired::Buffer(buffer) => self.free_buffer(buffer),
+                Retired::Texture(texture) => self.free_texture(texture),
+            }
+        }
+    }
+}
+
+/// A resource waiting for the GPU to be done with it. See [`GpuHeap::free_later`].
+pub enum Retired {
+    Buffer(HeapBuffer),
+    Texture(HeapTexture),
 }
 
 impl Drop for GpuHeap {
@@ -1950,12 +1995,7 @@ impl ResourceHeap {
         Texture2d(Handle((range.base + slot) as u64))
     }
 
-    pub fn write_storage(
-        &self,
-        range: HeapRange,
-        slot: u32,
-        texture: &HeapTexture,
-    ) -> Texture2dRW {
+    pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
         debug_assert!(slot < range.len);
         let image = vk::DescriptorImageInfo::default()
             .image_view(texture.view)
@@ -2290,7 +2330,6 @@ pub struct Drawable {
     pub(crate) suboptimal: bool,
 }
 
-
 /// One SPIR-V module holds every entry point, the way one `MTLLibrary` holds every function,
 /// so pipelines name their stages by string exactly as they do under Metal.
 pub struct Shaders {
@@ -2419,6 +2458,23 @@ impl Shaders {
         Ok(Pipeline(pipelines[0]))
     }
 
+    /// Mesh pipelines need `VK_EXT_mesh_shader`, which `Device::new` does not request. The
+    /// method exists so portable code compiles on both backends; `Device::supports` is what
+    /// says whether calling it will work.
+    pub fn mesh(&mut self, _desc: &MeshDesc) -> Result<Pipeline, Error> {
+        Err(Error::new(
+            "mesh pipelines need VK_EXT_mesh_shader, which this backend does not request",
+        ))
+    }
+
+    /// Tile pipelines are Apple-only and will stay that way: imageblocks are tile-based
+    /// deferred hardware, not an API Vulkan is missing.
+    pub fn tile(&mut self, _desc: &TileDesc) -> Result<Pipeline, Error> {
+        Err(Error::new(
+            "tile pipelines are Metal-only; there is no Vulkan equivalent",
+        ))
+    }
+
     pub fn compute(
         &mut self,
         entry: &str,
@@ -2477,6 +2533,7 @@ pub struct Pass {
     pub(crate) colors: Vec<Attachment>,
     pub(crate) depth: Option<Attachment>,
     pub(crate) layers: u32,
+    pub(crate) occlusion: Option<(vk::QueryPool, u32)>,
 }
 
 impl Pass {
@@ -2485,6 +2542,7 @@ impl Pass {
             colors: Vec::new(),
             depth: None,
             layers: 1,
+            occlusion: None,
         }
     }
 
@@ -2524,7 +2582,9 @@ impl Pass {
         texture: &HeapTexture,
         clear: Option<[f32; 4]>,
     ) -> Self {
-        texture.layout.set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        texture
+            .layout
+            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let attachment = Attachment {
             view: texture.view,
             image: texture.image,
@@ -2562,20 +2622,34 @@ impl Pass {
         });
         self
     }
+
+    /// Count samples that pass the depth test into `queries` for the draws in this pass.
+    /// Which slot each draw counts into is [`Raster::occlusion`].
+    ///
+    /// Metal names the counter buffer on the pass descriptor and Vulkan names a query pool per
+    /// draw, so the pool has to travel through the pass either way.
+    pub fn occlusion(mut self, queries: &Occlusion) -> Self {
+        self.occlusion = Some((queries.pool, queries.base));
+        self
+    }
 }
 
 pub struct Raster<'a> {
     pub(crate) device: &'a ash::Device,
-    pub(crate) commands: &'a Commands,
+    pub(crate) commands: &'a Extensions,
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) layout: vk::PipelineLayout,
     pub(crate) push: Cell<Push>,
+    pub(crate) occlusion: Option<(vk::QueryPool, u32)>,
+    /// The slot `vkCmdBeginQuery` is open on, so `occlusion_off` and the pass end can close it.
+    /// Metal needs no equivalent: setting the mode is not a scope.
+    pub(crate) query: Cell<Option<u32>>,
 }
 
 impl<'a> Raster<'a> {
     pub(crate) fn new(
         device: &'a ash::Device,
-        commands: &'a Commands,
+        commands: &'a Extensions,
         command_buffer: vk::CommandBuffer,
         layout: vk::PipelineLayout,
         pass: &Pass,
@@ -2701,6 +2775,8 @@ impl<'a> Raster<'a> {
             command_buffer,
             layout,
             push: Cell::new(Push::default()),
+            occlusion: pass.occlusion,
+            query: Cell::new(None),
         };
         raster.viewport(
             Viewport::new(width, height),
@@ -2883,6 +2959,78 @@ impl<'a> Raster<'a> {
         };
     }
 
+    /// See `metal.rs`. There is no mesh pipeline to draw with here, so this is unreachable —
+    /// `Shaders::mesh` failed long before a caller got this far.
+    pub fn draw_mesh<T>(
+        &self,
+        _root: Gpu<'_, T>,
+        _groups: [u32; 3],
+        _object_group: [u32; 3],
+        _mesh_group: [u32; 3],
+    ) {
+        debug_assert!(
+            false,
+            "Feature::MeshShaders is not supported on this backend"
+        );
+    }
+
+    /// Apple-only, and unreachable for the same reason `draw_mesh` is.
+    pub fn dispatch_tile<T>(&self, _root: Gpu<'_, T>, _width: u32, _height: u32) {
+        debug_assert!(
+            false,
+            "Feature::TileShaders is not supported on this backend"
+        );
+    }
+
+    /// Apple-only. An [`IndirectCommands`] cannot be created here, so nothing can reach this.
+    pub fn execute(&self, _commands: &IndirectCommands, _range: std::ops::Range<u32>) {
+        debug_assert!(
+            false,
+            "Feature::IndirectCommands is not supported on this backend"
+        );
+    }
+
+    /// Count the samples the following draws write into slot `index` of the [`Occlusion`] set
+    /// the pass was given. Calling it again moves to another slot; [`Raster::occlusion_off`]
+    /// stops counting.
+    pub fn occlusion(&self, index: u32) {
+        let Some((pool, base)) = self.occlusion else {
+            debug_assert!(false, "Pass::occlusion was never called");
+            return;
+        };
+        self.occlusion_off();
+        unsafe {
+            self.device.cmd_begin_query(
+                self.command_buffer,
+                pool,
+                base + index,
+                vk::QueryControlFlags::PRECISE,
+            )
+        };
+        self.query.set(Some(base + index));
+    }
+
+    pub fn occlusion_off(&self) {
+        let (Some((pool, _)), Some(slot)) = (self.occlusion, self.query.take()) else {
+            return;
+        };
+        unsafe { self.device.cmd_end_query(self.command_buffer, pool, slot) };
+    }
+
+    /// Records the GPU clock into slot `index`, after everything drawn so far in this pass has
+    /// left the fragment stage. Metal spells the same thing `writeTimestampWithGranularity:`.
+    pub fn timestamp(&self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                self.command_buffer,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                timers.pool,
+                (timers.base + index) as u32,
+            )
+        };
+    }
+
     pub fn draw<T>(&self, root: Gpu<'_, T>, start: u32, count: u32) {
         self.bind(root);
         unsafe {
@@ -2894,6 +3042,10 @@ impl<'a> Raster<'a> {
 
 impl Drop for Raster<'_> {
     fn drop(&mut self) {
+        // A query left open across `vkCmdEndRendering` is a validation error, and forgetting
+        // `occlusion_off` is easy — Metal's mode is not a scope, so there is nothing to forget
+        // there.
+        self.occlusion_off();
         unsafe { self.device.cmd_end_rendering(self.command_buffer) };
     }
 }
@@ -3040,9 +3192,11 @@ impl<'a> Compute<'a> {
     /// more than once. The device address is resolved back to a buffer offset here rather than
     /// carried around, because that is the only thing Vulkan's copy needs that Metal's does not.
     pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuMut<'_, [u8]>) {
-        let offset = dest.0.get().checked_sub(arena.base).expect(
-            "the readback destination is not in this arena",
-        );
+        let offset = dest
+            .0
+            .get()
+            .checked_sub(arena.base)
+            .expect("the readback destination is not in this arena");
         self.transition(texture, Usage::COPY_SRC);
         let region = vk::BufferImageCopy2::default()
             .image_subresource(
@@ -3069,6 +3223,36 @@ impl<'a> Compute<'a> {
         };
     }
 
+    /// Apple-only; see `metal.rs`.
+    pub fn execute(&self, _commands: &IndirectCommands, _range: std::ops::Range<u32>) {
+        debug_assert!(
+            false,
+            "Feature::IndirectCommands is not supported on this backend"
+        );
+    }
+
+    /// Apple-only; see `metal.rs`.
+    pub fn reset(&self, _commands: &IndirectCommands, _range: std::ops::Range<u32>) {
+        debug_assert!(
+            false,
+            "Feature::IndirectCommands is not supported on this backend"
+        );
+    }
+
+    /// Records the GPU clock into slot `index`, after everything dispatched so far in this
+    /// command buffer has finished.
+    pub fn timestamp(&self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                self.command_buffer,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                timers.pool,
+                (timers.base + index) as u32,
+            )
+        };
+    }
+
     pub fn fill_buffer(&self, buffer: &HeapBuffer, offset: usize, size: usize, value: u32) {
         unsafe {
             self.device.cmd_fill_buffer(
@@ -3084,7 +3268,7 @@ impl<'a> Compute<'a> {
 
 pub struct Context {
     pub(crate) device: ash::Device,
-    pub(crate) commands: Commands,
+    pub(crate) commands: Extensions,
     pub(crate) queue: vk::Queue,
     pub(crate) pools: Vec<vk::CommandPool>,
     pub(crate) command_buffers: Vec<vk::CommandBuffer>,
@@ -3201,6 +3385,16 @@ impl Context {
         self.frame
     }
 
+    /// How many frames have finished on the GPU. Frame `n` is complete once this exceeds `n`,
+    /// which is exactly the comparison [`GpuHeap::retire`] makes.
+    pub fn completed(&self) -> u64 {
+        unsafe {
+            self.device
+                .get_semaphore_counter_value(self.timeline)
+                .unwrap_or(0)
+        }
+    }
+
     pub fn begin_frame(&mut self) -> Result<Frame<'_>, Error> {
         let index = self.frame;
         self.frame += 1;
@@ -3256,7 +3450,7 @@ impl Drop for Context {
 
 pub struct Frame<'a> {
     pub(crate) device: &'a ash::Device,
-    pub(crate) commands: &'a Commands,
+    pub(crate) commands: &'a Extensions,
     pub(crate) queue: vk::Queue,
     pub(crate) arenas: &'a [Arena],
     pub(crate) command_buffers: &'a [vk::CommandBuffer],
@@ -3427,7 +3621,7 @@ impl Frame<'_> {
 
 pub struct Recorder<'a> {
     pub(crate) device: &'a ash::Device,
-    pub(crate) commands: &'a Commands,
+    pub(crate) commands: &'a Extensions,
     pub(crate) arena: &'a Arena,
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) layout: vk::PipelineLayout,
@@ -3458,5 +3652,285 @@ impl Recorder<'_> {
             width,
             height,
         )
+    }
+}
+
+// -- fences ------------------------------------------------------------------------------
+
+/// A monotonic counter both the host and the GPU can see: a timeline semaphore here, an
+/// `MTLSharedEvent` on Metal. Frames have their own counter inside [`Context`] — this is for
+/// the sequencing a caller does itself, such as an asset load that must land before a frame
+/// reads what it produced.
+pub struct Fence {
+    device: ash::Device,
+    semaphore: vk::Semaphore,
+}
+
+impl Fence {
+    pub fn new(device: &Device) -> Result<Self, Error> {
+        let mut kind = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let semaphore = unsafe {
+            device
+                .device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default().push(&mut kind), None)?
+        };
+        Ok(Self {
+            device: device.device.clone(),
+            semaphore,
+        })
+    }
+
+    /// Raise the counter from the host. Values only ever go up; signalling backwards is a
+    /// programming error on both backends and is not checked.
+    pub fn signal(&self, value: u64) {
+        unsafe {
+            self.device
+                .signal_semaphore(
+                    &vk::SemaphoreSignalInfo::default()
+                        .semaphore(self.semaphore)
+                        .value(value),
+                )
+                .ok()
+        };
+    }
+
+    pub fn value(&self) -> u64 {
+        unsafe {
+            self.device
+                .get_semaphore_counter_value(self.semaphore)
+                .unwrap_or(0)
+        }
+    }
+
+    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout —
+    /// a hang, not an error worth a `Result`, since there is nothing to do about it but say so.
+    pub fn wait(&self, value: u64) -> bool {
+        let semaphores = [self.semaphore];
+        let values = [value];
+        unsafe {
+            self.device
+                .wait_semaphores(
+                    &vk::SemaphoreWaitInfo::default()
+                        .semaphores(&semaphores)
+                        .values(&values),
+                    10_000_000_000,
+                )
+                .is_ok()
+        }
+    }
+}
+
+impl Drop for Fence {
+    fn drop(&mut self) {
+        unsafe { self.device.destroy_semaphore(self.semaphore, None) };
+    }
+}
+
+// -- queries -----------------------------------------------------------------------------
+
+/// `count` GPU timestamps per frame, doubled so a frame in flight never overwrites the results
+/// the host has not read yet. `begin` picks this frame's half and fetches the other one, so
+/// the numbers a caller reads are always from `FRAMES_IN_FLIGHT` frames ago and never stall.
+pub struct Timers {
+    pub(crate) device: ash::Device,
+    pub(crate) pool: vk::QueryPool,
+    pub(crate) count: usize,
+    pub(crate) base: usize,
+    pub(crate) ticks: Vec<u64>,
+    pub(crate) ns_per_tick: f64,
+}
+
+impl Timers {
+    pub fn new(device: &Device, count: usize) -> Result<Self, Error> {
+        let total = count * FRAMES_IN_FLIGHT as usize;
+        let pool = unsafe {
+            device.device.create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(total as u32),
+                None,
+            )?
+        };
+        // A pool starts undefined, and `vkGetQueryPoolResults` on an unreset query is invalid
+        // even with no wait. `hostQueryReset` is what lets this happen off the command buffer,
+        // which is what keeps `begin` symmetric with Metal's.
+        unsafe { device.device.reset_query_pool(pool, 0, total as u32) };
+        Ok(Self {
+            device: device.device.clone(),
+            pool,
+            count,
+            base: 0,
+            ticks: vec![0; count],
+            ns_per_tick: device.timestamp_period as f64,
+        })
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Take this frame's half of the pool and read back what the last frame to use it recorded.
+    /// Call once per frame, after `begin_frame` — that wait is what makes the read safe.
+    ///
+    /// Only slots written every frame are meaningful: a Vulkan query has to be reset before it
+    /// can be written again, so a slot skipped this frame reads as unwritten, where Metal would
+    /// leave the previous value in place.
+    pub fn begin(&mut self, frame: &Frame) {
+        self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as usize * self.count;
+        self.ticks.fill(0);
+        unsafe {
+            // Unwritten slots stay zero: without WAIT this returns NOT_READY and leaves them
+            // alone, which is the same thing an unresolved Metal counter reads as.
+            self.device
+                .get_query_pool_results(
+                    self.pool,
+                    self.base as u32,
+                    &mut self.ticks,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+                .ok();
+            self.device
+                .reset_query_pool(self.pool, self.base as u32, self.count as u32);
+        }
+    }
+
+    /// Whether slot `index` holds a timestamp from the last frame to use this half. A slot that
+    /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
+    /// reports for it — this is how to tell the two apart.
+    pub fn written(&self, index: usize) -> bool {
+        self.ticks[index] != 0
+    }
+
+    /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
+    /// order, which is what an unwritten slot looks like on both backends.
+    pub fn ns(&self, start: usize, end: usize) -> f64 {
+        let (start, end) = (self.ticks[start], self.ticks[end]);
+        match start == 0 || end < start {
+            true => 0.0,
+            false => (end - start) as f64 * self.ns_per_tick,
+        }
+    }
+
+    pub fn ms(&self, start: usize, end: usize) -> f64 {
+        self.ns(start, end) / 1e6
+    }
+}
+
+impl Drop for Timers {
+    fn drop(&mut self) {
+        unsafe { self.device.destroy_query_pool(self.pool, None) };
+    }
+}
+
+/// `count` occlusion counters per frame, doubled the same way [`Timers`] is.
+///
+/// Metal counts straight into a visibility-result buffer the pass names; Vulkan counts into a
+/// query pool and the results are fetched at `begin`. Either way what a caller sees is the
+/// sample count from `FRAMES_IN_FLIGHT` frames ago.
+pub struct Occlusion {
+    pub(crate) device: ash::Device,
+    pub(crate) pool: vk::QueryPool,
+    pub(crate) count: u32,
+    pub(crate) base: u32,
+    pub(crate) samples: Vec<u64>,
+}
+
+impl Occlusion {
+    pub fn new(device: &Device, count: u32) -> Result<Self, Error> {
+        let total = count * FRAMES_IN_FLIGHT as u32;
+        let pool = unsafe {
+            device.device.create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::OCCLUSION)
+                    .query_count(total),
+                None,
+            )?
+        };
+        unsafe { device.device.reset_query_pool(pool, 0, total) };
+        Ok(Self {
+            device: device.device.clone(),
+            pool,
+            count,
+            base: 0,
+            samples: vec![0; count as usize],
+        })
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Take this frame's half of the pool and read back what the last frame to use it counted.
+    pub fn begin(&mut self, frame: &Frame) {
+        self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as u32 * self.count;
+        self.samples.fill(0);
+        unsafe {
+            self.device
+                .get_query_pool_results(
+                    self.pool,
+                    self.base,
+                    &mut self.samples,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+                .ok();
+            self.device
+                .reset_query_pool(self.pool, self.base, self.count);
+        }
+    }
+
+    /// Samples that passed the depth test in slot `index`, from the last frame to use this
+    /// half of the pool.
+    pub fn samples(&self, index: u32) -> u64 {
+        self.samples[index as usize]
+    }
+}
+
+impl Drop for Occlusion {
+    fn drop(&mut self) {
+        unsafe { self.device.destroy_query_pool(self.pool, None) };
+    }
+}
+
+// -- indirect command buffers ------------------------------------------------------------
+
+/// Metal's shader-encoded command buffers. Vulkan's nearest equivalent is
+/// `VK_NV_device_generated_commands`, which is not in the shared surface, so this type exists
+/// only so portable code names it — every constructor fails.
+///
+/// The reachable Vulkan spelling of the same idea is `Raster::draw_indirect_count`: the GPU
+/// picks the arguments and the count, and the host picks the one pipeline they all share.
+pub struct IndirectCommands {
+    count: u32,
+}
+
+impl IndirectCommands {
+    pub fn draws(_device: &Device, _count: u32, _indexed: bool) -> Result<Self, Error> {
+        Err(Self::unsupported())
+    }
+
+    pub fn meshes(_device: &Device, _count: u32) -> Result<Self, Error> {
+        Err(Self::unsupported())
+    }
+
+    pub fn dispatches(_device: &Device, _count: u32) -> Result<Self, Error> {
+        Err(Self::unsupported())
+    }
+
+    fn unsupported() -> Error {
+        Error::new("indirect command buffers are Metal-only; use draw_indirect_count instead")
+    }
+
+    pub fn handle(&self) -> Commands {
+        Commands(Handle(0))
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    pub fn all(&self) -> std::ops::Range<u32> {
+        0..self.count
     }
 }

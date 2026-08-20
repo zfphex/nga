@@ -46,33 +46,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nga-mtl4"
-version = "0.1.0"
-dependencies = [
- "minmetal",
- "minwin",
- "nga-mtl4-macros",
-]
-
-[[package]]
-name = "nga-mtl4-macros"
-version = "0.1.0"
-
-[[package]]
 name = "nga-slang"
-version = "0.1.0"
-
-[[package]]
-name = "nga-vk"
-version = "0.1.0"
-dependencies = [
- "ash",
- "minwin",
- "nga-vk-macros",
-]
-
-[[package]]
-name = "nga-vk-macros"
 version = "0.1.0"
 
 [[package]]

@@ -1,7 +1,0 @@
-[package]
-name = "nga-mtl4-macros"
-version.workspace = true
-edition.workspace = true
-
-[lib]
-proc-macro = true

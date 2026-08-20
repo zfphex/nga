@@ -157,6 +157,10 @@ handle! {
     TextureCube,
     Depth2d,
     Sampler,
+    // The last two are Metal-only: an `IndirectCommands` buffer, and a `Pipeline` built with
+    // `indirect`, both named by a shader that encodes commands. Zero on Vulkan.
+    Commands,
+    PipelineHandle,
 }
 
 /// `atomic_uint` on Metal, `uint` under a SPIR-V atomic on Vulkan. Shaders atomically update
@@ -254,9 +258,8 @@ pub struct Constant {
 impl Constant {
     pub fn push<T: ConstantValue>(out: &mut Vec<Constant>, index: u32, value: T) {
         let mut bytes = [0u8; 16];
-        let source = unsafe {
-            std::slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>())
-        };
+        let source =
+            unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>()) };
         bytes[..source.len()].copy_from_slice(source);
         out.push(Constant {
             index,
@@ -414,7 +417,10 @@ impl Format {
     }
 
     pub fn is_depth(self) -> bool {
-        matches!(self, Format::D32Float | Format::D32FloatS8 | Format::D16Unorm)
+        matches!(
+            self,
+            Format::D32Float | Format::D32FloatS8 | Format::D16Unorm
+        )
     }
 }
 
@@ -719,6 +725,10 @@ pub struct RasterDesc<'a> {
     pub topology: Topology,
     pub samples: u32,
     pub constants: Option<&'a dyn Constants>,
+    /// Whether a shader may encode this pipeline into an [`IndirectCommands`] buffer. Costs
+    /// nothing to leave off and is refused by Metal if a shader tries it anyway; ignored on
+    /// Vulkan, which has no such buffer.
+    pub indirect: bool,
 }
 
 impl<'a> RasterDesc<'a> {
@@ -731,7 +741,13 @@ impl<'a> RasterDesc<'a> {
             topology: Topology::TriangleList,
             samples: 1,
             constants: None,
+            indirect: false,
         }
+    }
+
+    pub fn indirect(mut self) -> Self {
+        self.indirect = true;
+        self
     }
 
     pub fn depth(mut self, format: Format) -> Self {
@@ -742,6 +758,79 @@ impl<'a> RasterDesc<'a> {
     pub fn topology(mut self, topology: Topology) -> Self {
         self.topology = topology;
         self
+    }
+}
+
+/// A mesh pipeline: an optional object (amplification) stage, a mesh stage, and a fragment
+/// stage. There are no vertices and no index buffer — the mesh stage emits primitives directly.
+///
+/// Metal-only today; ask [`Device::supports`] with [`Feature::MeshShaders`] before building one.
+/// The shader side is portable Slang either way (`[shader("amplification")]` / `[shader("mesh")]`),
+/// so only the pipeline is backend-specific.
+#[derive(Clone, Copy)]
+pub struct MeshDesc<'a> {
+    /// The object stage, or `""` for a mesh pipeline with no amplification.
+    pub object: &'a str,
+    pub mesh: &'a str,
+    pub fragment: &'a str,
+    pub colors: &'a [ColorTarget],
+    /// Bytes of payload the object stage hands to the mesh stage. Ignored without an object
+    /// stage.
+    pub payload: usize,
+    pub samples: u32,
+    pub constants: Option<&'a dyn Constants>,
+    /// See [`RasterDesc::indirect`].
+    pub indirect: bool,
+}
+
+impl<'a> MeshDesc<'a> {
+    pub fn new(
+        object: &'a str,
+        mesh: &'a str,
+        fragment: &'a str,
+        colors: &'a [ColorTarget],
+        payload: usize,
+    ) -> Self {
+        Self {
+            object,
+            mesh,
+            fragment,
+            colors,
+            payload,
+            samples: 1,
+            constants: None,
+            indirect: false,
+        }
+    }
+
+    pub fn indirect(mut self) -> Self {
+        self.indirect = true;
+        self
+    }
+}
+
+/// A tile pipeline: a compute function dispatched inside a render pass, reading and writing the
+/// imageblock the pass is rendering into without a round trip to memory.
+///
+/// This one is Apple-only for good — it is the tile-based deferred hardware showing through,
+/// and there is no Vulkan equivalent to grow into. Slang has no tile stage either, so the
+/// function has to come from an MSL source; see `shaders/tbdr.metal`.
+#[derive(Clone, Copy)]
+pub struct TileDesc<'a> {
+    pub function: &'a str,
+    pub colors: &'a [Format],
+    pub samples: u32,
+    pub constants: Option<&'a dyn Constants>,
+}
+
+impl<'a> TileDesc<'a> {
+    pub fn new(function: &'a str, colors: &'a [Format]) -> Self {
+        Self {
+            function,
+            colors,
+            samples: 1,
+            constants: None,
+        }
     }
 }
 

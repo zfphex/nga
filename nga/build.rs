@@ -2,6 +2,29 @@ use std::path::PathBuf;
 
 /// The same file `slang.rs` exposes as `SLANG_PRELUDE`, so the two cannot drift apart.
 const PRELUDE: &str = include_str!("src/prelude.slang");
+/// What a hand-written `.metal` shader gets instead of `PRELUDE`. It has to declare the same
+/// root block slangc lowers `[[vk::push_constant]]` to, because that is the one thing every
+/// shader touches and the argument table binds it at index 0 either way.
+const METAL_PRELUDE: &str = r#"#include <metal_stdlib>
+#include <metal_mesh>
+using namespace metal;
+
+struct nga_push {
+    ulong root;
+    uint resources;
+    uint samplers;
+};
+
+// Argument-buffer handles a shader encodes through. Each is one MTLResourceID, which is what
+// lets a Rust `Handle(u64)` be written straight into a shared struct.
+struct nga_commands { command_buffer cb; };
+struct nga_pipeline { render_pipeline_state p; };
+struct nga_exec_range { uint location; atomic_uint length; };
+
+static_assert(sizeof(nga_commands) == 8, "nga_commands is not one resource id");
+static_assert(sizeof(nga_pipeline) == 8, "nga_pipeline is not one resource id");
+static_assert(sizeof(nga_exec_range) == 8, "nga_exec_range does not match MTLIndirectCommandBufferExecutionRange");
+"#;
 use std::process::Command;
 
 fn main() {
@@ -23,6 +46,22 @@ fn main() {
 
     for entry in entries {
         let source = entry.unwrap().path();
+        // A `.metal` source next to the Slang ones is a feature Slang cannot spell — tile
+        // shaders and imageblocks have no stage in the language. It is copied through on Apple
+        // and ignored elsewhere, which is the same thing `#[cfg(target_vendor = "apple")]` does
+        // to the example that uses it.
+        if source.extension().is_some_and(|ext| ext == "metal") {
+            println!("cargo:rerun-if-changed={}", source.display());
+            if apple {
+                let stem = source.file_stem().unwrap().to_str().unwrap();
+                let combined = format!(
+                    "{METAL_PRELUDE}\n{}",
+                    std::fs::read_to_string(&source).unwrap()
+                );
+                std::fs::write(out.join(format!("{stem}.metal")), combined).unwrap();
+            }
+            continue;
+        }
         if source.extension().is_none_or(|ext| ext != "slang") {
             continue;
         }
@@ -34,8 +73,11 @@ fn main() {
         let combined = out.join(format!("{stem}.prelude.slang"));
         std::fs::write(
             &combined,
-            format!("{PRELUDE}
-{}", std::fs::read_to_string(&source).unwrap()),
+            format!(
+                "{PRELUDE}
+{}",
+                std::fs::read_to_string(&source).unwrap()
+            ),
         )
         .unwrap();
         let source = combined;
@@ -67,7 +109,11 @@ fn main() {
         command.arg(&source);
         // Slang predefines no target macro of its own, so the prelude gets one from here.
         // It is the only thing standing between one shader source and two binding models.
-        command.arg(if apple { "-DNGA_METAL=1" } else { "-DNGA_VULKAN=1" });
+        command.arg(if apple {
+            "-DNGA_METAL=1"
+        } else {
+            "-DNGA_VULKAN=1"
+        });
         if apple {
             command.args(["-target", "metal"]);
             command.arg("-o").arg(out.join(format!("{stem}.metal")));

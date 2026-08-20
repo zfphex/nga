@@ -7,9 +7,10 @@
 //! compiler cannot check that — this list is the checklist, and it is kept in the same order
 //! in both files:
 //!
-//! `Device`, `Arena`, `GpuHeap`, `HeapBuffer`, `HeapTexture`, `TextureDesc`, `ResourceHeap`,
-//! `HeapRange`, `Shaders`, `Pipeline`, `Surface`, `Drawable`, `Pass`, `Raster`, `Compute`,
-//! `Context`, `Frame`, `Recorder`, `Fence`.
+//! `Device`, `Arena`, `GpuHeap`, `Retired`, `HeapBuffer`, `HeapTexture`, `TextureDesc`,
+//! `ResourceHeap`, `HeapRange`, `Shaders`, `Pipeline`, `Surface`, `Drawable`, `Pass`, `Raster`,
+//! `MultiDraw`, `MultiDrawIndexed`, `Compute`, `Context`, `Frame`, `Recorder`, `Fence`,
+//! `Timers`, `Occlusion`.
 //!
 //! Nothing from `minmetal` appears in a public signature. Every handle that crosses the
 //! boundary is a newtype declared here with private fields, so `pub use backend::*` cannot
@@ -27,26 +28,32 @@
 //!   the shader dereferences, so `ResourceHeap` allocates no descriptor memory at all.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, CompareOp, Constant, Constants, Cull,
-    DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox, GpuMut, Handle,
-    Hazard, IndexFormat, Memory, RasterDesc, Sampler, SamplerDesc, Scalar, Scissor, Stage,
-    Texture2d, Texture2dRW, Tlsf, Topology, Usage, Viewport, Winding,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
+    Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
+    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, Sampler,
+    SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage,
+    Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
     DepthStencilDescriptor, DepthStencilState, FunctionConstantValues, HazardTrackingMode, Heap,
-    HeapDescriptor, HeapType, IndexType, M4AlphaToCoverageState, M4ArgumentTable,
+    HeapDescriptor, HeapType, IndexType, IndirectCommandBuffer, IndirectCommandBufferDescriptor,
+    IndirectCommandBufferOptions, IndirectCommandType, M4AlphaToCoverageState, M4ArgumentTable,
     M4ArgumentTableDescriptor, M4BlendState, M4CommandAllocator, M4CommandBuffer, M4CommandQueue,
     M4Compiler, M4CompilerDescriptor, M4ComputeCommandEncoder, M4ComputePipelineDescriptor,
-    M4FunctionDescriptor, M4IndirectCommandBufferSupportState, M4LibraryDescriptor,
-    M4LibraryFunctionDescriptor, M4RenderCommandEncoder, M4RenderPassDescriptor,
-    M4RenderPipelineDescriptor, M4SpecializedFunctionDescriptor, M4VisibilityOptions, MetalError,
-    MetalLayer, Origin, PixelFormat, PrimitiveTopologyClass, PrimitiveType, Region, RenderStages,
-    ResidencySet, ResidencySetDescriptor, ResourceOptions, SamplerAddressMode, SamplerDescriptor,
-    SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages, StorageMode, Texture,
-    TextureDescriptor, TextureUsage, id, retain,
+    M4CounterHeap, M4CounterHeapDescriptor, M4CounterHeapType, M4FunctionDescriptor,
+    M4IndirectCommandBufferSupportState, M4LibraryDescriptor, M4LibraryFunctionDescriptor,
+    M4MeshRenderPipelineDescriptor, M4RenderCommandEncoder, M4RenderPassDescriptor,
+    M4RenderPipelineColorAttachmentDescriptorArray, M4RenderPipelineDescriptor,
+    M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor, M4TimestampGranularity,
+    M4VisibilityOptions, MetalError, MetalLayer, Origin, PixelFormat, PrimitiveTopologyClass,
+    PrimitiveType, Region, RenderStages, ResidencySet, ResidencySetDescriptor, ResourceOptions,
+    SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent,
+    Size, Stages, StorageMode, Texture, TextureDescriptor, TextureUsage, VisibilityResultMode,
+    VisibilityResultType, id, retain,
 };
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
@@ -61,6 +68,17 @@ pub struct Pipeline {
     /// Metal picks the primitive at draw time, Vulkan at pipeline creation. Carrying it here is
     /// what lets `RasterDesc::topology` mean the same thing on both.
     primitive: PrimitiveType,
+    /// The `MTLResourceID` a shader names when encoding this pipeline into an
+    /// [`IndirectCommands`] buffer. Zero unless the descriptor asked for it.
+    handle: PipelineHandle,
+}
+
+impl Pipeline {
+    /// The handle a shader writes into a command it encodes. Only meaningful when the pipeline
+    /// was built with `indirect`; zero otherwise, and zero always on Vulkan.
+    pub fn handle(&self) -> PipelineHandle {
+        self.handle
+    }
 }
 
 unsafe impl Send for Pipeline {}
@@ -69,6 +87,24 @@ unsafe impl Sync for Pipeline {}
 /// A sampler *object*. `Sampler` in `lib.rs` is the bindless handle that points at one of
 /// these, which is why this needs a different name.
 pub struct SamplerState(minmetal::SamplerState);
+
+/// One run of a multi-draw. Layout matches `VkMultiDrawInfoEXT`, so on Vulkan a slice passes
+/// straight into `vkCmdDrawMultiEXT`; here it is walked one draw at a time.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MultiDraw {
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+}
+
+/// Matches `VkMultiDrawIndexedInfoEXT`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MultiDrawIndexed {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub vertex_offset: i32,
+}
 
 impl From<MetalError> for Error {
     fn from(error: MetalError) -> Self {
@@ -322,18 +358,6 @@ pub(crate) fn write_mask(mask: u8) -> ColorWriteMask {
 /// `MTL4RenderPipelineDescriptor.depthAttachmentPixelFormat` has no minmetal setter, and a
 /// pipeline that renders into a depth attachment has to declare the format or Metal rejects
 /// the pass. One message send beats forking the dependency.
-fn set_depth_format(pipeline: &M4RenderPipelineDescriptor, format: PixelFormat) {
-    unsafe {
-        let send: unsafe extern "C" fn(id, minmetal::SEL, usize) =
-            std::mem::transmute(minmetal::objc_msgSend as *const std::ffi::c_void);
-        send(
-            pipeline.raw,
-            minmetal::sel(b"setDepthAttachmentPixelFormat:\0"),
-            format.as_raw(),
-        );
-    }
-}
-
 /// `Stage` is the blog post's vocabulary; Metal's encoder stages are a shorter list, so several
 /// nga stages land on the same one. That is safe — a barrier that names more stages than it
 /// needs is conservative, never wrong.
@@ -446,8 +470,7 @@ impl Device {
     /// `METAL_DEVICE_WRAPPER_TYPE` environment variable before the process starts, not by the
     /// API. The argument stays so the two backends open a device the same way.
     pub fn new(_validation: bool) -> Result<Self, Error> {
-        let device = minmetal::Device::system_default()
-            .ok_or(Error::new("no Metal device"))?;
+        let device = minmetal::Device::system_default().ok_or(Error::new("no Metal device"))?;
         let queue = device.new_m4_command_queue().ok_or(Error::new(
             "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
         ))?;
@@ -482,14 +505,14 @@ impl Device {
 
     /// Whether this adapter can do something outside the shared surface.
     ///
-    /// Deliberately conservative in the same way `vulkan.rs` is: `true` only where the backend
-    /// has a path today. Mesh, tile and indirect-command support is real Metal functionality
-    /// that has not been ported back yet, so it answers `false` until it has.
+    /// `true` only where the backend has a path today, not merely where the hardware could.
+    /// Every method behind a feature exists on both backends; on the one without the path it
+    /// fails or does nothing, which is why asking first is not optional.
     pub fn supports(&self, feature: Feature) -> bool {
         match feature {
-            Feature::TileShaders => false,
-            Feature::MeshShaders => false,
-            Feature::IndirectCommands => false,
+            Feature::TileShaders => true,
+            Feature::MeshShaders => true,
+            Feature::IndirectCommands => true,
             // `VK_EXT_multi_draw` has no counterpart; a run of draws is a run of calls here.
             Feature::MultiDraw => false,
             Feature::Timestamps => true,
@@ -735,6 +758,7 @@ pub struct GpuHeap {
     pub(crate) heap: Heap,
     pub(crate) tlsf: Tlsf,
     pub(crate) options: ResourceOptions,
+    pub(crate) retired: VecDeque<(u64, Retired)>,
 }
 
 impl GpuHeap {
@@ -761,6 +785,7 @@ impl GpuHeap {
             heap,
             tlsf: Tlsf::new(size, 256),
             options,
+            retired: VecDeque::new(),
         })
     }
 
@@ -875,6 +900,36 @@ impl GpuHeap {
     pub fn free_texture(&mut self, texture: HeapTexture) {
         self.tlsf.free(texture.alloc.block);
     }
+
+    /// Hand a resource over to be released once the frame that last used it has finished.
+    ///
+    /// `frame` is [`Context::frame`] at the point of the hand-over. Freeing something the GPU is
+    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch — the borrow ends when
+    /// recording does, not when the command buffer retires.
+    pub fn free_later(&mut self, frame: u64, retired: Retired) {
+        self.retired.push_back((frame, retired));
+    }
+
+    /// Release everything handed over during a frame that has since completed. `completed` is
+    /// [`Context::completed`]; call this once a frame, before allocating.
+    pub fn retire(&mut self, completed: u64) {
+        while self
+            .retired
+            .front()
+            .is_some_and(|&(frame, _)| frame < completed)
+        {
+            match self.retired.pop_front().unwrap().1 {
+                Retired::Buffer(buffer) => self.free_buffer(buffer),
+                Retired::Texture(texture) => self.free_texture(texture),
+            }
+        }
+    }
+}
+
+/// A resource waiting for the GPU to be done with it. See [`GpuHeap::free_later`].
+pub enum Retired {
+    Buffer(HeapBuffer),
+    Texture(HeapTexture),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -982,7 +1037,8 @@ impl Surface {
 
     /// Resizing a `CAMetalLayer` is a property write, where Vulkan rebuilds the whole swapchain.
     pub fn rebuild(&mut self, _device: &Device, width: u32, height: u32) -> Result<(), Error> {
-        self.layer.set_drawable_size(width as usize, height as usize);
+        self.layer
+            .set_drawable_size(width as usize, height as usize);
         self.width = width;
         self.height = height;
         Ok(())
@@ -1077,34 +1133,78 @@ impl Shaders {
             let fragment = self.function(desc.fragment, desc.constants);
             pipeline.set_fragment_function_descriptor(Some(&fragment));
         }
-        pipeline.set_support_indirect_command_buffers(M4IndirectCommandBufferSupportState::Disabled);
+        pipeline.set_support_indirect_command_buffers(indirect(desc.indirect));
         pipeline.set_rasterization_enabled(true);
         pipeline.set_input_primitive_topology(topology_class(desc.topology));
         pipeline.set_raster_sample_count(desc.samples as usize);
         pipeline.set_alpha_to_coverage_state(M4AlphaToCoverageState::Disabled);
-        if let Some(depth) = desc.depth {
-            set_depth_format(&pipeline, format(depth));
-        }
+        // `desc.depth` is deliberately unused. `MTL4RenderPipelineDescriptor` carries no depth
+        // attachment format — Metal 4 takes it from the render pass — where Vulkan bakes it
+        // into `VkPipelineRenderingCreateInfo` and refuses to render without a match.
 
+        color_targets(&pipeline.color_attachments(), desc.colors);
+
+        let state = self
+            .compiler
+            .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)?;
+        let raw = state.raw;
+        let handle = pipeline_handle(&state, desc.indirect)?;
+        self.render.push(state);
+        Ok(Pipeline {
+            raw,
+            primitive: topology(desc.topology),
+            handle,
+        })
+    }
+
+    /// A mesh pipeline. Metal-only; the Vulkan backend answers with an error until
+    /// `VK_EXT_mesh_shader` is requested at device creation.
+    pub fn mesh(&mut self, desc: &MeshDesc) -> Result<Pipeline, Error> {
+        let pipeline = M4MeshRenderPipelineDescriptor::new();
+        pipeline.set_label(desc.mesh);
+        if !desc.object.is_empty() {
+            pipeline
+                .set_object_function_descriptor(Some(&self.function(desc.object, desc.constants)));
+            pipeline.set_payload_memory_length(desc.payload);
+        }
+        pipeline.set_mesh_function_descriptor(Some(&self.function(desc.mesh, desc.constants)));
+        if !desc.fragment.is_empty() {
+            pipeline.set_fragment_function_descriptor(Some(
+                &self.function(desc.fragment, desc.constants),
+            ));
+        }
+        pipeline.set_support_indirect_command_buffers(indirect(desc.indirect));
+        pipeline.set_rasterization_enabled(!desc.fragment.is_empty());
+        pipeline.set_raster_sample_count(desc.samples as usize);
+        pipeline.set_alpha_to_coverage_state(M4AlphaToCoverageState::Disabled);
+        color_targets(&pipeline.color_attachments(), desc.colors);
+
+        let state = self
+            .compiler
+            .new_render_pipeline_state(&pipeline.as_pipeline_descriptor(), None)?;
+        let raw = state.raw;
+        let handle = pipeline_handle(&state, desc.indirect)?;
+        self.render.push(state);
+        Ok(Pipeline {
+            raw,
+            // A mesh pipeline declares its own topology in the shader, so nothing is picked here.
+            primitive: PrimitiveType::Triangle,
+            handle,
+        })
+    }
+
+    /// A tile pipeline: a compute function that runs inside a render pass over the imageblock.
+    /// Apple-only for good — see [`TileDesc`].
+    pub fn tile(&mut self, desc: &TileDesc) -> Result<Pipeline, Error> {
+        let pipeline = M4TileRenderPipelineDescriptor::new();
+        pipeline.set_label(desc.function);
+        pipeline.set_tile_function_descriptor(Some(&self.function(desc.function, desc.constants)));
+        pipeline.set_raster_sample_count(desc.samples as usize);
         let attachments = pipeline.color_attachments();
-        for (index, target) in desc.colors.iter().enumerate() {
-            let attachment = attachments.object_at(index);
-            attachment.set_pixel_format(format(target.format));
-            attachment.set_write_mask(write_mask(target.write_mask));
-            match blend(target.blend) {
-                Some((src_rgb, dst_rgb, src_alpha, dst_alpha)) => {
-                    attachment.set_blending_state(M4BlendState::Enabled);
-                    attachment.set_blend_factors(
-                        blend_factor(src_rgb),
-                        blend_factor(dst_rgb),
-                        minmetal::BlendOperation::Add,
-                        blend_factor(src_alpha),
-                        blend_factor(dst_alpha),
-                        minmetal::BlendOperation::Add,
-                    );
-                }
-                None => attachment.set_blending_state(M4BlendState::Disabled),
-            }
+        for (index, &target) in desc.colors.iter().enumerate() {
+            attachments
+                .object_at(index)
+                .set_pixel_format(format(target));
         }
 
         let state = self
@@ -1114,7 +1214,8 @@ impl Shaders {
         self.render.push(state);
         Ok(Pipeline {
             raw,
-            primitive: topology(desc.topology),
+            primitive: PrimitiveType::Triangle,
+            handle: PipelineHandle(Handle(0)),
         })
     }
 
@@ -1132,14 +1233,76 @@ impl Shaders {
         Ok(Pipeline {
             raw,
             primitive: PrimitiveType::Triangle,
+            handle: PipelineHandle(Handle(0)),
         })
     }
 }
 
 // -- passes ------------------------------------------------------------------------------
 
+/// The stages a compute encoder can name about itself. Anything else in `stage`'s output
+/// belongs to a render encoder and is only meaningful on the *queue* half of a barrier.
+fn encoder_stages(stages: Stages) -> Stages {
+    let compute = Stages::DISPATCH | Stages::BLIT | Stages::ACCELERATION_STRUCTURE;
+    match Stages(stages.0 & compute.0) {
+        Stages::NONE => compute,
+        kept => kept,
+    }
+}
+
+fn indirect(enabled: bool) -> M4IndirectCommandBufferSupportState {
+    match enabled {
+        true => M4IndirectCommandBufferSupportState::Enabled,
+        false => M4IndirectCommandBufferSupportState::Disabled,
+    }
+}
+
+/// A pipeline only has a resource ID when it was built to be encoded into an indirect command
+/// buffer, so asking unconditionally would fail on every ordinary pipeline.
+fn pipeline_handle(
+    state: &minmetal::RenderPipelineState,
+    indirect: bool,
+) -> Result<PipelineHandle, Error> {
+    match indirect {
+        true => Ok(PipelineHandle(Handle(state.gpu_resource_id()?.impl_))),
+        false => Ok(PipelineHandle(Handle(0))),
+    }
+}
+
+fn size(dims: [u32; 3]) -> Size {
+    Size::new(dims[0] as usize, dims[1] as usize, dims[2] as usize)
+}
+
+/// The colour-attachment half of a pipeline descriptor. Raster and mesh pipelines take the same
+/// array type and the same `ColorTarget`s, and the blend translation is twenty lines either way.
+fn color_targets(
+    attachments: &M4RenderPipelineColorAttachmentDescriptorArray,
+    colors: &[ColorTarget],
+) {
+    for (index, target) in colors.iter().enumerate() {
+        let attachment = attachments.object_at(index);
+        attachment.set_pixel_format(format(target.format));
+        attachment.set_write_mask(write_mask(target.write_mask));
+        match blend(target.blend) {
+            Some((src_rgb, dst_rgb, src_alpha, dst_alpha)) => {
+                attachment.set_blending_state(M4BlendState::Enabled);
+                attachment.set_blend_factors(
+                    blend_factor(src_rgb),
+                    blend_factor(dst_rgb),
+                    minmetal::BlendOperation::Add,
+                    blend_factor(src_alpha),
+                    blend_factor(dst_alpha),
+                    minmetal::BlendOperation::Add,
+                );
+            }
+            None => attachment.set_blending_state(M4BlendState::Disabled),
+        }
+    }
+}
+
 pub struct Pass {
     pub(crate) desc: M4RenderPassDescriptor,
+    pub(crate) occlusion_base: u32,
 }
 
 impl Default for Pass {
@@ -1152,6 +1315,34 @@ impl Pass {
     pub fn new() -> Self {
         Self {
             desc: M4RenderPassDescriptor::new(),
+            occlusion_base: 0,
+        }
+    }
+
+    /// Size the tile and its imageblock for a tile pipeline. Apple-only; see [`TileDesc`].
+    ///
+    /// `imageblock_bytes` is the per-sample struct the tile function reads and writes, and it
+    /// has to match what the MSL declares or the pass will not encode.
+    pub fn tile(self, width: u32, height: u32, imageblock_bytes: usize) -> Self {
+        self.desc.set_tile_width(width as usize);
+        self.desc.set_tile_height(height as usize);
+        self.desc.set_imageblock_sample_length(imageblock_bytes);
+        self
+    }
+
+    /// Count samples that pass the depth test into `queries` for the draws in this pass.
+    /// Which slot each draw counts into is [`Raster::occlusion`].
+    pub fn occlusion(self, queries: &Occlusion) -> Self {
+        self.desc
+            .set_visibility_result_buffer(Some(&queries.buffer));
+        // `Reset` zeroes the *whole* buffer at pass start, which would wipe the other frame's
+        // half before the host has read it. `Occlusion::begin` clears this frame's half itself,
+        // so accumulating onto a known zero is the same measurement without the collateral.
+        self.desc
+            .set_visibility_result_type(VisibilityResultType::Accumulate);
+        Self {
+            occlusion_base: queries.base as u32,
+            ..self
         }
     }
 
@@ -1172,17 +1363,26 @@ impl Pass {
     }
 
     fn attach(self, index: usize, texture: &Texture, clear: Option<[f32; 4]>) -> Self {
-        let attachment = self.desc.color_attachments().object_at_indexed_subscript(index);
+        let attachment = self
+            .desc
+            .color_attachments()
+            .object_at_indexed_subscript(index);
         attachment.base().set_texture(Some(texture));
-        attachment.base().set_store_action(minmetal::StoreAction::Store);
+        attachment
+            .base()
+            .set_store_action(minmetal::StoreAction::Store);
         match clear {
             Some([r, g, b, a]) => {
-                attachment.base().set_load_action(minmetal::LoadAction::Clear);
+                attachment
+                    .base()
+                    .set_load_action(minmetal::LoadAction::Clear);
                 attachment.set_clear_color(minmetal::ClearColor::new(
                     r as f64, g as f64, b as f64, a as f64,
                 ));
             }
-            None => attachment.base().set_load_action(minmetal::LoadAction::Load),
+            None => attachment
+                .base()
+                .set_load_action(minmetal::LoadAction::Load),
         }
         self
     }
@@ -1196,10 +1396,14 @@ impl Pass {
         });
         match clear {
             Some(depth) => {
-                attachment.base().set_load_action(minmetal::LoadAction::Clear);
+                attachment
+                    .base()
+                    .set_load_action(minmetal::LoadAction::Clear);
                 attachment.set_clear_depth(depth as f64);
             }
-            None => attachment.base().set_load_action(minmetal::LoadAction::Load),
+            None => attachment
+                .base()
+                .set_load_action(minmetal::LoadAction::Load),
         }
         self
     }
@@ -1213,6 +1417,7 @@ pub struct Raster<'a> {
     pub(crate) arena: &'a Arena,
     pub(crate) depth_states: &'a [DepthStencilState],
     pub(crate) primitive: Cell<PrimitiveType>,
+    pub(crate) occlusion_base: u32,
 }
 
 impl<'a> Raster<'a> {
@@ -1242,6 +1447,7 @@ impl<'a> Raster<'a> {
             arena,
             depth_states,
             primitive: Cell::new(PrimitiveType::Triangle),
+            occlusion_base: pass.occlusion_base,
         };
         raster.viewport(
             Viewport::new(width, height),
@@ -1341,6 +1547,120 @@ impl<'a> Raster<'a> {
         }
     }
 
+    /// A run of draws sharing every piece of state, including the root pointer.
+    ///
+    /// `VK_EXT_multi_draw` collapses this into one driver call; Metal has no such call, so it
+    /// is a loop and `Device::supports(Feature::MultiDraw)` answers `false`. The *result* is
+    /// identical, which is why the method exists at all — portable code should not have to
+    /// carry two spellings of the same draw.
+    pub fn draw_multi<T>(&self, root: Gpu<'_, T>, draws: &[MultiDraw]) {
+        self.bind(root);
+        for draw in draws {
+            self.encoder.draw_primitives(
+                self.primitive.get(),
+                draw.first_vertex as usize,
+                draw.vertex_count as usize,
+            );
+        }
+    }
+
+    /// The indexed counterpart of [`Raster::draw_multi`]. `first_index` is applied by moving
+    /// the index-buffer address, which is why the buffer length shrinks with it.
+    ///
+    /// `vertex_offset` must be zero: `MTL4RenderCommandEncoder`'s indexed draw takes no base
+    /// vertex, and silently ignoring the field would be worse than refusing it.
+    pub fn draw_multi_indexed<T, I: IndexFormat>(
+        &self,
+        root: Gpu<'_, T>,
+        indices: &HeapBuffer,
+        draws: &[MultiDrawIndexed],
+    ) {
+        self.bind(root);
+        let width = match I::WIDE {
+            true => 4,
+            false => 2,
+        };
+        for draw in draws {
+            debug_assert_eq!(
+                draw.vertex_offset, 0,
+                "Metal's indexed draw has no base vertex; bake the offset into the indices"
+            );
+            let offset = draw.first_index as usize * width;
+            self.encoder.draw_indexed_primitives(
+                self.primitive.get(),
+                draw.index_count as usize,
+                match I::WIDE {
+                    true => IndexType::UInt32,
+                    false => IndexType::UInt16,
+                },
+                indices.gpu + offset as u64,
+                indices.len - offset,
+            );
+        }
+    }
+
+    /// Runs a mesh pipeline: `groups` object threadgroups, each amplifying into mesh
+    /// threadgroups of `mesh_group` threads. With no object stage, `groups` is the mesh grid
+    /// directly and `object_group` is ignored.
+    ///
+    /// Metal-only; ask [`Device::supports`] with [`Feature::MeshShaders`] first.
+    pub fn draw_mesh<T>(
+        &self,
+        root: Gpu<'_, T>,
+        groups: [u32; 3],
+        object_group: [u32; 3],
+        mesh_group: [u32; 3],
+    ) {
+        self.bind(root);
+        self.encoder
+            .draw_mesh_threadgroups(size(groups), size(object_group), size(mesh_group));
+    }
+
+    /// Runs a tile pipeline over the pass's imageblock. One dispatch covers one tile, so the
+    /// grid is the tile size the pass was given, not the render target. Apple-only.
+    pub fn dispatch_tile<T>(&self, root: Gpu<'_, T>, width: u32, height: u32) {
+        self.bind(root);
+        self.encoder
+            .dispatch_threads_per_tile(Size::new(width as usize, height as usize, 1));
+    }
+
+    /// Replays draws a shader encoded into `commands`. The GPU wrote both the arguments and the
+    /// pipeline selection, which is what an [`IndirectCommands`] buffer has over
+    /// `draw_indirect_count`. Metal-only.
+    pub fn execute(&self, commands: &IndirectCommands, range: std::ops::Range<u32>) {
+        self.encoder.execute_commands_in_buffer(
+            &commands.icb,
+            minmetal::Range::new(range.start as usize, range.len()),
+        );
+    }
+
+    /// Count the samples the following draws write into slot `index` of the [`Occlusion`] set
+    /// the pass was given. Calling it again moves to another slot; [`Raster::occlusion_off`]
+    /// stops counting.
+    pub fn occlusion(&self, index: u32) {
+        self.encoder.set_visibility_result_mode(
+            VisibilityResultMode::Counting,
+            (self.occlusion_base + index) as usize * size_of::<u64>(),
+        );
+    }
+
+    pub fn occlusion_off(&self) {
+        self.encoder
+            .set_visibility_result_mode(VisibilityResultMode::Disabled, 0);
+    }
+
+    /// Records the GPU clock into slot `index`, after everything drawn so far in this pass has
+    /// left the fragment stage. Vulkan spells the same thing `vkCmdWriteTimestamp2`.
+    pub fn timestamp(&self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        self.encoder.write_timestamp_with_granularity(
+            M4TimestampGranularity::Precise,
+            RenderStages::FRAGMENT,
+            &timers.heap,
+            timers.base + index,
+        );
+    }
+
     pub fn draw<T>(&self, root: Gpu<'_, T>, start: u32, count: u32) {
         self.bind(root);
         self.encoder
@@ -1420,12 +1740,18 @@ impl<'a> Compute<'a> {
     /// any other way: without the first, the offscreen raster test failed six runs in twenty;
     /// without the second, `gpu_driven` drew bands of empty draw slots because the render
     /// encoder fetched indirect arguments the encode pass had not published yet.
+    /// The three calls take a mix of *encoder* stages and *queue* stages, and an encoder stage
+    /// has to be one this encoder actually has. A compute encoder naming `Stage::INDIRECT`,
+    /// which is a vertex fetch on Metal, is a validation failure — and with the layer off it is
+    /// a magenta frame with no diagnostic at all.
     pub fn barrier(&self, before: Stage, after: Stage, hazards: Hazard) {
         let (before, after, hazard) = (stage(before), stage(after), hazard(hazards));
-        self.encoder.barrier(before, after, hazard);
-        self.encoder.barrier_after_queue_stages(before, after, hazard);
+        let (local_before, local_after) = (encoder_stages(before), encoder_stages(after));
+        self.encoder.barrier(local_before, local_after, hazard);
         self.encoder
-            .barrier_before_queue_stages(before, after, hazard);
+            .barrier_after_queue_stages(before, local_after, hazard);
+        self.encoder
+            .barrier_before_queue_stages(local_before, after, hazard);
     }
 
     pub fn copy_buffer(
@@ -1473,6 +1799,35 @@ impl<'a> Compute<'a> {
 
     /// Metal's fill takes a byte, Vulkan's a word. The shared surface takes the word and this
     /// splits it, which is exact for the only case either backend is used for — clearing.
+    /// Replays dispatches a shader encoded into `commands`. Metal-only.
+    pub fn execute(&self, commands: &IndirectCommands, range: std::ops::Range<u32>) {
+        self.encoder.execute_commands_in_buffer(
+            &commands.icb,
+            minmetal::Range::new(range.start as usize, range.len()),
+        );
+    }
+
+    /// Clears a range of encoded commands so the next frame starts from nothing. An unreset
+    /// slot replays whatever it last held, which is the indirect-command-buffer equivalent of
+    /// the stale `instance_count` `draw_indirect_count` has to guard against.
+    pub fn reset(&self, commands: &IndirectCommands, range: std::ops::Range<u32>) {
+        self.encoder.reset_commands_in_buffer(
+            &commands.icb,
+            minmetal::Range::new(range.start as usize, range.len()),
+        );
+    }
+
+    /// Records the GPU clock into slot `index`, after everything dispatched so far in this
+    /// encoder has finished.
+    pub fn timestamp(&self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        self.encoder.write_timestamp_with_granularity(
+            M4TimestampGranularity::Precise,
+            &timers.heap,
+            timers.base + index,
+        );
+    }
+
     pub fn fill_buffer(&self, buffer: &HeapBuffer, offset: usize, size: usize, value: u32) {
         let bytes = value.to_ne_bytes();
         debug_assert!(
@@ -1590,6 +1945,12 @@ impl Context {
         self.frame
     }
 
+    /// How many frames have finished on the GPU. Frame `n` is complete once this exceeds `n`,
+    /// which is exactly the comparison [`GpuHeap::retire`] makes.
+    pub fn completed(&self) -> u64 {
+        self.event.signaled_value()
+    }
+
     pub fn begin_frame(&mut self) -> Result<Frame<'_>, Error> {
         let index = self.frame;
         self.frame += 1;
@@ -1690,8 +2051,7 @@ impl Frame<'_> {
         if let Some(drawable) = drawable {
             self.queue.wait_for_drawable(&drawable.drawable);
         }
-        self.queue
-            .commit(&self.command_buffers[..self.recording]);
+        self.queue.commit(&self.command_buffers[..self.recording]);
         self.queue.signal_event(&self.event.as_event(), self.value);
         if let Some(drawable) = drawable {
             self.queue.signal_drawable(&drawable.drawable);
@@ -1739,5 +2099,280 @@ impl Recorder<'_> {
 impl Drop for Recorder<'_> {
     fn drop(&mut self) {
         self.command_buffer.end_command_buffer();
+    }
+}
+
+// -- fences ------------------------------------------------------------------------------
+
+/// A monotonic counter both the host and the GPU can see: `MTLSharedEvent` here, a timeline
+/// semaphore on Vulkan. Frames have their own counter inside [`Context`] — this is for the
+/// sequencing a caller does itself, such as an asset load that must land before a frame reads
+/// what it produced.
+pub struct Fence(SharedEvent);
+
+impl Fence {
+    pub fn new(device: &Device) -> Result<Self, Error> {
+        Ok(Self(device.device.new_shared_event()?))
+    }
+
+    /// Raise the counter from the host. Values only ever go up; signalling backwards is a
+    /// programming error on both backends and is not checked.
+    pub fn signal(&self, value: u64) {
+        self.0.set_signaled_value(value);
+    }
+
+    pub fn value(&self) -> u64 {
+        self.0.signaled_value()
+    }
+
+    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout —
+    /// a hang, not an error worth a `Result`, since there is nothing to do about it but say so.
+    pub fn wait(&self, value: u64) -> bool {
+        self.0.wait_until_signaled_value(value, 10_000)
+    }
+}
+
+// -- indirect command buffers ------------------------------------------------------------
+
+/// A buffer of draws or dispatches a *shader* encodes, pipeline selection included.
+///
+/// This is what `draw_indirect_count` is not: there, the GPU picks the arguments and the host
+/// picks the pipeline, so every replayed draw shares one pipeline and one root pointer. Here a
+/// compute shader writes whole commands — pipeline, buffers, primitive and counts — and the
+/// render pass replays them.
+///
+/// Metal-only. Vulkan's nearest equivalent is `VK_NV_device_generated_commands`, which is not
+/// in the shared surface; ask [`Device::supports`] with [`Feature::IndirectCommands`].
+pub struct IndirectCommands {
+    pub(crate) icb: IndirectCommandBuffer,
+    pub(crate) handle: Commands,
+    pub(crate) count: u32,
+}
+
+impl IndirectCommands {
+    /// `count` draw slots. `indexed` picks between `drawPrimitives` and
+    /// `drawIndexedPrimitives`; a buffer cannot hold both.
+    pub fn draws(device: &Device, count: u32, indexed: bool) -> Result<Self, Error> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(match indexed {
+            true => IndirectCommandType::DRAW_INDEXED,
+            false => IndirectCommandType::DRAW,
+        });
+        // The encoding shader names the pipeline in every command it writes, which is the
+        // point of the whole mechanism. Inheriting instead would make the encoder's pipeline
+        // the one that runs — and with none bound, `executeCommandsInBuffer` dereferences a
+        // null pipeline inside the driver rather than complaining.
+        desc.set_inherit_pipeline_state(false);
+        desc.set_inherit_buffers(false);
+        desc.set_max_vertex_buffer_bind_count(2);
+        desc.set_max_fragment_buffer_bind_count(2);
+        Self::inherit_render_state(&desc);
+        Self::new(device, &desc, count)
+    }
+
+    /// `count` mesh-pipeline draw slots.
+    pub fn meshes(device: &Device, count: u32) -> Result<Self, Error> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(IndirectCommandType::DRAW_MESH_THREADGROUPS);
+        desc.set_inherit_pipeline_state(false);
+        desc.set_inherit_buffers(false);
+        desc.set_max_object_buffer_bind_count(2);
+        desc.set_max_mesh_buffer_bind_count(2);
+        desc.set_max_fragment_buffer_bind_count(2);
+        Self::inherit_render_state(&desc);
+        Self::new(device, &desc, count)
+    }
+
+    /// `count` dispatch slots, for a compute pass replaying work another shader queued.
+    pub fn dispatches(device: &Device, count: u32) -> Result<Self, Error> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(IndirectCommandType::CONCURRENT_DISPATCH_THREADS);
+        desc.set_inherit_pipeline_state(false);
+        desc.set_inherit_buffers(false);
+        desc.set_max_kernel_buffer_bind_count(2);
+        Self::new(device, &desc, count)
+    }
+
+    /// macOS 26 split six pieces of render state out of the encoder and into the command, each
+    /// defaulting to *not* inherited. An MSL `render_command` has no setter for any of them, so
+    /// leaving the defaults means every replayed draw runs with undefined cull, depth and fill
+    /// state — which the driver renders as a magenta frame rather than reporting.
+    fn inherit_render_state(desc: &IndirectCommandBufferDescriptor) {
+        desc.set_inherit_depth_stencil_state(true);
+        desc.set_inherit_depth_bias(true);
+        desc.set_inherit_depth_clip_mode(true);
+        desc.set_inherit_cull_mode(true);
+        desc.set_inherit_front_facing_winding(true);
+        desc.set_inherit_triangle_fill_mode(true);
+    }
+
+    fn new(
+        device: &Device,
+        desc: &IndirectCommandBufferDescriptor,
+        count: u32,
+    ) -> Result<Self, Error> {
+        let icb = device.device.new_indirect_command_buffer(
+            desc,
+            count as usize,
+            IndirectCommandBufferOptions::NONE,
+        )?;
+        device.make_resident(&Allocation::from_indirect_command_buffer(&icb))?;
+        Ok(Self {
+            handle: Commands(Handle(icb.gpu_resource_id()?.impl_)),
+            icb,
+            count,
+        })
+    }
+
+    /// The handle a shader dereferences to encode into this buffer. Eight bytes, exactly like a
+    /// texture or sampler handle, and written into the root struct the same way.
+    pub fn handle(&self) -> Commands {
+        self.handle
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Every slot, for the common `execute(&commands, commands.all())` case.
+    pub fn all(&self) -> std::ops::Range<u32> {
+        0..self.count
+    }
+}
+
+// -- queries -----------------------------------------------------------------------------
+
+#[link(name = "System", kind = "dylib")]
+unsafe extern "C" {
+    fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+}
+
+/// `count` GPU timestamps per frame, doubled so a frame in flight never overwrites the results
+/// the host has not read yet. `begin` picks this frame's half and resolves the other one, so
+/// the numbers a caller reads are always from `FRAMES_IN_FLIGHT` frames ago and never stall.
+pub struct Timers {
+    pub(crate) heap: M4CounterHeap,
+    pub(crate) count: usize,
+    pub(crate) base: usize,
+    pub(crate) ticks: Vec<u64>,
+    pub(crate) ns_per_tick: f64,
+}
+
+impl Timers {
+    pub fn new(device: &Device, count: usize) -> Result<Self, Error> {
+        let total = count * FRAMES_IN_FLIGHT as usize;
+        let desc = M4CounterHeapDescriptor::new();
+        desc.set_type(M4CounterHeapType::Timestamp);
+        desc.set_count(total);
+        let heap = device.device.new_m4_counter_heap_with_descriptor(&desc)?;
+        heap.invalidate_counter_range(minmetal::Range::new(0, total));
+        // Metal reports timestamps in mach ticks, which are not nanoseconds on Apple silicon.
+        let mut timebase = [0u32; 2];
+        debug_assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
+        Ok(Self {
+            heap,
+            count,
+            base: 0,
+            ticks: vec![0; count],
+            ns_per_tick: timebase[0] as f64 / timebase[1] as f64,
+        })
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Take this frame's half of the heap and read back what the last frame to use it recorded.
+    /// Call once per frame, after `begin_frame` — that wait is what makes the read safe.
+    ///
+    /// Only slots written every frame are meaningful. There is deliberately no per-frame
+    /// `invalidateCounterRange:`: it is queue-ordered, not immediate, and issuing it here raced
+    /// timestamps the GPU had already recorded — one run in four came back empty.
+    pub fn begin(&mut self, frame: &Frame) {
+        self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as usize * self.count;
+        self.ticks.fill(0);
+        let range = minmetal::Range::new(self.base, self.count);
+        if let Some(data) = self.heap.resolve_counter_range(range) {
+            for (tick, entry) in self.ticks.iter_mut().zip(data.chunks_exact(8)) {
+                *tick = u64::from_ne_bytes(entry.try_into().unwrap());
+            }
+        }
+    }
+
+    /// Whether slot `index` holds a timestamp from the last frame to use this half. A slot that
+    /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
+    /// reports for it — this is how to tell the two apart.
+    pub fn written(&self, index: usize) -> bool {
+        self.ticks[index] != 0
+    }
+
+    /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
+    /// order, which is what an unwritten slot looks like on both backends.
+    pub fn ns(&self, start: usize, end: usize) -> f64 {
+        let (start, end) = (self.ticks[start], self.ticks[end]);
+        match start == 0 || end < start {
+            true => 0.0,
+            false => (end - start) as f64 * self.ns_per_tick,
+        }
+    }
+
+    pub fn ms(&self, start: usize, end: usize) -> f64 {
+        self.ns(start, end) / 1e6
+    }
+}
+
+/// `count` occlusion counters per frame, doubled the same way [`Timers`] is.
+///
+/// Metal counts straight into a visibility-result buffer the pass names; Vulkan counts into a
+/// query pool and the results are fetched at `begin`. Either way what a caller sees is the
+/// sample count from `FRAMES_IN_FLIGHT` frames ago.
+pub struct Occlusion {
+    pub(crate) buffer: Buffer,
+    pub(crate) count: u32,
+    pub(crate) base: u32,
+    pub(crate) samples: Vec<u64>,
+}
+
+impl Occlusion {
+    pub fn new(device: &Device, count: u32) -> Result<Self, Error> {
+        let total = count as usize * FRAMES_IN_FLIGHT as usize;
+        let buffer = device.device.new_buffer(
+            total * size_of::<u64>(),
+            ResourceOptions::new(
+                CpuCacheMode::DefaultCache,
+                StorageMode::Shared,
+                HazardTrackingMode::Untracked,
+            ),
+        )?;
+        device.make_resident(&Allocation::from_buffer(&buffer))?;
+        unsafe { std::ptr::write_bytes(buffer.contents() as *mut u8, 0, total * size_of::<u64>()) };
+        Ok(Self {
+            buffer,
+            count,
+            base: 0,
+            samples: vec![0; count as usize],
+        })
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Take this frame's half of the buffer and read back what the last frame to use it counted.
+    pub fn begin(&mut self, frame: &Frame) {
+        self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as u32 * self.count;
+        let counters = unsafe { (self.buffer.contents() as *mut u64).add(self.base as usize) };
+        for (index, out) in self.samples.iter_mut().enumerate() {
+            unsafe {
+                *out = counters.add(index).read();
+                counters.add(index).write(0);
+            }
+        }
+    }
+
+    /// Samples that passed the depth test in slot `index`, from the last frame to use this
+    /// half of the buffer.
+    pub fn samples(&self, index: u32) -> u64 {
+        self.samples[index as usize]
     }
 }

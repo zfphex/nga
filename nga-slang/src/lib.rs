@@ -60,6 +60,10 @@ fn scalar(name: &str) -> Option<&'static str> {
         "TextureCube" => "nga_texturecube",
         "Depth2d" => "nga_depth2d",
         "Sampler" => "nga_sampler",
+        // Metal-only, and declared by the MSL prelude rather than the Slang one: indirect
+        // command buffers have no Slang spelling, so shaders that use these are `.metal`.
+        "Commands" => "nga_commands",
+        "PipelineHandle" => "nga_pipeline",
         "Draw" => "nga_draw",
         "DrawIndexed" => "nga_draw_indexed",
         "Dispatch" => "nga_dispatch",
