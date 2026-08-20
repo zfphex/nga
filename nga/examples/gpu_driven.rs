@@ -232,5 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
+    heap.free_buffer(counter);
+    heap.free_buffer(draws);
+    heap.free_buffer(instances);
     Ok(())
 }

@@ -259,6 +259,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
+    for texture in live {
+        heap.free_texture(texture);
+    }
+    heap.free_buffer(material_buffer);
+    heap.free_buffer(vertex_buffer);
     // The sampler destroys itself; nothing here has to name a Vulkan call to tear down.
     drop(sampler);
     Ok(())

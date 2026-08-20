@@ -192,5 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
+    heap.free_buffer(vertices);
+    heap.free_buffer(instances);
     Ok(())
 }

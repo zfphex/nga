@@ -6,10 +6,6 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 
 ## Render targets
 
-- **MSAA resolve.** `RasterDesc::samples` picks the sample count, but there is nowhere to name a
-  resolve target — `Pass` has colour and depth attachments and nothing else. Needs a resolve
-  attachment on `Pass` (`MTLRenderPassColorAttachmentDescriptor.resolveTexture` /
-  `VkRenderingAttachmentInfo::resolve_image_view`) and a depth-resolve mode alongside it.
 - **Stencil.** No stencil attachment, no stencil state, no reference value. `Format::D32FloatS8`
   exists and `DepthState` is depth-only. Metal wants a `MTLStencilDescriptor` pair on the
   depth-stencil state — which is built once per (compare, write) pair in `Context::new`, so a
@@ -67,12 +63,15 @@ half from macOS — `check` never links, so it needs the `rust-std` component an
 Windows toolchain. That is what keeps the two backend files in step, and it should be run on
 every change to either.
 
-It proves the Vulkan half *compiles*, not that it *runs*. The Vulkan sides of `Fence`, `Timers`,
-`Occlusion` and `GpuHeap::free_later`/`retire` have never been executed against a device. The
-headless tests under `nga/tests` are what actually prove the API, and the four Apple-gated ones
-(`mesh`, `icb`, `tile`, and the mesh half of `queries`) prove nothing on Vulkan by construction.
+The reverse holds from Windows: `cargo check -p nga --lib --target aarch64-apple-darwin`
+type-checks the Metal half without an Apple toolchain, because `check` never links. `--all-targets`
+does not work there — `minwin`'s macOS window does not implement the current `PlatformWindow` — so
+it is `--lib` only, which covers `metal.rs` and is the file that matters.
 
-The examples all open a window and have never been run on either backend.
+It proves a backend half *compiles*, not that it *runs*. The headless tests under `nga/tests` are
+what prove the API; the four Apple-gated ones (`mesh`, `icb`, `tile`, and the mesh half of
+`queries`) prove nothing on Vulkan by construction.
 
-`port.py` at the repo root is dead — it patched `queue_present` call sites in the deleted
-`nga-vk` examples.
+All nine examples have been run on Vulkan (GTX 1070 Ti, driver 582.66) under
+`VK_LAYER_KHRONOS_validation` with zero errors, including resize, minimise and restore. None has
+been run on Metal. The three Apple-gated ones print a line and exit on Vulkan.

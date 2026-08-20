@@ -267,5 +267,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
+    if let Some((texture, _, _)) = depth.take() {
+        heap.free_texture(texture);
+    }
+    heap.free_buffer(index_buffer);
+    heap.free_buffer(vertex_buffer);
     Ok(())
 }

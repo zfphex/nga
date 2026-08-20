@@ -18,9 +18,9 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
     Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
-    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, Sampler,
-    SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage,
-    Viewport, Winding,
+    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, ResolveMode,
+    Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology,
+    Usage, Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
@@ -1120,6 +1120,7 @@ pub struct TextureDesc {
     pub(crate) height: u32,
     pub(crate) usage: vk::ImageUsageFlags,
     pub(crate) aspect: vk::ImageAspectFlags,
+    pub(crate) samples: vk::SampleCountFlags,
 }
 
 impl TextureDesc {
@@ -1130,6 +1131,7 @@ impl TextureDesc {
             height,
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect: vk::ImageAspectFlags::COLOR,
+            samples: vk::SampleCountFlags::TYPE_1,
         }
     }
 
@@ -1140,6 +1142,7 @@ impl TextureDesc {
             height,
             usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             aspect: vk::ImageAspectFlags::DEPTH,
+            samples: vk::SampleCountFlags::TYPE_1,
         }
     }
 
@@ -1147,6 +1150,36 @@ impl TextureDesc {
     pub fn usage(mut self, extra: Usage) -> Self {
         self.usage |= usage(extra);
         self
+    }
+
+    /// Build the texture with `samples` samples per texel, for use as a multisample attachment
+    /// under a pipeline built with the matching [`RasterDesc::samples`]. A multisample image
+    /// cannot be sampled or copied — it is only ever an attachment and a resolve source — so
+    /// this also drops the usage the constructor assumed.
+    pub fn samples(mut self, samples: u32) -> Self {
+        self.samples = sample_count(samples);
+        if samples > 1 {
+            self.usage &= !(vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST);
+            self.usage |= match self.aspect {
+                vk::ImageAspectFlags::DEPTH => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                _ => vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            };
+        }
+        self
+    }
+}
+
+pub(crate) fn sample_count(samples: u32) -> vk::SampleCountFlags {
+    match samples {
+        1 => vk::SampleCountFlags::TYPE_1,
+        2 => vk::SampleCountFlags::TYPE_2,
+        4 => vk::SampleCountFlags::TYPE_4,
+        8 => vk::SampleCountFlags::TYPE_8,
+        16 => vk::SampleCountFlags::TYPE_16,
+        _ => panic!("{samples} is not a power-of-two sample count between 1 and 16"),
     }
 }
 
@@ -1486,7 +1519,7 @@ impl GpuHeap {
             })
             .mip_levels(1)
             .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(desc.samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(desc.usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);
@@ -2108,6 +2141,12 @@ pub struct Surface {
     pub(crate) acquired: Vec<vk::Semaphore>,
     pub(crate) released: Vec<vk::Semaphore>,
     pub(crate) cursor: usize,
+    /// Cloned so the swapchain tears itself down. Metal's `Surface` is a `CAMetalLayer` the
+    /// view owns, so `destroy` is a no-op there; here it is eleven objects and forgetting one
+    /// is a validation error at `vkDestroyDevice`.
+    pub(crate) owner: ash::Device,
+    pub(crate) swapchain_ext: ash::khr::swapchain::Device,
+    pub(crate) surface_ext: ash::khr::surface::Instance,
 }
 
 impl Surface {
@@ -2153,6 +2192,9 @@ impl Surface {
             acquired: Vec::new(),
             released: Vec::new(),
             cursor: 0,
+            owner: device.device.clone(),
+            swapchain_ext: device.swapchain_ext.clone(),
+            surface_ext: device.surface_ext.clone(),
         };
         swapchain.rebuild(device, width, height)?;
         Ok(swapchain)
@@ -2199,7 +2241,7 @@ impl Surface {
                 None,
             )?
         };
-        self.destroy_views(device);
+        self.destroy_views();
         if old != vk::SwapchainKHR::null() {
             unsafe { device.swapchain_ext.destroy_swapchain(old, None) };
         }
@@ -2238,13 +2280,13 @@ impl Surface {
         Ok(())
     }
 
-    fn destroy_views(&mut self, device: &Device) {
+    fn destroy_views(&mut self) {
         unsafe {
             for &view in &self.views {
-                device.device.destroy_image_view(view, None);
+                self.owner.destroy_image_view(view, None);
             }
             for &semaphore in self.acquired.iter().chain(&self.released) {
-                device.device.destroy_semaphore(semaphore, None);
+                self.owner.destroy_semaphore(semaphore, None);
             }
         }
         self.views.clear();
@@ -2311,12 +2353,33 @@ impl Surface {
         matches!(result, Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Ok(true)) || drawable.suboptimal
     }
 
+    /// Kept for parity with Metal, where it is a no-op. Dropping the surface does the same
+    /// thing, so calling this is optional and calling it twice is harmless.
     pub fn destroy(&mut self, device: &Device) {
+        unsafe { device.device.device_wait_idle().ok() };
+        self.teardown();
+    }
+
+    fn teardown(&mut self) {
+        self.destroy_views();
         unsafe {
-            self.destroy_views(device);
-            device.swapchain_ext.destroy_swapchain(self.swapchain, None);
-            device.surface_ext.destroy_surface(self.surface_khr, None);
+            if self.swapchain != vk::SwapchainKHR::null() {
+                self.swapchain_ext.destroy_swapchain(self.swapchain, None);
+            }
+            if self.surface_khr != vk::SurfaceKHR::null() {
+                self.surface_ext.destroy_surface(self.surface_khr, None);
+            }
         }
+        self.images.clear();
+        self.swapchain = vk::SwapchainKHR::null();
+        self.surface_khr = vk::SurfaceKHR::null();
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe { self.owner.device_wait_idle().ok() };
+        self.teardown();
     }
 }
 
@@ -2408,7 +2471,7 @@ impl Shaders {
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(sample_count(desc.samples));
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default();
 
         let attachments: Vec<_> = desc.colors.iter().map(blend_attachment).collect();
@@ -2526,6 +2589,11 @@ pub(crate) struct Attachment {
     pub(crate) image: vk::Image,
     pub(crate) clear: Option<vk::ClearValue>,
     pub(crate) store: bool,
+    /// The single-sample image a multisample attachment collapses into at pass end. Null when
+    /// the attachment is not multisampled. Metal spells the same thing as `resolveTexture`.
+    pub(crate) resolve_view: vk::ImageView,
+    pub(crate) resolve_image: vk::Image,
+    pub(crate) resolve_mode: vk::ResolveModeFlags,
 }
 
 #[derive(Default)]
@@ -2554,6 +2622,9 @@ impl Pass {
                 color: vk::ClearColorValue { float32 },
             }),
             store: true,
+            resolve_view: vk::ImageView::null(),
+            resolve_image: vk::Image::null(),
+            resolve_mode: vk::ResolveModeFlags::NONE,
         };
         if self.colors.len() <= index {
             self.colors.resize(
@@ -2563,6 +2634,9 @@ impl Pass {
                     image: vk::Image::null(),
                     clear: None,
                     store: false,
+                    resolve_view: vk::ImageView::null(),
+                    resolve_image: vk::Image::null(),
+                    resolve_mode: vk::ResolveModeFlags::NONE,
                 },
             );
         }
@@ -2592,6 +2666,9 @@ impl Pass {
                 color: vk::ClearColorValue { float32 },
             }),
             store: true,
+            resolve_view: vk::ImageView::null(),
+            resolve_image: vk::Image::null(),
+            resolve_mode: vk::ResolveModeFlags::NONE,
         };
         if self.colors.len() <= index {
             self.colors.resize(
@@ -2601,6 +2678,9 @@ impl Pass {
                     image: vk::Image::null(),
                     clear: None,
                     store: false,
+                    resolve_view: vk::ImageView::null(),
+                    resolve_image: vk::Image::null(),
+                    resolve_mode: vk::ResolveModeFlags::NONE,
                 },
             );
         }
@@ -2619,7 +2699,59 @@ impl Pass {
                 depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
             }),
             store,
+            resolve_view: vk::ImageView::null(),
+            resolve_image: vk::Image::null(),
+            resolve_mode: vk::ResolveModeFlags::NONE,
         });
+        self
+    }
+
+    /// Collapse multisample colour attachment `index` into the surface at pass end. The pass
+    /// still needs the multisample texture bound with [`Pass::color_texture`]; this only names
+    /// where it lands.
+    pub fn resolve(mut self, index: usize, drawable: &Drawable) -> Self {
+        let target = self
+            .colors
+            .get_mut(index)
+            .expect("Pass::resolve before Pass::color");
+        target.resolve_view = drawable.view;
+        target.resolve_image = drawable.image;
+        target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
+        self
+    }
+
+    /// Resolve into a texture rather than the surface.
+    pub fn resolve_texture(mut self, index: usize, texture: &HeapTexture) -> Self {
+        texture
+            .layout
+            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let target = self
+            .colors
+            .get_mut(index)
+            .expect("Pass::resolve_texture before Pass::color_texture");
+        target.resolve_view = texture.view;
+        target.resolve_image = texture.image;
+        target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
+        self
+    }
+
+    /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
+    /// the mode is not implied — see [`ResolveMode`].
+    pub fn depth_resolve(mut self, texture: &HeapTexture, mode: ResolveMode) -> Self {
+        texture
+            .layout
+            .set(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+        let target = self
+            .depth
+            .as_mut()
+            .expect("Pass::depth_resolve without Pass::depth");
+        target.resolve_view = texture.view;
+        target.resolve_image = texture.image;
+        target.resolve_mode = match mode {
+            ResolveMode::SampleZero => vk::ResolveModeFlags::SAMPLE_ZERO,
+            ResolveMode::Min => vk::ResolveModeFlags::MIN,
+            ResolveMode::Max => vk::ResolveModeFlags::MAX,
+        };
         self
     }
 
@@ -2720,6 +2852,45 @@ impl<'a> Raster<'a> {
                     ),
             );
         }
+        // A resolve target is fully overwritten at pass end, so it comes from UNDEFINED the
+        // same way a cleared attachment does.
+        for (depth, attachment) in pass
+            .colors
+            .iter()
+            .map(|attachment| (false, attachment))
+            .chain(pass.depth.as_ref().map(|attachment| (true, attachment)))
+        {
+            if attachment.resolve_image == vk::Image::null() {
+                continue;
+            }
+            barriers.push(
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .dst_stage_mask(match depth {
+                        true => vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        false => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    })
+                    .dst_access_mask(match depth {
+                        true => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        false => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    })
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(match depth {
+                        true => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        false => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    })
+                    .image(attachment.resolve_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(match depth {
+                                true => vk::ImageAspectFlags::DEPTH,
+                                false => vk::ImageAspectFlags::COLOR,
+                            })
+                            .level_count(1)
+                            .layer_count(1),
+                    ),
+            );
+        }
         unsafe {
             device.cmd_pipeline_barrier2(
                 command_buffer,
@@ -2742,6 +2913,12 @@ impl<'a> Raster<'a> {
                     Some(clear) => info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(clear),
                     None => info.load_op(vk::AttachmentLoadOp::LOAD),
                 };
+                if attachment.resolve_view != vk::ImageView::null() {
+                    info = info
+                        .resolve_mode(attachment.resolve_mode)
+                        .resolve_image_view(attachment.resolve_view)
+                        .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                }
                 info
             })
             .collect();
@@ -2751,7 +2928,7 @@ impl<'a> Raster<'a> {
             .render_area(area)
             .layer_count(pass.layers)
             .color_attachments(&colors);
-        let depth;
+        let mut depth;
         if let Some(attachment) = pass.depth {
             depth = vk::RenderingAttachmentInfo::default()
                 .image_view(attachment.view)
@@ -2765,6 +2942,12 @@ impl<'a> Raster<'a> {
                     false => vk::AttachmentStoreOp::DONT_CARE,
                 })
                 .clear_value(attachment.clear.unwrap_or_default());
+            if attachment.resolve_view != vk::ImageView::null() {
+                depth = depth
+                    .resolve_mode(attachment.resolve_mode)
+                    .resolve_image_view(attachment.resolve_view)
+                    .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+            }
             rendering = rendering.depth_attachment(&depth);
         }
         unsafe { device.cmd_begin_rendering(command_buffer, &rendering) };

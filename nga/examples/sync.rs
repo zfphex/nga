@@ -211,5 +211,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
+    if let Some((texture, _, _)) = depth.take() {
+        heap.free_texture(texture);
+    }
+    heap.free_buffer(vertices);
+    heap.free_buffer(instances);
     Ok(())
 }

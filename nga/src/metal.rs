@@ -30,9 +30,9 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
     Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
-    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, Sampler,
-    SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage,
-    Viewport, Winding,
+    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, ResolveMode,
+    Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology,
+    Usage, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
@@ -46,11 +46,12 @@ use minmetal::{
     M4MeshRenderPipelineDescriptor, M4RenderCommandEncoder, M4RenderPassDescriptor,
     M4RenderPipelineColorAttachmentDescriptorArray, M4RenderPipelineDescriptor,
     M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor, M4TimestampGranularity,
-    M4VisibilityOptions, MetalError, MetalLayer, Origin, PixelFormat, PrimitiveTopologyClass,
-    PrimitiveType, Region, RenderStages, ResidencySet, ResidencySetDescriptor, ResourceOptions,
-    SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent,
-    Size, Stages, StorageMode, Texture, TextureDescriptor, TextureUsage, VisibilityResultMode,
-    VisibilityResultType, id, retain,
+    M4VisibilityOptions, MetalError, MetalLayer, MultisampleDepthResolveFilter, Origin,
+    PixelFormat, PrimitiveTopologyClass, PrimitiveType, Region, RenderStages, ResidencySet,
+    ResidencySetDescriptor, ResourceOptions, SamplerAddressMode, SamplerDescriptor,
+    SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages, StorageMode, Texture,
+    TextureDescriptor, TextureType, TextureUsage, VisibilityResultMode, VisibilityResultType, id,
+    retain,
 };
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -713,6 +714,7 @@ pub struct TextureDesc {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) usage: Usage,
+    pub(crate) samples: u32,
 }
 
 impl TextureDesc {
@@ -722,6 +724,7 @@ impl TextureDesc {
             width,
             height,
             usage: Usage::SAMPLED | Usage::COPY_DST,
+            samples: 1,
         }
     }
 
@@ -731,6 +734,7 @@ impl TextureDesc {
             width,
             height,
             usage: Usage::DEPTH_STENCIL,
+            samples: 1,
         }
     }
 
@@ -740,12 +744,35 @@ impl TextureDesc {
         self
     }
 
+    /// Build the texture with `samples` samples per texel, for use as a multisample attachment
+    /// under a pipeline built with the matching [`RasterDesc::samples`]. A multisample texture
+    /// is only ever an attachment and a resolve source, so this also drops the usage the
+    /// constructor assumed — the same narrowing Vulkan needs for the same reason.
+    pub fn samples(mut self, samples: u32) -> Self {
+        assert!(
+            matches!(samples, 1 | 2 | 4 | 8),
+            "{samples} is not a Metal sample count"
+        );
+        self.samples = samples;
+        if samples > 1 {
+            self.usage = match self.usage.has(Usage::DEPTH_STENCIL) {
+                true => Usage::DEPTH_STENCIL,
+                false => Usage::COLOR,
+            };
+        }
+        self
+    }
+
     fn descriptor(&self) -> TextureDescriptor {
         let desc = TextureDescriptor::new();
         desc.set_pixel_format(format(self.format));
         desc.set_width(self.width as usize);
         desc.set_height(self.height as usize);
         desc.set_usage(usage(self.usage));
+        if self.samples > 1 {
+            desc.set_texture_type(TextureType::D2Multisample);
+            desc.set_sample_count(self.samples as usize);
+        }
         desc
     }
 }
@@ -1384,6 +1411,52 @@ impl Pass {
                 .base()
                 .set_load_action(minmetal::LoadAction::Load),
         }
+        self
+    }
+
+    /// Collapse multisample colour attachment `index` into the surface at pass end. The pass
+    /// still needs the multisample texture bound with [`Pass::color_texture`]; this only names
+    /// where it lands.
+    pub fn resolve(self, index: usize, drawable: &Drawable) -> Self {
+        self.attach_resolve(index, &drawable.texture)
+    }
+
+    /// Resolve into a texture rather than the surface.
+    pub fn resolve_texture(self, index: usize, texture: &HeapTexture) -> Self {
+        self.attach_resolve(index, &texture.texture)
+    }
+
+    fn attach_resolve(self, index: usize, texture: &Texture) -> Self {
+        let attachment = self
+            .desc
+            .color_attachments()
+            .object_at_indexed_subscript(index);
+        attachment.base().set_resolve_texture(Some(texture));
+        // The multisample texture itself is never read again, so it is resolved rather than
+        // stored. Vulkan says the same thing by giving the resolve target its own store op.
+        attachment
+            .base()
+            .set_store_action(minmetal::StoreAction::MultisampleResolve);
+        self
+    }
+
+    /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
+    /// the mode is not implied — see [`ResolveMode`].
+    pub fn depth_resolve(self, texture: &HeapTexture, mode: ResolveMode) -> Self {
+        let attachment = self.desc.depth_attachment();
+        attachment
+            .base()
+            .set_resolve_texture(Some(&texture.texture));
+        attachment
+            .base()
+            .set_store_action(minmetal::StoreAction::MultisampleResolve);
+        attachment
+            .set_depth_resolve_filter(match mode {
+                ResolveMode::SampleZero => MultisampleDepthResolveFilter::Sample0,
+                ResolveMode::Min => MultisampleDepthResolveFilter::Min,
+                ResolveMode::Max => MultisampleDepthResolveFilter::Max,
+            })
+            .expect("this OS has no depthResolveFilter");
         self
     }
 

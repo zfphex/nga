@@ -759,6 +759,27 @@ impl<'a> RasterDesc<'a> {
         self.topology = topology;
         self
     }
+
+    /// Rasterisation sample count. Every attachment the pass binds has to have been built with
+    /// the same count — see [`TextureDesc::samples`] — and the resolve target with one.
+    pub fn samples(mut self, samples: u32) -> Self {
+        self.samples = samples;
+        self
+    }
+}
+
+/// How a multisample depth attachment collapses to its single-sample resolve target.
+///
+/// Colour has no equivalent knob: both APIs average, and Vulkan only guarantees `AVERAGE` for
+/// colour anyway. Depth is the opposite — averaging a depth buffer is meaningless, so this is
+/// the one place a mode has to be named. `SampleZero` is the only mode both APIs always
+/// support — `Min`/`Max` are optional in `depthResolveModes` and validation is what catches a
+/// driver that lacks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolveMode {
+    SampleZero,
+    Min,
+    Max,
 }
 
 /// A mesh pipeline: an optional object (amplification) stage, a mesh stage, and a fragment
