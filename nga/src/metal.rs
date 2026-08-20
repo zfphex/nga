@@ -4,7 +4,7 @@
 //!
 //! `lib.rs` ends with `pub use backend::*`, so this file and `vulkan.rs` must define the same
 //! names with the same signatures. Neither is compiled on the other's platform, so the
-//! compiler cannot check that — this list is the checklist, and it is kept in the same order
+//! compiler cannot check that, so this list is the checklist, and it is kept in the same order
 //! in both files:
 //!
 //! `Device`, `Arena`, `GpuHeap`, `Retired`, `HeapBuffer`, `HeapTexture`, `TextureDesc`,
@@ -360,7 +360,7 @@ pub(crate) fn write_mask(mask: u8) -> ColorWriteMask {
 /// pipeline that renders into a depth attachment has to declare the format or Metal rejects
 /// the pass. One message send beats forking the dependency.
 /// `Stage` is the blog post's vocabulary; Metal's encoder stages are a shorter list, so several
-/// nga stages land on the same one. That is safe — a barrier that names more stages than it
+/// nga stages land on the same one. That is safe: a barrier that names more stages than it
 /// needs is conservative, never wrong.
 pub(crate) fn stage(stage: Stage) -> Stages {
     let mut out = Stages::NONE;
@@ -373,7 +373,7 @@ pub(crate) fn stage(stage: Stage) -> Stages {
     // Metal has no indirect stage: indirect arguments are read by whichever stage consumes
     // them, which is the vertex stage for a draw and the dispatch stage for a dispatch. Naming
     // only `DISPATCH` here left the render encoder's argument fetch unordered against the
-    // compute pass that wrote it — the missing bands in `gpu_driven`.
+    // compute pass that wrote it, which is where the missing bands in `gpu_driven` came from.
     if stage.has(Stage::INDIRECT) {
         out = out | Stages::DISPATCH | Stages::VERTEX | Stages::OBJECT | Stages::MESH;
     }
@@ -399,7 +399,7 @@ pub(crate) fn hazard(hazard: Hazard) -> M4VisibilityOptions {
 }
 
 /// The specialization payload. Metal takes the same bytes Vulkan does, keyed by the same index,
-/// so `Constant` crosses unchanged — only the type tag has to be translated.
+/// so `Constant` crosses unchanged and only the type tag has to be translated.
 pub(crate) fn constants(values: &[Constant]) -> FunctionConstantValues {
     let out = FunctionConstantValues::new();
     for value in values {
@@ -438,7 +438,7 @@ pub(crate) fn data_type(scalar: Scalar) -> minmetal::DataType {
 
 /// What the shader finds at argument-table index 0. The Metal target lowers
 /// `[[vk::push_constant]] ConstantBuffer<nga_push>` to `constant nga_push* [[buffer(0)]]`, so
-/// unlike Vulkan's push constants this is a *pointer* — the struct itself is allocated from the
+/// unlike Vulkan's push constants this is a pointer. The struct itself is allocated from the
 /// frame arena at bind time.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -473,7 +473,7 @@ impl Device {
     pub fn new(_validation: bool) -> Result<Self, Error> {
         let device = minmetal::Device::system_default().ok_or(Error::new("no Metal device"))?;
         let queue = device.new_m4_command_queue().ok_or(Error::new(
-            "MTL4CommandQueue is unavailable — Metal 4 requires macOS 26",
+            "MTL4CommandQueue is unavailable, Metal 4 requires macOS 26",
         ))?;
         let residency = device.new_residency_set(&ResidencySetDescriptor::new()?)?;
         residency.commit()?;
@@ -504,7 +504,7 @@ impl Device {
         }
     }
 
-    /// Whether this adapter can do something outside the shared surface.
+    /// Whether this adapter can do something outside the shared API.
     ///
     /// `true` only where the backend has a path today, not merely where the hardware could.
     /// Every method behind a feature exists on both backends; on the one without the path it
@@ -521,9 +521,9 @@ impl Device {
         }
     }
 
-    /// Metal's argument buffers have no descriptor ceiling — the handle is the resource ID, not
-    /// an index into a fixed table — so this is the heap's own capacity, whatever it was asked
-    /// for. Vulkan's answer is a driver limit.
+    /// Metal's argument buffers have no descriptor ceiling, because the handle is the resource
+    /// ID rather than an index into a fixed table. So this is the heap's own capacity, whatever
+    /// it was asked for. Vulkan's answer is a driver limit.
     pub fn max_resources(&self) -> u32 {
         u32::MAX
     }
@@ -667,7 +667,7 @@ impl HeapBuffer {
         Gpu::new(self.gpu)
     }
 
-    /// The raw address, for the cases where the borrow has to be discarded — a heap allocation
+    /// The raw address, for the cases where the borrow has to be discarded. A heap allocation
     /// outlives every frame, so `Gpu<'static, T>` is the honest type and only the caller knows.
     pub fn address(&self) -> u64 {
         self.gpu
@@ -738,7 +738,7 @@ impl TextureDesc {
         }
     }
 
-    /// Extra usage beyond what the constructor implies — storage writes, colour attachment.
+    /// Extra usage beyond what the constructor implies: storage writes, colour attachment.
     pub fn usage(mut self, extra: Usage) -> Self {
         self.usage = self.usage | extra;
         self
@@ -747,7 +747,7 @@ impl TextureDesc {
     /// Build the texture with `samples` samples per texel, for use as a multisample attachment
     /// under a pipeline built with the matching [`RasterDesc::samples`]. A multisample texture
     /// is only ever an attachment and a resolve source, so this also drops the usage the
-    /// constructor assumed — the same narrowing Vulkan needs for the same reason.
+    /// constructor assumed, the same narrowing Vulkan needs for the same reason.
     pub fn samples(mut self, samples: u32) -> Self {
         assert!(
             matches!(samples, 1 | 2 | 4 | 8),
@@ -778,8 +778,8 @@ impl TextureDesc {
 }
 
 /// One placement heap with a TLSF allocator over it. Unlike the Vulkan heap this is host
-/// visible, so there is no upload ring and no staging — `write` is a memcpy and `flush` is a
-/// no-op kept only so the two surfaces match.
+/// visible, so there is no upload ring and no staging. `write` is a memcpy and `flush` is a
+/// no-op kept only so the two backends match.
 pub struct GpuHeap {
     pub(crate) device: minmetal::Device,
     pub(crate) heap: Heap,
@@ -878,7 +878,7 @@ impl GpuHeap {
         Ok(())
     }
 
-    /// `replaceRegion` writes straight into the texture — no staging buffer, no command buffer.
+    /// `replaceRegion` writes straight into the texture. No staging buffer, no command buffer.
     /// This is the call `VK_EXT_host_image_copy` was meant to be.
     pub fn upload(&mut self, texture: &HeapTexture, bytes: &[u8]) -> Result<(), Error> {
         let (width, height) = (texture.width, texture.height);
@@ -931,7 +931,7 @@ impl GpuHeap {
     /// Hand a resource over to be released once the frame that last used it has finished.
     ///
     /// `frame` is [`Context::frame`] at the point of the hand-over. Freeing something the GPU is
-    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch — the borrow ends when
+    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch: the borrow ends when
     /// recording does, not when the command buffer retires.
     pub fn free_later(&mut self, frame: u64, retired: Retired) {
         self.retired.push_back((frame, retired));
@@ -965,8 +965,9 @@ pub struct HeapRange {
     pub(crate) len: u32,
 }
 
-/// On Metal a bindless handle *is* the `MTLResourceID`, stored inline in the root struct the
-/// shader dereferences — see the argument-buffer members slangc emits for `DescriptorHandle<T>`.
+/// On Metal a bindless handle is the `MTLResourceID` itself, stored inline in the root struct
+/// the shader dereferences. See the argument-buffer members slangc emits for
+/// `DescriptorHandle<T>`.
 /// So there is no descriptor memory to manage and this type is a slot bookkeeper: it exists so
 /// that `alloc_range` / `write_texture` / `write_sampler` mean the same thing on both backends,
 /// where Vulkan really does have three descriptor arrays behind them.
@@ -1118,7 +1119,7 @@ pub struct Shaders {
 }
 
 impl Shaders {
-    /// `source` is the MSL `build.rs` produced from the Slang, as bytes — the same shape the
+    /// `source` is the MSL `build.rs` produced from the Slang, as bytes, the same shape the
     /// Vulkan side takes SPIR-V in.
     pub fn new(device: &Device, source: &[u8]) -> Result<Self, Error> {
         let source = std::str::from_utf8(source)
@@ -1166,7 +1167,7 @@ impl Shaders {
         pipeline.set_raster_sample_count(desc.samples as usize);
         pipeline.set_alpha_to_coverage_state(M4AlphaToCoverageState::Disabled);
         // `desc.depth` is deliberately unused. `MTL4RenderPipelineDescriptor` carries no depth
-        // attachment format — Metal 4 takes it from the render pass — where Vulkan bakes it
+        // attachment format, since Metal 4 takes it from the render pass. Vulkan bakes it
         // into `VkPipelineRenderingCreateInfo` and refuses to render without a match.
 
         color_targets(&pipeline.color_attachments(), desc.colors);
@@ -1221,7 +1222,7 @@ impl Shaders {
     }
 
     /// A tile pipeline: a compute function that runs inside a render pass over the imageblock.
-    /// Apple-only for good — see [`TileDesc`].
+    /// Apple-only for good. See [`TileDesc`].
     pub fn tile(&mut self, desc: &TileDesc) -> Result<Pipeline, Error> {
         let pipeline = M4TileRenderPipelineDescriptor::new();
         pipeline.set_label(desc.function);
@@ -1378,8 +1379,8 @@ impl Pass {
     }
 
     /// Renders into a texture rather than the surface. The two differ only in where the texture
-    /// came from, so offscreen rendering needs no separate pass type — and unlike Vulkan there
-    /// is no tracked layout to update, because there is no layout.
+    /// came from, so offscreen rendering needs no separate pass type. Unlike Vulkan there
+    /// is no tracked layout to update either, because there is no layout.
     pub fn color_texture(
         self,
         index: usize,
@@ -1441,7 +1442,7 @@ impl Pass {
     }
 
     /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
-    /// the mode is not implied — see [`ResolveMode`].
+    /// the mode is not implied. See [`ResolveMode`].
     pub fn depth_resolve(self, texture: &HeapTexture, mode: ResolveMode) -> Self {
         let attachment = self.desc.depth_attachment();
         attachment
@@ -1538,7 +1539,8 @@ impl<'a> Raster<'a> {
 
     /// Writes the root pointer where the shader expects it. slangc lowers the shared
     /// `nga_push` block to `constant nga_push* [[buffer(0)]]`, so what the argument table holds
-    /// is the address of a struct, not the root itself — one 16-byte arena allocation per bind.
+    /// is the address of a struct, not the root itself, so a bind costs one 16-byte arena
+    /// allocation.
     fn bind<T>(&self, root: Gpu<'_, T>) {
         bind_push(self.table, self.arena, root.0.get());
     }
@@ -1601,7 +1603,7 @@ impl<'a> Raster<'a> {
 
     /// Metal has no `vkCmdDrawIndirectCount`: the count lives on the GPU and only an indirect
     /// command buffer can consume it there. Until `Feature::IndirectCommands` is implemented
-    /// the portable spelling is `max` indirect draws — an entry the encode pass never wrote
+    /// the portable spelling is `max` indirect draws. An entry the encode pass never wrote
     /// has `instance_count == 0` and costs nothing beyond the call, which is why the caller
     /// must clear `draws` each frame.
     pub fn draw_indirect_count<T>(
@@ -1623,8 +1625,8 @@ impl<'a> Raster<'a> {
     /// A run of draws sharing every piece of state, including the root pointer.
     ///
     /// `VK_EXT_multi_draw` collapses this into one driver call; Metal has no such call, so it
-    /// is a loop and `Device::supports(Feature::MultiDraw)` answers `false`. The *result* is
-    /// identical, which is why the method exists at all — portable code should not have to
+    /// is a loop and `Device::supports(Feature::MultiDraw)` answers `false`. The result is
+    /// identical, which is why the method exists at all. Portable code should not have to
     /// carry two spellings of the same draw.
     pub fn draw_multi<T>(&self, root: Gpu<'_, T>, draws: &[MultiDraw]) {
         self.bind(root);
@@ -1795,7 +1797,7 @@ impl<'a> Compute<'a> {
         );
     }
 
-    /// The whole barrier, with no resource list — exactly the design the post argues for. Metal
+    /// The whole barrier, with no resource list, exactly the design the post argues for. Metal
     /// spells it as stages plus one visibility bit, which is strictly less than
     /// `VkMemoryBarrier2` carries and lands in the same place.
     ///
@@ -1803,19 +1805,19 @@ impl<'a> Compute<'a> {
     /// into one in-encoder barrier and two queue-scoped halves, and a barrier that reaches only
     /// some of them is a race:
     ///
-    /// - `barrier` orders against earlier commands in *this* encoder.
-    /// - `barrierAfterQueueStages` orders this encoder after everything already committed —
-    ///   the only thing that sees a *preceding* render pass.
+    /// - `barrier` orders against earlier commands in this encoder.
+    /// - `barrierAfterQueueStages` orders this encoder after everything already committed. It
+    ///   is the only thing that sees a preceding render pass.
     /// - `barrierBeforeQueueStages` publishes this encoder's writes to everything committed
-    ///   after it — the only thing a *following* render pass sees.
+    ///   after it. It is the only thing a following render pass sees.
     ///
-    /// Both queue halves were found the same way, by a race the shared surface cannot express
+    /// Both queue halves were found the same way, by a race the shared API cannot express
     /// any other way: without the first, the offscreen raster test failed six runs in twenty;
     /// without the second, `gpu_driven` drew bands of empty draw slots because the render
     /// encoder fetched indirect arguments the encode pass had not published yet.
-    /// The three calls take a mix of *encoder* stages and *queue* stages, and an encoder stage
+    /// The three calls take a mix of encoder stages and queue stages, and an encoder stage
     /// has to be one this encoder actually has. A compute encoder naming `Stage::INDIRECT`,
-    /// which is a vertex fetch on Metal, is a validation failure — and with the layer off it is
+    /// which is a vertex fetch on Metal, is a validation failure, and with the layer off it is
     /// a magenta frame with no diagnostic at all.
     pub fn barrier(&self, before: Stage, after: Stage, hazards: Hazard) {
         let (before, after, hazard) = (stage(before), stage(after), hazard(hazards));
@@ -1870,9 +1872,7 @@ impl<'a> Compute<'a> {
         );
     }
 
-    /// Metal's fill takes a byte, Vulkan's a word. The shared surface takes the word and this
-    /// splits it, which is exact for the only case either backend is used for — clearing.
-    /// Replays dispatches a shader encoded into `commands`. Metal-only.
+    /// Replays the commands a shader encoded into `commands`. Metal-only.
     pub fn execute(&self, commands: &IndirectCommands, range: std::ops::Range<u32>) {
         self.encoder.execute_commands_in_buffer(
             &commands.icb,
@@ -1901,6 +1901,8 @@ impl<'a> Compute<'a> {
         );
     }
 
+    /// Metal's fill takes a byte, Vulkan's a word. The shared API takes the word and this
+    /// splits it, which is exact for the only case either backend is used for: clearing.
     pub fn fill_buffer(&self, buffer: &HeapBuffer, offset: usize, size: usize, value: u32) {
         let bytes = value.to_ne_bytes();
         debug_assert!(
@@ -1950,7 +1952,7 @@ pub struct Context {
 
 impl Context {
     /// `shaders` is what the Vulkan side takes its pipeline layout from. Metal binds through the
-    /// argument table instead, so it is unused here — the argument stays for one signature.
+    /// argument table instead, so it is unused here. The argument stays for one signature.
     pub fn new(
         device: &Device,
         _shaders: &Shaders,
@@ -2072,8 +2074,8 @@ impl<'a> Frame<'a> {
     /// This frame's per-thread arena. Everything allocated here is valid until the frame is
     /// submitted and its slot comes round again, which is what the `Gpu<'a, T>` lifetime says.
     ///
-    /// The returned borrow is tied to the *context*, not to `self`, so allocating from it does
-    /// not lock the frame — recording can still take `&mut self` afterwards.
+    /// The returned borrow is tied to the context, not to `self`, so allocating from it does
+    /// not lock the frame. Recording can still take `&mut self` afterwards.
     pub fn arena(&self, thread: usize) -> &'a Arena {
         &self.arenas[thread]
     }
@@ -2143,7 +2145,7 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-    /// This recorder's slice of the frame arena — where root data for the commands being
+    /// This recorder's slice of the frame arena, where root data for the commands being
     /// recorded belongs. Borrowed from the context, not from `self`, so allocating does not
     /// prevent recording.
     pub fn arena(&self) -> &'a Arena {
@@ -2178,7 +2180,7 @@ impl Drop for Recorder<'_> {
 // -- fences ------------------------------------------------------------------------------
 
 /// A monotonic counter both the host and the GPU can see: `MTLSharedEvent` here, a timeline
-/// semaphore on Vulkan. Frames have their own counter inside [`Context`] — this is for the
+/// semaphore on Vulkan. Frames have their own counter inside [`Context`]; this is for the
 /// sequencing a caller does itself, such as an asset load that must land before a frame reads
 /// what it produced.
 pub struct Fence(SharedEvent);
@@ -2198,8 +2200,9 @@ impl Fence {
         self.0.signaled_value()
     }
 
-    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout —
-    /// a hang, not an error worth a `Result`, since there is nothing to do about it but say so.
+    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout,
+    /// a hang rather than an error worth a `Result`, since there is nothing to do about it but
+    /// say so.
     pub fn wait(&self, value: u64) -> bool {
         self.0.wait_until_signaled_value(value, 10_000)
     }
@@ -2211,11 +2214,11 @@ impl Fence {
 ///
 /// This is what `draw_indirect_count` is not: there, the GPU picks the arguments and the host
 /// picks the pipeline, so every replayed draw shares one pipeline and one root pointer. Here a
-/// compute shader writes whole commands — pipeline, buffers, primitive and counts — and the
-/// render pass replays them.
+/// compute shader writes whole commands, pipeline and buffers and primitive and counts, and
+/// the render pass replays them.
 ///
 /// Metal-only. Vulkan's nearest equivalent is `VK_NV_device_generated_commands`, which is not
-/// in the shared surface; ask [`Device::supports`] with [`Feature::IndirectCommands`].
+/// in the shared API; ask [`Device::supports`] with [`Feature::IndirectCommands`].
 pub struct IndirectCommands {
     pub(crate) icb: IndirectCommandBuffer,
     pub(crate) handle: Commands,
@@ -2233,7 +2236,7 @@ impl IndirectCommands {
         });
         // The encoding shader names the pipeline in every command it writes, which is the
         // point of the whole mechanism. Inheriting instead would make the encoder's pipeline
-        // the one that runs — and with none bound, `executeCommandsInBuffer` dereferences a
+        // the one that runs, and with none bound `executeCommandsInBuffer` dereferences a
         // null pipeline inside the driver rather than complaining.
         desc.set_inherit_pipeline_state(false);
         desc.set_inherit_buffers(false);
@@ -2267,9 +2270,9 @@ impl IndirectCommands {
     }
 
     /// macOS 26 split six pieces of render state out of the encoder and into the command, each
-    /// defaulting to *not* inherited. An MSL `render_command` has no setter for any of them, so
+    /// defaulting to not inherited. An MSL `render_command` has no setter for any of them, so
     /// leaving the defaults means every replayed draw runs with undefined cull, depth and fill
-    /// state — which the driver renders as a magenta frame rather than reporting.
+    /// state, which the driver renders as a magenta frame rather than reporting.
     fn inherit_render_state(desc: &IndirectCommandBufferDescriptor) {
         desc.set_inherit_depth_stencil_state(true);
         desc.set_inherit_depth_bias(true);
@@ -2356,11 +2359,11 @@ impl Timers {
     }
 
     /// Take this frame's half of the heap and read back what the last frame to use it recorded.
-    /// Call once per frame, after `begin_frame` — that wait is what makes the read safe.
+    /// Call once per frame, after `begin_frame`. That wait is what makes the read safe.
     ///
     /// Only slots written every frame are meaningful. There is deliberately no per-frame
     /// `invalidateCounterRange:`: it is queue-ordered, not immediate, and issuing it here raced
-    /// timestamps the GPU had already recorded — one run in four came back empty.
+    /// timestamps the GPU had already recorded, and one run in four came back empty.
     pub fn begin(&mut self, frame: &Frame) {
         self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as usize * self.count;
         self.ticks.fill(0);
@@ -2374,7 +2377,7 @@ impl Timers {
 
     /// Whether slot `index` holds a timestamp from the last frame to use this half. A slot that
     /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
-    /// reports for it — this is how to tell the two apart.
+    /// reports for it, so this is how to tell the two apart.
     pub fn written(&self, index: usize) -> bool {
         self.ticks[index] != 0
     }

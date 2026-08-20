@@ -46,7 +46,7 @@ fn main() {
 
     for entry in entries {
         let source = entry.unwrap().path();
-        // A `.metal` source next to the Slang ones is a feature Slang cannot spell — tile
+        // A `.metal` source next to the Slang ones is a feature Slang cannot spell. Tile
         // shaders and imageblocks have no stage in the language. It is copied through on Apple
         // and ignored elsewhere, which is the same thing `#[cfg(target_vendor = "apple")]` does
         // to the example that uses it.
@@ -86,7 +86,7 @@ fn main() {
         // the whole point of the crate merge.
         // The Metal source is emitted on every host, not just macOS. slangc needs no Apple
         // toolchain to produce it, and it is the only way to check the Metal-side struct
-        // layout from a machine that cannot compile `metal.rs` at all — see tests/layout.rs.
+        // layout from a machine that cannot compile `metal.rs` at all. See tests/layout.rs.
         let metal = Command::new(&slangc)
             .arg(&source)
             .arg("-DNGA_METAL=1")

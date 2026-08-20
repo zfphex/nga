@@ -11,7 +11,7 @@ use crate::TypeAbi;
 /// buffer structs went too, because `DescriptorHandle<T>` says the same thing and slangc emits
 /// the argument-buffer member itself.
 ///
-/// What survives the fork is the handle *size*: eight bytes either way, which is the only
+/// What survives the fork is the handle size: eight bytes either way, which is the only
 /// property the shared struct layout depends on.
 pub const SLANG_PRELUDE: &str = include_str!("prelude.slang");
 
@@ -36,7 +36,7 @@ pub fn header(types: &[TypeAbi]) -> String {
 /// round.
 ///
 /// Slang has no `offsetof` and no alignment attribute that reproduces Rust's `align(16)` on
-/// `float4x4`, so alignment cannot be requested — but it can be made irrelevant. slangc's
+/// `float4x4`, so alignment cannot be requested. It can be made irrelevant instead. slangc's
 /// natural layout packs every member (`packed_float3`, `array<packed_float4, 4>`), which means
 /// inserting explicit `uint` padding is enough to land each field on the byte offset
 /// `#[gpu_struct]` recorded from Rust. Verified on both targets: SPIR-V reports the same

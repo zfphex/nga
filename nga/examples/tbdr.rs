@@ -1,7 +1,7 @@
 //! Tile shading: a field of triangles, then a compute function that vignettes and posterises
 //! the imageblock before it is ever written out to memory.
 //!
-//! Apple-only, and permanently so — an imageblock is tile-based deferred hardware showing
+//! Apple-only, and permanently so. An imageblock is tile-based deferred hardware showing
 //! through, not an API Vulkan is missing. `Feature::TileShaders` is the runtime spelling of
 //! that, and `tests/tile.rs` is the headless half of this example.
 

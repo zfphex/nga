@@ -1,5 +1,5 @@
 // A tile pipeline, so `tests/tile.rs` can check that a compute function running inside the
-// render pass sees the imageblock the draws just wrote — no store, no reload, no second pass.
+// render pass sees the imageblock the draws just wrote. No store, no reload, no second pass.
 //
 // This is the one feature in the crate that is Apple-only for good rather than for now: an
 // imageblock is tile-based deferred hardware, and there is nothing in Vulkan to grow into.

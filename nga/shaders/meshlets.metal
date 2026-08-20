@@ -1,8 +1,8 @@
 // The `meshlets` example: an object stage culls meshlets and amplifies into a mesh stage that
-// emits their geometry directly. No vertex buffer, no index buffer, no draw per meshlet — the
+// emits their geometry directly. No vertex buffer, no index buffer, no draw per meshlet. The
 // GPU decides how much work there is after the CPU has stopped looking.
 //
-// MSL rather than Slang. slangc lowers a mesh stage to Metal correctly but emits the *fragment*
+// MSL rather than Slang. slangc lowers a mesh stage to Metal correctly but emits the fragment
 // stage_in as flat `[[user(...)]]` varyings, which is the vertex-pipeline convention; a mesh
 // pipeline's fragment has to take the mesh output structs themselves, and Metal rejects the
 // mismatch at pipeline creation. See `shaders/mesh.metal`.
@@ -11,7 +11,7 @@
 #define RING 8
 
 struct Meshlet {
-    // xyz is the centre, w the radius — the sphere the object stage culls against.
+    // xyz is the centre, w the radius, so this is the sphere the object stage culls against.
     float4 bounds;
     packed_float3 color;
     uint _pad0;
@@ -50,7 +50,7 @@ struct FragmentIn {
 using MeshOut = metal::mesh<VertexOut, PrimitiveOut, RING + 1, RING, metal::topology::triangle>;
 
 // One thread per candidate meshlet. Survivors are compacted into the payload and the grid is
-// sized to exactly that many mesh threadgroups — the amplification the stage is named for.
+// sized to exactly that many mesh threadgroups, the amplification the stage is named for.
 [[object]] void meshlet_object(
     constant nga_push* push [[buffer(0)]],
     object_data Payload& payload [[payload]],

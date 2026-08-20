@@ -5,7 +5,7 @@
 //!
 //! The source of truth is the SPIR-V itself, not `slangc -reflection-json`: reflection only
 //! describes the binding interface (push constants, descriptor bindings). Structs reached
-//! through a `PhysicalStorageBuffer` pointer — which is every struct in this design — appear
+//! through a `PhysicalStorageBuffer` pointer, which is every struct in this design, appear
 //! only as `OpMemberDecorate ... Offset` in the module.
 
 // The SPIR-V reader below is dead weight on an Apple host, where no `.spv` is produced at all.
@@ -95,7 +95,7 @@ fn rust_and_slang_agree_on_field_offsets() {
     let found = spirv_offsets(spirv);
     assert!(
         !found.is_empty(),
-        "no member offsets in the module — the check would pass vacuously"
+        "no member offsets in the module, so the check would pass vacuously"
     );
 
     let mut checked = 0;
@@ -107,8 +107,8 @@ fn rust_and_slang_agree_on_field_offsets() {
             };
             assert_eq!(
                 slang, *offset,
-                "{}::{name} is at {offset} in Rust but {slang} in Slang — \
-                 add padding to the Slang struct (see nga::slang::declare)",
+                "{}::{name} is at {offset} in Rust but {slang} in Slang. \
+                 Add padding to the Slang struct (see nga::slang::declare)",
                 abi.name
             );
             checked += 1;
@@ -193,8 +193,8 @@ fn metal_output_packs_the_same_way() {
 }
 
 /// The prelude is the one file that forks per backend, so the fork is the one place a layout
-/// mismatch can hide. A bindless handle is eight bytes on both targets — a `uint2` descriptor
-/// index on Vulkan, an `MTLResourceID` on Metal — and `material.slang` exists to prove it.
+/// mismatch can hide. A bindless handle is eight bytes on both targets, a `uint2` descriptor
+/// index on Vulkan and an `MTLResourceID` on Metal, and `material.slang` exists to prove it.
 ///
 /// Vulkan's half is checked against the SPIR-V; Metal's is checked against the MSL, which
 /// slangc emits on any host.

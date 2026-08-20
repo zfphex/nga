@@ -40,7 +40,7 @@ float4 fragment_main(VertexOut in) : SV_Target {
     return float4(c, in.alpha);
 }
 
-// The Metal original reads `float4 dst [[color(0)]]` — framebuffer fetch — and computes
+// The Metal original reads `float4 dst [[color(0)]]`, a framebuffer fetch, and computes
 // screen blending in the shader. Desktop Vulkan has no framebuffer fetch, so the fragment
 // only emits `src` and the screen formula is expressed as a fixed blend equation instead:
 // ONE, ONE_MINUS_SRC_COLOR gives src + dst*(1-src), which is exactly screen.

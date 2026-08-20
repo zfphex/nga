@@ -2,7 +2,7 @@
 //!
 //! Everything in this file is backend-independent and written once. The two backend files
 //! implement the same set of names against `ash` and `minmetal`, neither of which appears in
-//! any public signature — see the contract comment at the top of `vulkan.rs` and `metal.rs`.
+//! any public signature. See the contract comment at the top of `vulkan.rs` and `metal.rs`.
 
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -52,7 +52,7 @@ impl std::error::Error for Error {}
 
 /// A device address with a borrow attached. Eight bytes, `Copy`, embeddable in a struct shared
 /// with Slang. Covariant, so a `Gpu<'static, T>` coerces into any shorter frame lifetime; the
-/// reverse — storing a frame-arena pointer in a persistent structure — is a compile error.
+/// reverse, storing a frame-arena pointer in a persistent structure, is a compile error.
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct Gpu<'a, T: ?Sized>(pub NonZeroU64, pub PhantomData<&'a T>);
@@ -127,9 +127,9 @@ impl<T: ?Sized> DerefMut for GpuBox<'_, T> {
 
 /// A slot in the resource heap, as written into a struct shared with Slang.
 ///
-/// `DescriptorHandle<T>` lowers to a `uint2` on SPIR-V — only the low word is the descriptor
-/// index — and to a bare argument-buffer member holding an `MTLResourceID` on Metal. Both are
-/// eight bytes at eight-byte alignment, so this one type covers both.
+/// `DescriptorHandle<T>` lowers to a `uint2` on SPIR-V, where only the low word is the
+/// descriptor index, and to a bare argument-buffer member holding an `MTLResourceID` on
+/// Metal. Both are eight bytes at eight-byte alignment, so this one type covers both.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Handle(pub u64);
@@ -449,15 +449,15 @@ impl std::ops::BitOr for Usage {
 
 /// Capabilities that exist on one backend and not necessarily the other.
 ///
-/// The shared surface is the intersection; anything here is outside it and has to be asked
-/// about before use. `Device::supports` is the only honest way to spell that — a cargo feature
+/// The shared API is the intersection; anything here is outside it and has to be asked
+/// about before use. `Device::supports` is the only honest way to spell that. A cargo feature
 /// would be a compile-time answer to a runtime question, and the answer varies by adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     /// `VK_EXT_mesh_shader` / `MTLRenderPipelineDescriptor` mesh functions.
     MeshShaders,
     /// Metal tile shaders and imageblocks. There is no Vulkan equivalent and there will not
-    /// be one — this is the TBDR hardware showing through, not an API gap.
+    /// be one, because this is the TBDR hardware showing through, not an API gap.
     TileShaders,
     /// Metal indirect command buffers. Vulkan reaches most of the same ground through
     /// `vkCmdDrawIndirectCount` and `VK_EXT_multi_draw`, which are not the same shape.
@@ -612,7 +612,7 @@ impl std::ops::BitOr for Stage {
 }
 
 /// What a barrier has to make visible. Empty means execution ordering only, with no cache
-/// flush — the cheap case, and the one worth spelling explicitly.
+/// flush. That is the cheap case, and the one worth spelling explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hazard(pub u32);
 
@@ -761,7 +761,7 @@ impl<'a> RasterDesc<'a> {
     }
 
     /// Rasterisation sample count. Every attachment the pass binds has to have been built with
-    /// the same count — see [`TextureDesc::samples`] — and the resolve target with one.
+    /// the same count, see [`TextureDesc::samples`], and the resolve target with one.
     pub fn samples(mut self, samples: u32) -> Self {
         self.samples = samples;
         self
@@ -771,9 +771,9 @@ impl<'a> RasterDesc<'a> {
 /// How a multisample depth attachment collapses to its single-sample resolve target.
 ///
 /// Colour has no equivalent knob: both APIs average, and Vulkan only guarantees `AVERAGE` for
-/// colour anyway. Depth is the opposite — averaging a depth buffer is meaningless, so this is
+/// colour anyway. Depth is the opposite. Averaging a depth buffer is meaningless, so this is
 /// the one place a mode has to be named. `SampleZero` is the only mode both APIs always
-/// support — `Min`/`Max` are optional in `depthResolveModes` and validation is what catches a
+/// support. `Min`/`Max` are optional in `depthResolveModes`, and validation is what catches a
 /// driver that lacks them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolveMode {
@@ -783,7 +783,7 @@ pub enum ResolveMode {
 }
 
 /// A mesh pipeline: an optional object (amplification) stage, a mesh stage, and a fragment
-/// stage. There are no vertices and no index buffer — the mesh stage emits primitives directly.
+/// stage. There are no vertices and no index buffer; the mesh stage emits primitives directly.
 ///
 /// Metal-only today; ask [`Device::supports`] with [`Feature::MeshShaders`] before building one.
 /// The shader side is portable Slang either way (`[shader("amplification")]` / `[shader("mesh")]`),
@@ -833,7 +833,7 @@ impl<'a> MeshDesc<'a> {
 /// A tile pipeline: a compute function dispatched inside a render pass, reading and writing the
 /// imageblock the pass is rendering into without a round trip to memory.
 ///
-/// This one is Apple-only for good — it is the tile-based deferred hardware showing through,
+/// This one is Apple-only for good. It is the tile-based deferred hardware showing through,
 /// and there is no Vulkan equivalent to grow into. Slang has no tile stage either, so the
 /// function has to come from an MSL source; see `shaders/tbdr.metal`.
 #[derive(Clone, Copy)]
@@ -940,7 +940,7 @@ impl<T> IndexMut<u32> for Pool<'_, T> {
 }
 
 /// The compiled shader for `name`, as bytes. SPIR-V on the Vulkan backend, MSL source on the
-/// Metal one — both land in `OUT_DIR` from the same `.slang` file, and this is the only place
+/// Metal one. Both land in `OUT_DIR` from the same `.slang` file, and this is the only place
 /// the extension is spelled.
 #[cfg(not(target_vendor = "apple"))]
 #[macro_export]

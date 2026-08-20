@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             heap.upload(&texture, &pixels)?;
 
             // A painted texture is read and written in the same frame, so it stays in GENERAL.
-            // Metal needs no such distinction — there is no layout to choose.
+            // Metal needs no such distinction, because there is no layout to choose.
             layer_handles[layer as usize] = match painted {
                 true => {
                     heap.transition(&texture, Usage::STORAGE);

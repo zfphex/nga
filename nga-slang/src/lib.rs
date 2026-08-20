@@ -47,7 +47,7 @@ fn scalar(name: &str) -> Option<&'static str> {
         "f32x3x3" => "float3x3",
         "f32x4x4" => "float4x4",
         // Every handle spelling is a prelude typedef, because the two targets disagree about
-        // what the eight bytes mean — see SLANG_PRELUDE. They agree about the eight bytes,
+        // what the eight bytes mean. See SLANG_PRELUDE. They agree about the eight bytes,
         // which is all the struct layout depends on.
         "AtomicU32" => "uint",
         "Texture2d" => "nga_texture2d",

@@ -18,7 +18,7 @@ struct Object {
     float scale;
     float orbit;
     float phase;
-    // 0 solid, 1 wireframe — the index into the pipeline pair below.
+    // 0 solid, 1 wireframe, the index into the pipeline pair below.
     uint style;
     uint _pad0;
     float4 color;

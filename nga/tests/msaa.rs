@@ -1,5 +1,5 @@
 //! MSAA: rasterise at four samples into a multisample attachment, resolve into a single-sample
-//! texture and read that back. The proof is the edge — a resolved edge has partial coverage in
+//! texture and read that back. The proof is the edge. A resolved edge has partial coverage in
 //! it, a single-sample edge is only ever 0 or 255.
 
 use nga::*;

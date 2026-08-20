@@ -4,7 +4,7 @@
 //!
 //! `lib.rs` ends with `pub use backend::*`, so this file and `metal.rs` must define the same
 //! names with the same signatures. Neither is compiled on the other's platform, so the
-//! compiler cannot check that — this list is the checklist, and it is kept in the same order
+//! compiler cannot check that, so this list is the checklist, and it is kept in the same order
 //! in both files:
 //!
 //! `Device`, `Arena`, `GpuHeap`, `Retired`, `HeapBuffer`, `HeapTexture`, `TextureDesc`,
@@ -299,7 +299,7 @@ pub(crate) fn stage(stage: Stage) -> vk::PipelineStageFlags2 {
 }
 
 /// Metal's visibility flag is stage-agnostic: one bit means the same thing whatever stages the
-/// barrier joins. Vulkan access masks are not — pairing `SHADER_WRITE` with `ALL_TRANSFER`, or
+/// barrier joins. Vulkan access masks are not. Pairing `SHADER_WRITE` with `ALL_TRANSFER`, or
 /// `SHADER_READ` with `DRAW_INDIRECT`, is invalid. `MEMORY_READ`/`MEMORY_WRITE` are the only
 /// masks legal with every stage, so they are what keeps `barrier` portable.
 pub(crate) fn hazard(hazard: Hazard) -> (vk::AccessFlags2, vk::AccessFlags2) {
@@ -444,7 +444,7 @@ pub struct Device {
     pub(crate) descriptor_sizes: DescriptorSizes,
     /// Sampled images, storage images, samplers. Fixed by `SLANG_PRELUDE`, created once, and
     /// shared by every pipeline layout so pipelines stay interchangeable under one binding
-    /// model — the property Metal gets from having a single argument table.
+    /// model, the property Metal gets from having a single argument table.
     pub(crate) set_layouts: [vk::DescriptorSetLayout; 3],
     pub(crate) bindless_cap: u32,
     pub(crate) max_multi_draw_count: u32,
@@ -720,13 +720,13 @@ impl Device {
         Ok(())
     }
 
-    /// Whether this adapter can do something outside the shared surface.
+    /// Whether this adapter can do something outside the shared API.
     ///
     /// The answers are deliberately conservative: a feature reports `true` only when the
     /// backend actually implements a path for it today, not merely when the hardware could.
     pub fn supports(&self, feature: Feature) -> bool {
         match feature {
-            // Metal-only. Not an API gap — this is TBDR hardware showing through.
+            // Metal-only. Not an API gap; this is TBDR hardware showing through.
             Feature::TileShaders => false,
             // `VK_EXT_mesh_shader` is not requested at device creation, so no.
             Feature::MeshShaders => false,
@@ -799,7 +799,7 @@ impl Device {
     }
 
     /// `VK_EXT_memory_budget` reports what is actually free right now, which for the BAR heap
-    /// is the number that matters — it is shared with every other process on the desktop, so
+    /// is the number that matters. It is shared with every other process on the desktop, so
     /// its 214 MiB is never all ours.
     pub fn budget(&self, heap: u32) -> u64 {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
@@ -841,8 +841,8 @@ impl Drop for Device {
     }
 }
 
-/// Where an `Arena`'s memory lives. Metal has one answer to this question — `Shared` under
-/// UMA — so `nga` has no such enum. On discrete Windows the three are physically different
+/// Where an `Arena`'s memory lives. Metal has one answer to this question, `Shared` under
+/// UMA, so `nga` has no such enum. On discrete Windows the three are physically different
 /// memory with opposite performance, and picking the wrong one is silent, so it is explicit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Placement {
@@ -850,7 +850,7 @@ pub(crate) enum Placement {
     /// them at full speed. Without ReBAR this is 214 MiB shared with every other process, so
     /// it is reserved for per-frame root data and nothing else.
     Bar,
-    /// Host-visible system RAM without `HOST_CACHED` — write-combined. Uncached CPU reads from
+    /// Host-visible system RAM without `HOST_CACHED`, so write-combined. Uncached CPU reads from
     /// it are catastrophically slow, sequential writes are fast, and the GPU reads it once over
     /// PCIe. That is exactly the staging-source access pattern, and it costs no BAR.
     Upload,
@@ -882,7 +882,7 @@ impl Placement {
 
 /// The Metal `Arena` writes structs straight into GPU memory and hands out the address.
 /// On discrete Windows that only works inside the host-visible device-local BAR window,
-/// which is 214 MiB on this GPU with no ReBAR — enough for root data, too small for meshes.
+/// which is 214 MiB on this GPU with no ReBAR. Enough for root data, too small for meshes.
 /// So the arena is no longer one kind of memory: see `Placement`.
 pub struct Arena {
     pub(crate) buffer: vk::Buffer,
@@ -935,7 +935,7 @@ impl Arena {
         }
 
         // A full heap and an absent heap are different failures. The BAR window is 214 MiB and
-        // shared with the desktop, so the first candidate can simply be out of room — that is a
+        // shared with the desktop, so the first candidate can simply be out of room. That is a
         // reason to take the next one, not to give up.
         let mut flags =
             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
@@ -1070,7 +1070,7 @@ impl HeapBuffer {
         Gpu::new(self.gpu)
     }
 
-    /// The raw address, for the cases where the borrow has to be discarded — a heap allocation
+    /// The raw address, for the cases where the borrow has to be discarded. A heap allocation
     /// outlives every frame, so `Gpu<'static, T>` is the honest type and only the caller knows.
     pub fn address(&self) -> u64 {
         self.gpu
@@ -1146,7 +1146,7 @@ impl TextureDesc {
         }
     }
 
-    /// Extra usage beyond what the constructor implies — storage writes, colour attachment.
+    /// Extra usage beyond what the constructor implies: storage writes, colour attachment.
     pub fn usage(mut self, extra: Usage) -> Self {
         self.usage |= usage(extra);
         self
@@ -1154,7 +1154,7 @@ impl TextureDesc {
 
     /// Build the texture with `samples` samples per texel, for use as a multisample attachment
     /// under a pipeline built with the matching [`RasterDesc::samples`]. A multisample image
-    /// cannot be sampled or copied — it is only ever an attachment and a resolve source — so
+    /// cannot be sampled or copied, since it is only ever an attachment and a resolve source, so
     /// this also drops the usage the constructor assumed.
     pub fn samples(mut self, samples: u32) -> Self {
         self.samples = sample_count(samples);
@@ -1188,7 +1188,7 @@ pub(crate) fn sample_count(samples: u32) -> vk::SampleCountFlags {
 pub(crate) const UPLOAD_BATCHES: usize = 4;
 
 /// Staging ring size. Large enough that a frame's worth of uploads never wraps, small enough
-/// that it is unremarkable in system RAM — and it costs no BAR, which is the whole point.
+/// that it is unremarkable in system RAM. It also costs no BAR, which is the whole point.
 pub(crate) const UPLOAD_RING: usize = 32 * 1024 * 1024;
 
 /// `vkCmdUpdateBuffer`'s hard limit. Below it the data rides in the command buffer and the
@@ -1204,7 +1204,7 @@ pub(crate) const UPDATE_LIMIT: usize = 65536;
 /// a command buffer, whereas a copy that submits and waits is a full device drain. So nothing
 /// here submits until `flush`, and `flush` signals a timeline instead of idling the queue.
 ///
-/// The ring is `Placement::Upload` — deliberately *not* the BAR window. Staging memory is read
+/// The ring is `Placement::Upload`, deliberately not the BAR window. Staging memory is read
 /// once by the DMA engine and never by a shader, so spending the scarce 214 MiB on it would be
 /// the worst trade available.
 pub(crate) struct Uploader {
@@ -1312,7 +1312,7 @@ impl Uploader {
 
     /// How much of `want` to stage next, so a copy larger than the ring streams through it.
     /// The remaining tail is used when it is worth using; below a quarter of the ring it is
-    /// not, since a runt copy would wrap on the very next iteration anyway — better to ask for
+    /// not, since a runt copy would wrap on the very next iteration anyway. Better to ask for
     /// a full chunk and let `stage` wrap once.
     pub fn chunk(&self, want: usize) -> usize {
         let tail = self.available();
@@ -1404,10 +1404,10 @@ impl Drop for Uploader {
 /// `bufferImageGranularity` so a buffer and an image can never share a granularity page, and
 /// the memory is `DEVICE_LOCAL` without `HOST_VISIBLE`, because the host-visible device-local
 /// heap on this GPU is only 214 MiB. Both buffer and texture contents therefore arrive by
-/// staged copy — `VK_EXT_host_image_copy` would have spared textures that, but it is unusable
+/// staged copy. `VK_EXT_host_image_copy` would have spared textures that, but it is unusable
 /// on this driver (see `upload` and `examples/probe.rs`).
 ///
-/// Every staged copy is *recorded*, not submitted. Call `flush` (or `flush_wait`) once the
+/// Every staged copy is recorded, not submitted. Call `flush` (or `flush_wait`) once the
 /// batch is built; nothing reaches the GPU before that.
 pub struct GpuHeap {
     pub(crate) memory: vk::DeviceMemory,
@@ -1434,7 +1434,7 @@ impl GpuHeap {
 
     pub fn with_ring(device: &Device, size: u64, ring: usize) -> Result<Self, Error> {
         // `VK_KHR_maintenance4` answers "which heaps fit this?" from a create-info, with no
-        // object created — the exact complaint the post levels at Vulkan's allocator design.
+        // object created, the exact complaint the post levels at Vulkan's allocator design.
         let probe = vk::BufferCreateInfo::default()
             .size(size.min(1 << 20))
             .usage(Self::BUFFER_USAGE);
@@ -1572,8 +1572,9 @@ impl GpuHeap {
 
     /// `nga`'s `HeapBuffer::write` is a memcpy, because Metal heaps are host-visible under UMA.
     /// Here the destination is device-local, so the bytes go through the upload ring and a
-    /// recorded copy. This is the half of `StorageMode::Shared` that Vulkan cannot give back —
-    /// but it is recorded, not submitted, so what it costs is a memcpy and not a device drain.
+    /// recorded copy. This is the half of `StorageMode::Shared` that Vulkan cannot give back,
+    /// but it is recorded rather than submitted, so what it costs is a memcpy and not a device
+    /// drain.
     ///
     /// Writes at or below `UPDATE_LIMIT` skip the ring entirely: `vkCmdUpdateBuffer` embeds the
     /// data in the command buffer itself, which is both fewer moving parts and no ring pressure.
@@ -1605,7 +1606,7 @@ impl GpuHeap {
         }
 
         // Chunked against whatever the ring has left, so a write larger than the ring streams
-        // through it rather than failing — the old path simply panicked past 8 MiB.
+        // through it rather than failing. The old path simply panicked past 8 MiB.
         let mut written = 0;
         while written < bytes {
             let chunk = self.uploader.chunk(bytes - written);
@@ -1631,7 +1632,7 @@ impl GpuHeap {
 
     /// `VK_EXT_host_image_copy` was meant to go here: CPU memory straight into the image with
     /// no staging buffer and no command buffer, which is the closest Vulkan gets to Metal's
-    /// `replace_region`. On this driver it is unusable — an image created with
+    /// `replace_region`. On this driver it is unusable. An image created with
     /// `HOST_TRANSFER_EXT` reports `memoryTypeBits == 0`, so no memory can back it, even though
     /// the extension is advertised and `R8G8B8A8_UNORM` claims `HOST_IMAGE_TRANSFER` support.
     /// See `examples/probe.rs`. So uploads stage through a buffer, exactly like `write`.
@@ -1730,7 +1731,7 @@ impl GpuHeap {
     }
 
     /// Metal has no image layouts, so this method has no counterpart at all. Without
-    /// `VK_KHR_unified_image_layouts` — absent on this driver — a transition is unavoidable,
+    /// `VK_KHR_unified_image_layouts`, absent on this driver, a transition is unavoidable,
     /// but it is only a barrier: recording it into the open upload batch makes it free, where
     /// submitting one command buffer per transition made it the most expensive call here.
     fn barrier(
@@ -1761,8 +1762,8 @@ impl GpuHeap {
     /// Moves a texture into the layout `usage` implies, on the upload queue rather than in a
     /// frame. Used at load time, before any frame has been recorded.
     ///
-    /// Metal needs no equivalent — there is no layout to choose — which is why the argument is
-    /// a `Usage` and not something more Vulkan-shaped.
+    /// Metal needs no equivalent, because there is no layout to choose, which is why the argument
+    /// is a `Usage` and not something more Vulkan-shaped.
     pub fn transition(&mut self, texture: &HeapTexture, usage: Usage) {
         let layout = image_layout(usage);
         let old = texture.layout.get();
@@ -1787,8 +1788,8 @@ impl GpuHeap {
     }
 
     /// Destroys the image and view as well as releasing the block. Validation reports a leaked
-    /// `VkImage` without this, because `HeapTexture` has no `Drop` of its own — it cannot, it
-    /// does not know which device it came from.
+    /// `VkImage` without this, because `HeapTexture` has no `Drop` of its own. It cannot, since
+    /// it does not know which device it came from.
     pub fn free_texture(&mut self, texture: HeapTexture) {
         unsafe {
             self.device.destroy_image_view(texture.view, None);
@@ -1800,7 +1801,7 @@ impl GpuHeap {
     /// Hand a resource over to be released once the frame that last used it has finished.
     ///
     /// `frame` is [`Context::frame`] at the point of the hand-over. Freeing something the GPU is
-    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch — the borrow ends when
+    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch: the borrow ends when
     /// recording does, not when the command buffer retires.
     pub fn free_later(&mut self, frame: u64, retired: Retired) {
         self.retired.push_back((frame, retired));
@@ -1847,8 +1848,8 @@ pub struct HeapRange {
 /// size is driver-defined, and sampler descriptors must live in a buffer created with
 /// `SAMPLER_DESCRIPTOR_BUFFER_BIT` while image descriptors need `RESOURCE_DESCRIPTOR_BUFFER_BIT`.
 ///
-/// So one Metal heap becomes three parallel arrays — sampled images, storage images, samplers —
-/// across two buffers. The index space stays unified so `range.base + slot` arithmetic ports
+/// So one Metal heap becomes three parallel arrays, sampled images and storage images and
+/// samplers, across two buffers. The index space stays unified so `range.base + slot` arithmetic ports
 /// unchanged; the cost is that a slot reserves room in all three arrays.
 pub struct ResourceHeap {
     pub(crate) resources: vk::Buffer,
@@ -2736,7 +2737,7 @@ impl Pass {
     }
 
     /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
-    /// the mode is not implied — see [`ResolveMode`].
+    /// the mode is not implied. See [`ResolveMode`].
     pub fn depth_resolve(mut self, texture: &HeapTexture, mode: ResolveMode) -> Self {
         texture
             .layout
@@ -2798,7 +2799,7 @@ impl<'a> Raster<'a> {
             .map(|attachment| {
                 // A pass that clears may discard whatever was there; a pass that loads must
                 // keep it, and must additionally order its writes after the previous pass's.
-                // Metal's `Pass` needs neither distinction — this is the layout tax again.
+                // Metal's `Pass` needs neither distinction; this is the layout tax again.
                 let (old_layout, src_stage, src_access) = match attachment.clear {
                     Some(_) => (
                         vk::ImageLayout::UNDEFINED,
@@ -3119,8 +3120,8 @@ impl<'a> Raster<'a> {
     /// Metal replays an indirect command buffer the GPU filled in, with each encoded draw
     /// carrying its own root pointer. Vulkan has no GPU-side encoder: the closest portable
     /// equivalent is a GPU-written `VkDrawIndirectCommand` array plus a GPU-written count,
-    /// with every draw sharing one push constant. Per-draw data has to travel some other way
-    /// — here, through `first_instance`.
+    /// with every draw sharing one push constant. Per-draw data has to travel some other way,
+    /// here through `first_instance`.
     pub fn draw_indirect_count<T>(
         &self,
         root: Gpu<'_, T>,
@@ -3142,7 +3143,7 @@ impl<'a> Raster<'a> {
         };
     }
 
-    /// See `metal.rs`. There is no mesh pipeline to draw with here, so this is unreachable —
+    /// See `metal.rs`. There is no mesh pipeline to draw with here, so this is unreachable.
     /// `Shaders::mesh` failed long before a caller got this far.
     pub fn draw_mesh<T>(
         &self,
@@ -3226,7 +3227,7 @@ impl<'a> Raster<'a> {
 impl Drop for Raster<'_> {
     fn drop(&mut self) {
         // A query left open across `vkCmdEndRendering` is a validation error, and forgetting
-        // `occlusion_off` is easy — Metal's mode is not a scope, so there is nothing to forget
+        // `occlusion_off` is easy. Metal's mode is not a scope, so there is nothing to forget
         // there.
         self.occlusion_off();
         unsafe { self.device.cmd_end_rendering(self.command_buffer) };
@@ -3310,7 +3311,7 @@ impl<'a> Compute<'a> {
         }
     }
 
-    /// The whole barrier, with no resource list — exactly the design the post argues for, and
+    /// The whole barrier, with no resource list, exactly the design the post argues for, and
     /// exactly what `VkMemoryBarrier2` provides. Buffers need nothing else; only images drag
     /// per-resource layout state back in.
     pub fn barrier(&self, before: Stage, after: Stage, hazards: Hazard) {
@@ -3371,7 +3372,7 @@ impl<'a> Compute<'a> {
     /// Reads a whole texture back into host-visible memory, tightly packed. The counterpart of
     /// `GpuHeap::upload`, and what makes a headless render checkable without a screenshot.
     ///
-    /// `dest` must live in `arena` — a `Memory::Readback` one, if the CPU is going to read it
+    /// `dest` must live in `arena`, a `Memory::Readback` one if the CPU is going to read it
     /// more than once. The device address is resolved back to a buffer offset here rather than
     /// carried around, because that is the only thing Vulkan's copy needs that Metal's does not.
     pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuMut<'_, [u8]>) {
@@ -3472,7 +3473,7 @@ impl Context {
         Self::with_layout(device, shaders.layout, arena_size, threads)
     }
 
-    /// Every pipeline layout in `nga-vk` is the same shape, so a `Context` only needs one —
+    /// Every pipeline layout in `nga-vk` is the same shape, so a `Context` only needs one,
     /// which is what lets the shader-object path reuse all of this unchanged.
     pub(crate) fn with_layout(
         device: &Device,
@@ -3648,8 +3649,8 @@ impl<'a> Frame<'a> {
     /// This frame's per-thread arena. Everything allocated here is valid until the frame is
     /// submitted and its slot comes round again, which is what the `Gpu<'a, T>` lifetime says.
     ///
-    /// The returned borrow is tied to the *context*, not to `self`, so allocating from it does
-    /// not lock the frame — recording can still take `&mut self` afterwards.
+    /// The returned borrow is tied to the context, not to `self`, so allocating from it does
+    /// not lock the frame. Recording can still take `&mut self` afterwards.
     pub fn arena(&self, thread: usize) -> &'a Arena {
         &self.arenas[thread]
     }
@@ -3812,7 +3813,7 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-    /// This recorder's slice of the frame arena — where root data for the commands being
+    /// This recorder's slice of the frame arena, where root data for the commands being
     /// recorded belongs. Borrowed from the context, not from `self`, so allocating does not
     /// prevent recording.
     pub fn arena(&self) -> &'a Arena {
@@ -3841,7 +3842,7 @@ impl Recorder<'_> {
 // -- fences ------------------------------------------------------------------------------
 
 /// A monotonic counter both the host and the GPU can see: a timeline semaphore here, an
-/// `MTLSharedEvent` on Metal. Frames have their own counter inside [`Context`] — this is for
+/// `MTLSharedEvent` on Metal. Frames have their own counter inside [`Context`]; this is for
 /// the sequencing a caller does itself, such as an asset load that must land before a frame
 /// reads what it produced.
 pub struct Fence {
@@ -3887,8 +3888,9 @@ impl Fence {
         }
     }
 
-    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout —
-    /// a hang, not an error worth a `Result`, since there is nothing to do about it but say so.
+    /// Blocks until the counter reaches `value`, or ten seconds pass. `false` is the timeout,
+    /// a hang rather than an error worth a `Result`, since there is nothing to do about it but
+    /// say so.
     pub fn wait(&self, value: u64) -> bool {
         let semaphores = [self.semaphore];
         let values = [value];
@@ -3955,7 +3957,7 @@ impl Timers {
     }
 
     /// Take this frame's half of the pool and read back what the last frame to use it recorded.
-    /// Call once per frame, after `begin_frame` — that wait is what makes the read safe.
+    /// Call once per frame, after `begin_frame`. That wait is what makes the read safe.
     ///
     /// Only slots written every frame are meaningful: a Vulkan query has to be reset before it
     /// can be written again, so a slot skipped this frame reads as unwritten, where Metal would
@@ -3981,7 +3983,7 @@ impl Timers {
 
     /// Whether slot `index` holds a timestamp from the last frame to use this half. A slot that
     /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
-    /// reports for it — this is how to tell the two apart.
+    /// reports for it, so this is how to tell the two apart.
     pub fn written(&self, index: usize) -> bool {
         self.ticks[index] != 0
     }
@@ -4079,8 +4081,8 @@ impl Drop for Occlusion {
 // -- indirect command buffers ------------------------------------------------------------
 
 /// Metal's shader-encoded command buffers. Vulkan's nearest equivalent is
-/// `VK_NV_device_generated_commands`, which is not in the shared surface, so this type exists
-/// only so portable code names it — every constructor fails.
+/// `VK_NV_device_generated_commands`, which is not in the shared API, so this type exists
+/// only so portable code names it. Every constructor fails.
 ///
 /// The reachable Vulkan spelling of the same idea is `Raster::draw_indirect_count`: the GPU
 /// picks the arguments and the count, and the host picks the one pipeline they all share.

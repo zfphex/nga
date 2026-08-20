@@ -8,7 +8,7 @@
 //! nothing on the CPU deciding which.
 //!
 //! Metal-only. Vulkan's nearest equivalent is `VK_NV_device_generated_commands`, which is not
-//! in the shared surface, so `Feature::IndirectCommands` answers `false` there.
+//! in the shared API, so `Feature::IndirectCommands` answers `false` there.
 //! `tests/icb.rs` is the headless half of this example.
 
 fn main() {

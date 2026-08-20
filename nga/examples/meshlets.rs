@@ -1,6 +1,6 @@
 //! Mesh shading: an object stage culls a list of meshlets and amplifies into a mesh stage that
 //! emits their geometry directly. There is no vertex buffer, no index buffer and no draw per
-//! meshlet — one `draw_mesh` covers the lot, and how much work it turns into is decided on the
+//! meshlet. One `draw_mesh` covers the lot, and how much work it turns into is decided on the
 //! GPU after the CPU has stopped looking.
 //!
 //! Metal-only today. Vulkan reaches the same ground through `VK_EXT_mesh_shader`, which the
@@ -23,7 +23,7 @@ mod meshlets {
 
     #[gpu_struct]
     struct Meshlet {
-        /// xyz is the centre, w the radius — the sphere the object stage culls against.
+        /// xyz is the centre, w the radius, so this is the sphere the object stage culls against.
         bounds: f32x4,
         color: [f32; 3],
     }
@@ -149,8 +149,8 @@ mod meshlets {
                     .alloc(Scene {
                         meshlets,
                         mvp,
-                        // Sweeps in and out, so the number of surviving meshlets — and so the
-                        // size of the mesh grid — changes every frame.
+                        // Sweeps in and out, so the number of surviving meshlets, and with it
+                        // the size of the mesh grid, changes every frame.
                         cull_radius: 0.55 + 0.45 * (time * 0.5).sin(),
                         time,
                         meshlet_count: MESHLETS,

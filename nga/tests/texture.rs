@@ -33,7 +33,7 @@ fn compute_writes_a_bindless_storage_texture() -> Result<(), Box<dyn std::error:
             .usage(Usage::STORAGE | Usage::COPY_SRC),
     )?;
 
-    // The handle the shader dereferences is whatever the heap says it is — the host never
+    // The handle the shader dereferences is whatever the heap says it is. The host never
     // computes a descriptor index by hand.
     let mut resources = ResourceHeap::new(&device, 64)?;
     let range = resources.alloc_range(1)?;

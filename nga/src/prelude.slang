@@ -1,15 +1,15 @@
 // -- bindless handles ---------------------------------------------------------------------
 //
 // A handle is eight bytes on both targets, which is what lets one Rust `Handle(u64)` and one
-// shared struct layout serve both. How those eight bytes are *interpreted* is the one place
+// shared struct layout serve both. How those eight bytes are interpreted is the one place
 // the targets genuinely disagree, so it is the one place the prelude forks.
 //
 // Metal: `DescriptorHandle<T>` is a bare argument-buffer member holding an MTLResourceID.
 //
 // Vulkan: slangc would happily lower `DescriptorHandle<T>` here too, but it assigns sampled
-// and storage textures the *same* (set 0, binding 2) with different descriptor types, which a
+// and storage textures the same (set 0, binding 2) with different descriptor types, which a
 // descriptor-buffer layout cannot declare without VK_EXT_mutable_descriptor_type. Rather than
-// take on that requirement, Vulkan keeps three explicit arrays and a `uint2` index — padded to
+// take on that requirement, Vulkan keeps three explicit arrays and a `uint2` index, padded to
 // the same eight bytes so the struct layout does not move.
 
 #ifdef NGA_METAL
@@ -30,7 +30,7 @@ void nga_store(nga_texture2d_rw t, uint2 p, float4 v) { t[p] = v; }
 
 #else
 
-// Binding 0 of sets 0, 1 and 2 — the three descriptor-buffer layouts the device creates.
+// Binding 0 of sets 0, 1 and 2, the three descriptor-buffer layouts the device creates.
 // Only the 2D types are declared: aliasing the array/3D/cube views onto binding 0 is legal
 // (they are all VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) but slangc warns on every build, so they
 // arrive with the code that needs them.

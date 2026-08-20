@@ -1,6 +1,6 @@
 //! M4's exit criterion, headless: rasterise a triangle into a texture, read it back and check
-//! the pixels. Per CLAUDE.md this is how rendering gets validated — an image file, not a
-//! screenshot — and having it headless means it runs in CI and needs no window.
+//! the pixels. Per CLAUDE.md this is how rendering gets validated with an image file, not a
+//! screenshot, and having it headless means it runs in CI and needs no window.
 
 use nga::*;
 

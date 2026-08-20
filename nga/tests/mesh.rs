@@ -1,8 +1,8 @@
 //! A mesh pipeline drawing the same triangle `raster.rs` draws through the vertex path, so the
 //! two can be compared pixel for pixel. Headless, and skipped where the backend has no mesh
-//! pipeline — which is what `Feature::MeshShaders` is for.
+//! pipeline, which is what `Feature::MeshShaders` is for.
 
-// The shader is MSL — see `shaders/mesh.metal` for why — so there is nothing to include on a
+// The shader is MSL, see `shaders/mesh.metal` for why, so there is nothing to include on a
 // backend that wants SPIR-V. The `Feature::MeshShaders` check below is the runtime half.
 #![cfg(target_vendor = "apple")]
 

@@ -1,5 +1,5 @@
-//! An indirect command buffer, headless: a compute shader encodes three draws — picking the
-//! pipeline and the per-draw root pointer itself — and a render pass replays them.
+//! An indirect command buffer, headless. A compute shader encodes three draws, picking the
+//! pipeline and the per-draw root pointer itself, and a render pass replays them.
 //!
 //! `shaders/icb.metal` is MSL for the same reason `shaders/mesh.metal` is; see its header.
 
@@ -138,8 +138,8 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
     frame.submit(None)?;
     device.wait_idle()?;
 
-    // Each triangle is a quarter the size of the one `raster.rs` draws — about 2% of the frame
-    // — and there are three of them, spread across the width. A backend that replays nothing
+    // Each triangle is a quarter the size of the one `raster.rs` draws, about 2%% of the frame,
+    // and there are three of them, spread across the width. A backend that replays nothing
     // leaves the clear behind; one that replays garbage fills the frame.
     let bytes: &[u8] = &pixels;
     let total = (SIZE * SIZE) as usize;
