@@ -342,8 +342,15 @@ pub(crate) fn stage(stage: Stage) -> Stages {
     if stage.has(Stage::TRANSFER) {
         out = out | Stages::BLIT;
     }
-    if stage.has(Stage::COMPUTE) || stage.has(Stage::INDIRECT) {
+    if stage.has(Stage::COMPUTE) {
         out = out | Stages::DISPATCH;
+    }
+    // Metal has no indirect stage: indirect arguments are read by whichever stage consumes
+    // them, which is the vertex stage for a draw and the dispatch stage for a dispatch. Naming
+    // only `DISPATCH` here left the render encoder's argument fetch unordered against the
+    // compute pass that wrote it — the missing bands in `gpu_driven`.
+    if stage.has(Stage::INDIRECT) {
+        out = out | Stages::DISPATCH | Stages::VERTEX | Stages::OBJECT | Stages::MESH;
     }
     if stage.has(Stage::VERTEX) {
         out = out | Stages::VERTEX | Stages::OBJECT | Stages::MESH;
@@ -1399,16 +1406,26 @@ impl<'a> Compute<'a> {
     /// spells it as stages plus one visibility bit, which is strictly less than
     /// `VkMemoryBarrier2` carries and lands in the same place.
     ///
-    /// It takes *two* calls, because Metal 4 splits what one `vkCmdPipelineBarrier2` does.
-    /// `barrier` orders against earlier commands in this encoder; `barrierAfterQueueStages`
-    /// orders against everything already committed, which is the only thing that sees a
-    /// preceding render pass. Issuing one and not the other is a race — the offscreen raster
-    /// test caught it, intermittently, six runs in twenty.
+    /// It takes *three* calls, because Metal 4 splits what one `vkCmdPipelineBarrier2` does
+    /// into one in-encoder barrier and two queue-scoped halves, and a barrier that reaches only
+    /// some of them is a race:
+    ///
+    /// - `barrier` orders against earlier commands in *this* encoder.
+    /// - `barrierAfterQueueStages` orders this encoder after everything already committed —
+    ///   the only thing that sees a *preceding* render pass.
+    /// - `barrierBeforeQueueStages` publishes this encoder's writes to everything committed
+    ///   after it — the only thing a *following* render pass sees.
+    ///
+    /// Both queue halves were found the same way, by a race the shared surface cannot express
+    /// any other way: without the first, the offscreen raster test failed six runs in twenty;
+    /// without the second, `gpu_driven` drew bands of empty draw slots because the render
+    /// encoder fetched indirect arguments the encode pass had not published yet.
     pub fn barrier(&self, before: Stage, after: Stage, hazards: Hazard) {
+        let (before, after, hazard) = (stage(before), stage(after), hazard(hazards));
+        self.encoder.barrier(before, after, hazard);
+        self.encoder.barrier_after_queue_stages(before, after, hazard);
         self.encoder
-            .barrier(stage(before), stage(after), hazard(hazards));
-        self.encoder
-            .barrier_after_queue_stages(stage(before), stage(after), hazard(hazards));
+            .barrier_before_queue_stages(before, after, hazard);
     }
 
     pub fn copy_buffer(
