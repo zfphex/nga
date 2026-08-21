@@ -1,8 +1,8 @@
 // The `tbdr` example: draws a field of triangles, then runs a tile function over the imageblock
 // to vignette and posterise it without ever storing the render target and reading it back.
 //
-// MSL, not Slang: there is no tile stage in the language, and imageblocks are Apple-only for
-// good. `shaders/tile.metal` carries the same note and the headless version of the same test.
+// Hand-written MSL: `#[gpu]` has no tile stage, and imageblocks are Apple-only for good.
+// `shaders/tile.metal` carries the same note and the headless version of the same test.
 
 struct Vertex {
     packed_float3 position;

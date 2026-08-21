@@ -1,6 +1,75 @@
 use minwin::*;
 use nga::*;
-use nga_shaders::raster::{self, Vertex, Data, Options};
+use raster::{Data, Options, Vertex};
+
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+mod raster {
+    use nga::*;
+
+    /// Every entry point, which is what one library holds.
+    pub const ENTRIES: &[&nga::ir::GpuFn] = &[&VERTEX, &FRAGMENT, &FRAGMENT_SCREEN];
+
+    #[gpu_struct]
+    pub struct Vertex {
+        pub position: f32x3,
+        pub color: f32x3,
+    }
+
+    #[gpu_struct(align(16))]
+    pub struct Data {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub mvp: f32x4x4,
+        pub tint: f32x4,
+    }
+
+    /// One specialization constant per field, numbered by field index — the same number
+    /// `Constants::values` pushes, so the host and the module cannot disagree about which is
+    /// which.
+    #[gpu_struct]
+    #[derive(Constants)]
+    pub struct Options {
+        pub boost: bool,
+        pub gamma: f32,
+    }
+
+    #[gpu_struct]
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x3,
+        pub alpha: f32,
+    }
+
+    #[gpu(vertex)]
+    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+        let v = root.vertices[vid];
+        VertexOut {
+            position: root
+                .mvp
+                .mul(f32x4::new(v.position.x, v.position.y, v.position.z, 1.0)),
+            color: v.color * root.tint.xyz(),
+            alpha: root.tint.w,
+        }
+    }
+
+    #[gpu(fragment)]
+    fn fragment(input: VertexOut, #[constants] options: Options) -> f32x4 {
+        let mut c = input.color.pow(f32x3::splat(options.gamma));
+        if options.boost {
+            c = (c * 1.6).min(f32x3::splat(1.0));
+        }
+        f32x4::new(c.x, c.y, c.z, input.alpha)
+    }
+
+    /// The Metal original read `float4 dst [[color(0)]]` — a framebuffer fetch — and computed
+    /// screen blending itself. Desktop Vulkan has no framebuffer fetch, so this emits `src`
+    /// only and the screen formula is a fixed blend equation instead: `ONE`,
+    /// `ONE_MINUS_SRC_COLOR` is `src + dst * (1 - src)`, which is exactly screen.
+    #[gpu(fragment)]
+    fn fragment_screen(input: VertexOut) -> f32x4 {
+        let c = input.color * input.alpha;
+        f32x4::new(c.x, c.y, c.z, 1.0)
+    }
+}
 
 
 

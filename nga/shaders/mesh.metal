@@ -1,11 +1,9 @@
 // A mesh pipeline emitting one triangle, so `tests/mesh.rs` can check the same coverage
 // `tests/raster.rs` checks for the vertex path.
 //
-// MSL rather than Slang, and not by preference. slangc lowers a mesh stage to Metal correctly
-// but emits the *fragment* stage_in as a flat struct of `[[user(...)]]` varyings, which is the
-// vertex-pipeline convention; a mesh pipeline's fragment has to take the mesh output structs
-// themselves, and Metal rejects the mismatch at pipeline creation. Mesh pipelines are Metal-only
-// anyway, so an MSL source costs nothing that was portable to begin with.
+// Hand-written MSL. `#[gpu]` has no mesh stage: the IR generalises to one, but mesh pipelines
+// are Metal-only, so writing the emitter would buy a stage that only ever has one backend. See
+// section 9 of `GPU-PLAN.md`.
 
 struct Vertex {
     packed_float3 position;

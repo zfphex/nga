@@ -1,6 +1,159 @@
 use minwin::*;
 use nga::*;
-use nga_shaders::gpu_driven::{self, Instance, DrawArgs, SimData, EncodeData, DrawData, BoundaryData};
+use gpu_driven::{BoundaryData, DrawArgs, DrawData, EncodeData, Instance, SimData};
+
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+mod gpu_driven {
+    use nga::*;
+
+    const TAU: f32 = 6.2831853;
+
+    /// Every entry point, which is what one library holds.
+    pub const ENTRIES: &[&nga::ir::GpuFn] = &[
+        &SIMULATE,
+        &ENCODE,
+        &VERTEX,
+        &FRAGMENT,
+        &BOUNDARY,
+        &BOUNDARY_FRAGMENT,
+    ];
+
+    #[gpu_struct]
+    pub struct Instance {
+        pub center: f32x2,
+        pub angle: f32,
+        pub scale: f32,
+        pub color: f32x4,
+    }
+
+    /// `VkDrawIndirectCommand`, laid out by the spec rather than by us.
+    #[gpu_struct]
+    pub struct DrawArgs {
+        pub vertex_count: u32,
+        pub instance_count: u32,
+        pub first_vertex: u32,
+        pub first_instance: u32,
+    }
+
+    #[gpu_struct]
+    pub struct SimData {
+        pub instances: GpuMut<'static, [Instance]>,
+        pub time: f32,
+        pub count: u32,
+    }
+
+    #[gpu_struct]
+    pub struct EncodeData {
+        pub instances: Gpu<'static, [Instance]>,
+        pub draws: GpuMut<'static, [DrawArgs]>,
+        pub count: GpuMut<'static, AtomicU32>,
+        pub cull_radius: f32,
+        pub total: u32,
+    }
+
+    #[gpu_struct(align(16))]
+    pub struct DrawData {
+        pub instances: Gpu<'static, [Instance]>,
+        pub mvp: f32x4x4,
+    }
+
+    #[gpu_struct(align(16))]
+    pub struct BoundaryData {
+        pub mvp: f32x4x4,
+        pub radius: f32,
+        pub segments: u32,
+    }
+
+    #[gpu(compute(64))]
+    fn simulate(root: Gpu<'static, SimData>, #[thread_id] tid: u32x3) {
+        let i = tid.x;
+        if i >= root.count {
+            return;
+        }
+        let side = 64u32;
+        let cell =
+            (f32x2::new((i % side) as f32, (i / side) as f32) + 0.5) / side as f32 * 2.0 - 1.0;
+        let n = ((i as f32 * 12.9898).sin() * 43758.5453).fract();
+        let phase = root.time * (0.4 + n) + n * TAU;
+        let wheel = (f32x3::splat(TAU * n) + f32x3::new(0.0, 2.0, 4.0)).cos() * 0.5 + 0.5;
+
+        let mut out = root.instances;
+        out[i] = Instance {
+            center: cell + f32x2::new(phase.cos(), phase.sin()) * 0.008,
+            angle: phase,
+            scale: 0.009 + 0.004 * n,
+            color: f32x4::new(wheel.x, wheel.y, wheel.z, 1.0),
+        };
+    }
+
+    /// Metal builds a real `render_command` here and binds a per-draw root pointer to it.
+    /// Vulkan has no GPU-side encoder, so this writes a `VkDrawIndirectCommand` instead and
+    /// smuggles the instance index through `first_instance`, which the vertex stage reads back
+    /// as the base instance.
+    #[gpu(compute(64))]
+    fn encode(root: Gpu<'static, EncodeData>, #[thread_id] tid: u32x3) {
+        let i = tid.x;
+        if i >= root.total {
+            return;
+        }
+        let inst = root.instances[i];
+        if inst.center.length() > root.cull_radius {
+            return;
+        }
+        let mut counter = root.count;
+        let slot = counter.atomic_add(1);
+        let mut draws = root.draws;
+        draws[slot] = DrawArgs {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: i,
+        };
+    }
+
+    #[gpu_struct]
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x4,
+    }
+
+    #[gpu(vertex)]
+    fn vertex(
+        root: Gpu<'static, DrawData>,
+        #[vertex_id] vid: u32,
+        #[base_instance] base: u32,
+    ) -> VertexOut {
+        let inst = root.instances[base];
+        let a = inst.angle + vid as f32 * 2.0943951;
+        let p = inst.center + f32x2::new(a.cos(), a.sin()) * inst.scale;
+        VertexOut {
+            position: root.mvp.mul(f32x4::new(p.x, p.y, 0.5, 1.0)),
+            color: inst.color,
+        }
+    }
+
+    #[gpu(fragment)]
+    fn fragment(input: VertexOut) -> f32x4 {
+        input.color
+    }
+
+    /// A vertex stage that returns a bare `f32x4` is returning clip space and nothing else.
+    #[gpu(vertex)]
+    fn boundary(root: Gpu<'static, BoundaryData>, #[vertex_id] vid: u32) -> f32x4 {
+        let a = (vid / 2) as f32 / root.segments as f32 * TAU;
+        let mut r = root.radius + 0.004;
+        if vid % 2 == 0 {
+            r = root.radius - 0.004;
+        }
+        root.mvp
+            .mul(f32x4::new(a.cos() * r, a.sin() * r, 0.25, 1.0))
+    }
+
+    #[gpu(fragment)]
+    fn boundary_fragment() -> f32x4 {
+        f32x4::new(1.0, 1.0, 1.0, 0.6)
+    }
+}
 
 
 

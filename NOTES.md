@@ -207,6 +207,12 @@ Deleting the padding from `triangle.slang` produces:
 Data::mvp is at 16 in Rust but 8 in Slang. Add padding to the Slang struct
 ```
 
+This finding is what `GPU-PLAN.md` acts on, and the mechanism above is gone. Shaders are
+`#[gpu]` Rust functions now, both emitters write the Rust offsets out as `OpMemberDecorate
+Offset` and explicit MSL padding, and nothing is arranged for or guessed at. The check survives
+in `tests/gpu.rs`, but it now asks whether the emitters used the offsets they were handed rather
+than whether a shader compiler happened to agree.
+
 ### 6. One bindless heap becomes three
 
 Metal writes one `u64` per texture or sampler into a single buffer, and MSL reinterprets it per

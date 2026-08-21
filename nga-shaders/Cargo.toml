@@ -1,7 +1,0 @@
-[package]
-name = "nga-shaders"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-nga = { version = "0.1.0", path = "../nga" }

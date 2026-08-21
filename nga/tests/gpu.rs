@@ -3,6 +3,7 @@
 
 use nga::ir::{self, Stage, Ty};
 use nga::*;
+use std::mem::offset_of;
 
 #[gpu_struct]
 struct Scene {
@@ -59,6 +60,22 @@ fn fragment_main(input: Varyings) -> f32x4 {
         c = c * 0.5;
     }
     f32x4::new(c.x, c.y, c.z, 1.0)
+}
+
+/// A pointer then a matrix. `mvp` is sixteen-aligned and the pointer is eight bytes, so eight
+/// bytes of hole sit between them, and that hole is the whole reason this struct exists. Both
+/// emitters have to reproduce it: SPIR-V as an `Offset` decoration, MSL as a padding member.
+#[gpu_struct(align(16))]
+struct Transform {
+    scene: Gpu<'static, Scene>,
+    mvp: f32x4x4,
+}
+
+#[gpu(compute(64))]
+fn transform(root: Gpu<'static, Transform>, #[thread_id] id: u32x3) {
+    let scene = root.scene;
+    let mut out = scene.pixels;
+    out[id.x] = root.mvp.mul(scene.tint);
 }
 
 #[test]
@@ -143,4 +160,109 @@ fn vulkan() {
 fn reachable() {
     let order: Vec<&str> = GREY.reachable().iter().map(|f| f.name).collect();
     assert_eq!(order, ["luma", "grey"]);
+}
+
+
+// -- struct layout -------------------------------------------------------------------------
+//
+// `#[gpu_struct]` records what Rust chose and both emitters write those numbers out rather
+// than arranging for them to happen. So this does not catch a shader compiler picking a layout
+// behind our back, the way it had to when shaders were Slang. It catches an emitter that
+// stopped using the offsets it was handed.
+
+const OP_NAME: u16 = 5;
+const OP_MEMBER_NAME: u16 = 6;
+const OP_MEMBER_DECORATE: u16 = 72;
+const DECORATION_OFFSET: u32 = 35;
+
+/// `(struct name, field name) -> byte offset`, read straight out of the module. Reflection
+/// would not do: a struct reached through a `PhysicalStorageBuffer` pointer, which is every
+/// struct in this design, is not part of the binding interface and appears only here.
+fn spirv_offsets(words: &[u32]) -> std::collections::HashMap<(String, String), usize> {
+    let mut names = std::collections::HashMap::new();
+    let mut members = std::collections::HashMap::new();
+    let mut offsets = std::collections::HashMap::new();
+
+    let mut i = 5;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        let opcode = (words[i] & 0xffff) as u16;
+        assert!(count > 0, "zero-length SPIR-V instruction");
+        let operands = &words[i + 1..i + count];
+        match opcode {
+            OP_NAME => {
+                names.insert(operands[0], text(&operands[1..]));
+            }
+            OP_MEMBER_NAME => {
+                members.insert((operands[0], operands[1]), text(&operands[2..]));
+            }
+            OP_MEMBER_DECORATE if operands.get(2) == Some(&DECORATION_OFFSET) => {
+                offsets.insert((operands[0], operands[1]), operands[3] as usize);
+            }
+            _ => {}
+        }
+        i += count;
+    }
+
+    let mut out = std::collections::HashMap::new();
+    for ((id, member), offset) in offsets {
+        let (Some(name), Some(field)) = (names.get(&id), members.get(&(id, member))) else {
+            continue;
+        };
+        out.insert((name.clone(), field.clone()), offset);
+    }
+    out
+}
+
+fn text(words: &[u32]) -> String {
+    let bytes: Vec<u8> = words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .take_while(|&byte| byte != 0)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[test]
+fn the_spirv_offsets_are_the_rust_offsets() {
+    let found = spirv_offsets(&nga::spirv::words(&[&CLEAR, &TRANSFORM]));
+    assert!(!found.is_empty(), "no member offsets, so this would pass vacuously");
+
+    let mut checked = 0;
+    for abi in [<Scene as DeviceAbi>::ABI, <Transform as DeviceAbi>::ABI] {
+        for field in abi.fields {
+            let key = (abi.name.to_string(), field.name.to_string());
+            let Some(&emitted) = found.get(&key) else {
+                continue;
+            };
+            assert_eq!(
+                emitted, field.offset,
+                "{}::{} is at {} in Rust but {emitted} in the module",
+                abi.name, field.name, field.offset
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 6, "only {checked} fields were cross-checked");
+}
+
+#[test]
+fn the_msl_pads_to_the_same_offsets() {
+    let source = nga::msl::module(&[&CLEAR, &TRANSFORM]);
+    let body = source.split_once("struct Transform {").expect("no Transform struct").1;
+    let body = &body[..body.find("};").unwrap()];
+
+    assert!(
+        body.contains("uint _nga_pad0[2];"),
+        "expected 8 bytes of padding before `mvp`, got:
+{body}"
+    );
+    let scene = body.find("scene").unwrap();
+    let pad = body.find("_nga_pad0").unwrap();
+    let mvp = body.find("mvp").unwrap();
+    assert!(scene < pad && pad < mvp, "the padding is in the wrong place:
+{body}");
+
+    assert_eq!(offset_of!(Transform, mvp), 16);
+    assert_eq!(size_of::<Transform>(), 80);
 }

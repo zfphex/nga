@@ -14,4 +14,3 @@ minmetal = { git = "https://github.com/zfphex/minmetal.git" }
 
 [dev-dependencies]
 minwin = { version = "0.1.0", path = "../../minwin" }
-nga-shaders = { version = "0.1.0", path = "../nga-shaders" }

@@ -2,10 +2,8 @@
 // emits their geometry directly. No vertex buffer, no index buffer, no draw per meshlet. The
 // GPU decides how much work there is after the CPU has stopped looking.
 //
-// MSL rather than Slang. slangc lowers a mesh stage to Metal correctly but emits the fragment
-// stage_in as flat `[[user(...)]]` varyings, which is the vertex-pipeline convention; a mesh
-// pipeline's fragment has to take the mesh output structs themselves, and Metal rejects the
-// mismatch at pipeline creation. See `shaders/mesh.metal`.
+// Hand-written MSL, for the reason in `shaders/mesh.metal`: `#[gpu]` has no mesh stage, and a
+// mesh pipeline only ever runs on Metal.
 
 #define MESHLETS_PER_GROUP 32
 #define RING 8

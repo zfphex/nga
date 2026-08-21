@@ -6,8 +6,9 @@ does.
 
 No dependencies: `proc_macro` only in the macro crate, plain `std` in `nga`.
 
-**Status:** all five phases are built and tested (§8). The shader-by-shader migration that
-retires `slangc` is not finished; `slang.rs` and the `.slang` files are still there.
+**Status:** done. All five phases are built and tested (§8), every shader is a `#[gpu]`
+function, and `slangc`, `slang.rs`, `prelude.slang` and the `.slang` sources are gone. What
+remains is the list of subset gaps at the end of §8 and the deliberate omissions in §9.
 
 ## 1. The split
 
@@ -214,8 +215,8 @@ Both emitters are plain functions, so both scheduling options stay open:
   neither emitter needs a toolchain. A bin target that links the crate its shaders live in
   calls it, and the `build.rs` next door compiles the `.metal` to a `.metallib` exactly as it
   does for the hand-written ones. Emitting the Metal source on a non-Apple host is also what
-  lets `tests/layout.rs` check the Metal-side struct layout from a machine that cannot build
-  for Apple at all.
+  lets `tests/gpu.rs` check the Metal-side struct layout from a machine that cannot build for
+  Apple at all.
 
 ## 8. Phases
 
@@ -223,27 +224,34 @@ Both emitters are plain functions, so both scheduling options stay open:
 |---|---|---|---|
 
 | 0 | `ir.rs`, `#[gpu]` parses to `GpuFn`, `infer()` | `tests/gpu.rs` reads a parsed body back | done |
-| 1 | MSL backend | the emitted MSL is checked in `tests/gpu*.rs` | done |
-| 2 | SPIR-V backend, compute | `gpu_compute.rs` dispatches and reads back; `spirv-val` clean | done |
-| 3 | vertex + fragment, stage IO, builtins | `gpu_raster.rs` draws the triangle | done |
-| 4 | textures, samplers, atomics through bindless handles | `gpu_sample.rs`, `atomics_count_every_invocation` | done |
-| 5 | `#[constants]` -> `OpSpecConstant` / `function_constant`; AOT dump | `specialization_reaches_the_module`, `dump_writes_both_targets` | done |
+| 1 | MSL backend | `tests/gpu.rs` checks the emitted MSL | done |
+| 2 | SPIR-V backend, compute | `examples/sync` simulates and draws; `spirv-val` clean | done |
+| 3 | vertex + fragment, stage IO, builtins | `examples/triangle` draws | done |
+| 4 | textures, samplers, atomics through bindless handles | `examples/bindless`, `examples/gpu_driven` | done |
+| 5 | `#[constants]` -> `OpSpecConstant` / `function_constant`; AOT dump | `examples/raster`, `dump_writes_both_targets` | done |
+
+The evidence column used to name headless tests. Those are gone: the shaders now live in the
+example that draws with them, and running an example is what says the pipeline works. What is
+left under `nga/tests` is what a window cannot show, which is `gpu.rs` (the IR, both emitters
+and the struct layout), `fence.rs`, and the three Apple-gated MSL ones.
 
 ### The migration
 
-All nine `.slang` shaders are ported, in the `nga-shaders` crate: `fill`, `gradient`, `sample`,
-`material`, `triangle`, `raster`, `sync`, `bindless`, `gpu_driven`. The shared structs live
-there with them, so the host and the shader now have one definition each rather than two kept
-in step by hand. `tests/emit.rs` runs every module through both backends and hands the SPIR-V
-to `spirv-val`.
+The `.slang` sources, `slang.rs`, `prelude.slang`, `TypeAbi::decl` and the Slang half of
+`#[derive(Constants)]` are deleted. So is the `nga-shaders` crate that briefly held the ported
+shaders: each one now lives in the example that draws with it, as a `mod` at the top of the
+file, so the struct the host writes and the shader that reads it are forty lines apart in one
+file. `sync` is the exception, shared by `examples/sync.rs` and `examples/threaded.rs` through
+`examples/shaders/sync.rs` and a `#[path]` mod, since those two run the same simulation on a
+different number of threads.
 
-What remains is switching the consumers over: the examples and tests still say
-`nga::shader!("triangle")` and still carry their own copies of the structs. Once they read from
-`nga-shaders`, the `.slang` files, `slang.rs`, `prelude.slang`, `TypeAbi::decl` and the slangc
-half of `build.rs` all delete, and `tests/layout.rs` — which today compares Rust against
-slangc's output — becomes a comparison against our own emitters instead.
-`gpu_meshes`, `meshlets`, `tbdr`, `icb`, `mesh` and `tile` are hand-written MSL that stays that
-way (§9).
+The examples are the testbed. A shader with no example was a shader with only a test to prove
+it, and those went with the tests: `fill`, `gradient`, `sample` and `material` are gone.
+
+The only remaining `nga::shader!` callers are the six hand-written MSL shaders that stay that
+way (§9), all behind `#[cfg(target_vendor = "apple")]`. So `shader!` lost its Vulkan arm, and
+`build.rs` is now fifty lines that copy `shaders/*.metal` into `OUT_DIR` with the prelude in
+front.
 
 Two things the validator caught during the port, both now fixed and worth knowing:
 
@@ -260,8 +268,15 @@ the ABI did not move under it.
 
 - `match`, and `if`/`else` as an expression. Use `select`.
 - An array literal needs its `let` annotation; nothing else can type it.
-- Recursion is caught by a depth limit while walking `calls`, not by a proper cycle check.
-- `f16` reaches constants through a hand-rolled half converter, and nothing exercises it.
+- `f16` has no host type, so nothing can write an `f16` literal in a shader body. `Prim::F16`
+  and the half converter in `spirv.rs` are ready for one and unreachable until Rust's own `f16`
+  stabilises or a stand-in is written. Nothing wants half precision yet, so neither has happened.
+
+Recursion is no longer on this list, and the cycle walk in `ir.rs` turns out to be the second
+line of defence rather than the first. `calls` is a `const` holding `&OTHER`, so two functions
+that call each other are two consts that reference each other, and rustc rejects the pair with
+`cycle detected when simplifying constant for the type system`. The macro cannot see a cycle and
+never needed to: const evaluation sees it, by name, at the definition.
 
 ## 9. Deliberately out
 

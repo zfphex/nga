@@ -34,27 +34,29 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 ## Vocabulary that comes back with the code that needs it
 
 - `TextureKind` (1D, 3D, cube, arrays) and `BlendOp` were dropped rather than left unused.
-  The bindless prelude's array/3D/cube handle types exist so a shared struct can hold one, but
-  sampling through them needs the matching declaration in `prelude.slang`.
+  The array, 3D and cube handle types are in `#[gpu_struct]`'s vocabulary so a shared struct can
+  hold one, but sampling through them needs the matching intrinsic in `msl.rs` and `spirv.rs`.
 - `Format` is intersection-only and grows on demand: a variant exists only if both
   `vk::Format` and `MTLPixelFormat` have it. Adding one means adding a row to the `match` in each
   backend file, and the compiler points at both.
 
 ## Shading language
 
-Three shaders are hand-written MSL under `shaders/*.metal` rather than Slang, and `build.rs`
-copies them through on Apple:
+Every shader is a `#[gpu]` Rust function in the example that draws with it, and `nga::compile`
+emits SPIR-V or MSL from it. Slang and `slangc` are gone; see `GPU-PLAN.md` for what replaced
+them and for the gaps in the accepted Rust subset.
 
-- **Tile stage.** slangc answers `unknown capability`. Imageblocks are Apple-only for good, so
-  this one is permanent.
-- **`render_command`.** Encoding an indirect command buffer from a shader has no Slang spelling.
-  `__target_intrinsic(metal, ..)` passes an expression through, which is not enough.
-- **Mesh stage.** This one is a slangc bug rather than a language gap, so it should come back.
-  The mesh stage lowers to Metal correctly; the fragment does not. slangc emits its `stage_in` as
-  flat `[[user(...)]]` varyings, the vertex-pipeline convention, where a mesh pipeline's fragment
-  has to take the mesh output structs themselves, and Metal rejects the mismatch at pipeline
-  creation. Retest on a newer slangc and delete `shaders/mesh.metal` and `shaders/meshlets.metal`
-  when it passes.
+Six shaders under `shaders/*.metal` stay hand-written, and `build.rs` copies them through on
+Apple:
+
+- **Tile stage** (`tile.metal`, `tbdr.metal`). An imageblock is tile-based deferred hardware
+  showing through. There is nothing in Vulkan to grow into, so this one is permanent.
+- **Encoding a command buffer** (`icb.metal`, `gpu_meshes.metal`). `render_command` is Metal's
+  own vocabulary and indirect command buffers are Metal-only, so this one is permanent too.
+- **Mesh stage** (`mesh.metal`, `meshlets.metal`). The IR generalises to a mesh stage and the
+  emitters would not have far to go. What stops it is that mesh pipelines run on Metal only, so
+  the stage would serve one backend. It is worth writing the day Vulkan mesh shaders are wired
+  up, and not before.
 
 ## Verification
 
@@ -68,10 +70,12 @@ type-checks the Metal half without an Apple toolchain, because `check` never lin
 `--all-targets` does not work there, since `minwin`'s macOS window does not implement the current
 `PlatformWindow`, so it is `--lib` only. That covers `metal.rs`, which is the file that matters.
 
-It proves a backend half compiles, not that it runs. The headless tests under `nga/tests` are
-what prove the API; the four Apple-gated ones (`mesh`, `icb`, `tile`, and the mesh half of
-`queries`) prove nothing on Vulkan by construction.
+It proves a backend half compiles, not that it runs. The examples are what prove the API: each
+one owns the shader it draws with, so running it exercises the whole path from `#[gpu]` body to
+pixels. `nga/tests` keeps only what a window cannot show, which is `gpu.rs` (the IR, both
+emitters and the struct layout), `fence.rs`, and the three Apple-gated MSL ones (`mesh`, `icb`,
+`tile`), which prove nothing on Vulkan by construction.
 
 All nine examples have been run on Vulkan (GTX 1070 Ti, driver 582.66) under
 `VK_LAYER_KHRONOS_validation` with zero errors, including resize, minimise and restore. None has
-been run on Metal. The three Apple-gated ones print a line and exit on Vulkan.
+been run on Metal.

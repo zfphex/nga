@@ -966,8 +966,7 @@ pub struct HeapRange {
 }
 
 /// On Metal a bindless handle is the `MTLResourceID` itself, stored inline in the root struct
-/// the shader dereferences. See the argument-buffer members slangc emits for
-/// `DescriptorHandle<T>`.
+/// the shader dereferences. See the argument-buffer members `msl.rs` emits for a handle type.
 /// So there is no descriptor memory to manage and this type is a slot bookkeeper: it exists so
 /// that `alloc_range` / `write_texture` / `write_sampler` mean the same thing on both backends,
 /// where Vulkan really does have three descriptor arrays behind them.
@@ -1119,8 +1118,8 @@ pub struct Shaders {
 }
 
 impl Shaders {
-    /// `source` is the MSL `build.rs` produced from the Slang, as bytes, the same shape the
-    /// Vulkan side takes SPIR-V in.
+    /// `source` is MSL, as bytes, the same shape the Vulkan side takes SPIR-V in. It comes
+    /// either from [`crate::compile`] or, for the hand-written shaders, from `shader!`.
     pub fn new(device: &Device, source: &[u8]) -> Result<Self, Error> {
         let source = std::str::from_utf8(source)
             .map_err(|_| Error::new("shader source is not valid UTF-8"))?;
@@ -1537,8 +1536,8 @@ impl<'a> Raster<'a> {
         raster
     }
 
-    /// Writes the root pointer where the shader expects it. slangc lowers the shared
-    /// `nga_push` block to `constant nga_push* [[buffer(0)]]`, so what the argument table holds
+    /// Writes the root pointer where the shader expects it. `msl.rs` gives every entry point
+    /// a `constant nga_push* [[buffer(0)]]` parameter, so what the argument table holds
     /// is the address of a struct, not the root itself, so a bind costs one 16-byte arena
     /// allocation.
     fn bind<T>(&self, root: Gpu<'_, T>) {

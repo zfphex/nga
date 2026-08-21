@@ -244,7 +244,7 @@ pub struct Handle(pub u64);
 macro_rules! handle {
     ($($name:ident,)*) => {
         $(
-            /// A typed [`Handle`]. The type only picks the Slang spelling the macro emits;
+            /// A typed [`Handle`]. The type only picks which resource the emitters declare;
             /// the bytes are identical.
             #[repr(transparent)]
             #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -855,8 +855,7 @@ pub enum ResolveMode {
 /// stage. There are no vertices and no index buffer; the mesh stage emits primitives directly.
 ///
 /// Metal-only today; ask [`Device::supports`] with [`Feature::MeshShaders`] before building one.
-/// The shader side is portable Slang either way (`[shader("amplification")]` / `[shader("mesh")]`),
-/// so only the pipeline is backend-specific.
+/// The shader side is hand-written MSL, since `#[gpu]` has no mesh stage; see `GPU-PLAN.md`.
 #[derive(Clone, Copy)]
 pub struct MeshDesc<'a> {
     /// The object stage, or `""` for a mesh pipeline with no amplification.
@@ -903,7 +902,7 @@ impl<'a> MeshDesc<'a> {
 /// imageblock the pass is rendering into without a round trip to memory.
 ///
 /// This one is Apple-only for good. It is the tile-based deferred hardware showing through,
-/// and there is no Vulkan equivalent to grow into. Slang has no tile stage either, so the
+/// and there is no Vulkan equivalent to grow into. `#[gpu]` has no tile stage either, so the
 /// function has to come from an MSL source; see `shaders/tbdr.metal`.
 #[derive(Clone, Copy)]
 pub struct TileDesc<'a> {
@@ -1008,18 +1007,10 @@ impl<T> IndexMut<u32> for Pool<'_, T> {
     }
 }
 
-/// The compiled shader for `name`, as bytes. SPIR-V on the Vulkan backend, MSL source on the
-/// Metal one. Both land in `OUT_DIR` from the same `.slang` file, and this is the only place
-/// the extension is spelled.
-#[cfg(not(target_vendor = "apple"))]
-#[macro_export]
-macro_rules! shader {
-    ($name:literal) => {
-        include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv")) as &[u8]
-    };
-}
-
-#[cfg(target_vendor = "apple")]
+/// The MSL source `build.rs` copied out of `shaders/`, as bytes.
+///
+/// Only the shaders `#[gpu]` is not asked to reach are still hand-written, and all of them are
+/// Metal-only, so there is no Vulkan arm to write. Everything else goes through [`compile`].
 #[macro_export]
 macro_rules! shader {
     ($name:literal) => {

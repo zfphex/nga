@@ -1,9 +1,10 @@
 // A compute kernel that encodes draws into an indirect command buffer, and the pipeline those
 // draws replay. `tests/icb.rs` checks that the render pass drew what the GPU asked for.
 //
-// MSL because `render_command` has no Slang spelling; indirect command buffers are Metal-only
-// anyway. This is the thing `draw_indirect_count` cannot do: the *pipeline* and the per-draw
-// root pointer are chosen on the GPU, not on the host.
+// Hand-written MSL because encoding a command buffer from a shader has no `#[gpu]` spelling;
+// indirect command buffers are Metal-only anyway. This is the thing `draw_indirect_count`
+// cannot do: the pipeline and the per-draw root pointer are chosen on the GPU, not on the
+// host.
 
 struct Vertex {
     packed_float3 position;

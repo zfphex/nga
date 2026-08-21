@@ -385,21 +385,30 @@ impl GpuFn {
     /// order because neither language lets a call precede its declaration.
     pub fn reachable(&'static self) -> Vec<&'static GpuFn> {
         let mut out: Vec<&'static GpuFn> = Vec::new();
-        visit(self, &mut out, 0);
+        visit(self, &mut out, &mut Vec::new());
         out
     }
 }
 
-fn visit(f: &'static GpuFn, out: &mut Vec<&'static GpuFn>, depth: u32) {
-    // Recursion is invalid in SPIR-V and pointless in MSL, and the parser cannot see it: a
-    // cycle only exists once two functions are linked. Depth is the cheapest way to catch it.
-    assert!(depth < 64, "`{}` is recursive", f.name);
+fn visit(f: &'static GpuFn, out: &mut Vec<&'static GpuFn>, path: &mut Vec<&'static GpuFn>) {
+    if out.iter().any(|other| std::ptr::eq(*other, f)) {
+        return;
+    }
+    // Recursion is invalid in SPIR-V and pointless in MSL. In practice rustc rejects it first:
+    // `calls` is a const holding `&OTHER`, so a cycle in the call graph is a cycle in const
+    // evaluation, and the error names both functions before this ever runs. `path` is the chain
+    // of calls being walked, and this stays as the check that does not depend on that.
+    assert!(
+        !path.iter().any(|other| std::ptr::eq(*other, f)),
+        "`{}` is recursive",
+        f.name
+    );
+    path.push(f);
     for callee in f.calls {
-        visit(callee, out, depth + 1);
+        visit(callee, out, path);
     }
-    if !out.iter().any(|other| std::ptr::eq(*other, f)) {
-        out.push(f);
-    }
+    path.pop();
+    out.push(f);
 }
 
 // -- inference ---------------------------------------------------------------------------

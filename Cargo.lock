@@ -43,19 +43,11 @@ dependencies = [
  "minmetal",
  "minwin",
  "nga-gpu",
- "nga-shaders",
 ]
 
 [[package]]
 name = "nga-gpu"
 version = "0.1.0"
-
-[[package]]
-name = "nga-shaders"
-version = "0.1.0"
-dependencies = [
- "nga",
-]
 
 [[package]]
 name = "windows-link"

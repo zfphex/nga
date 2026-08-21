@@ -11,67 +11,33 @@ struct Field {
 }
 
 enum Ty {
-    Slang(String),
+    Builtin,
     User(String),
-    Array(Box<Ty>, u32),
-    Ptr {
-        #[allow(dead_code)]
-        mutable: bool,
-        pointee: Box<Ty>,
-    },
+    Array(Box<Ty>),
+    Ptr(Box<Ty>),
 }
 
-fn scalar(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "f32" => "float",
-        "f16" => "half",
-        "u32" => "uint",
-        "i32" => "int",
-        "u16" => "uint16_t",
-        "i16" => "int16_t",
-        "u8" => "uint8_t",
-        "i8" => "int8_t",
-        "u64" => "uint64_t",
-        "i64" => "int64_t",
-        "bool" => "bool",
-        "f16x2" => "half2",
-        "f16x3" => "half3",
-        "f16x4" => "half4",
-        "f32x2" => "float2",
-        "f32x3" => "float3",
-        "f32x4" => "float4",
-        "u32x2" => "uint2",
-        "u32x3" => "uint3",
-        "u32x4" => "uint4",
-        "i32x2" => "int2",
-        "i32x3" => "int3",
-        "i32x4" => "int4",
-        "f32x3x3" => "float3x3",
-        "f32x4x4" => "float4x4",
-        // Every handle spelling is a prelude typedef, because the two targets disagree about
-        // what the eight bytes mean. See SLANG_PRELUDE. They agree about the eight bytes,
-        // which is all the struct layout depends on.
-        "AtomicU32" => "uint",
-        "Texture2d" => "nga_texture2d",
-        "Texture2dW" => "nga_texture2d_rw",
-        "Texture2dRW" => "nga_texture2d_rw",
-        "Texture2dArray" => "nga_texture2d_array",
-        "Texture3d" => "nga_texture3d",
-        "Texture3dW" => "nga_texture3d_rw",
-        "Texture3dRW" => "nga_texture3d_rw",
-        "TextureCube" => "nga_texturecube",
-        "Depth2d" => "nga_depth2d",
-        "Sampler" => "nga_sampler",
-        // Metal-only, and declared by the MSL prelude rather than the Slang one: indirect
-        // command buffers have no Slang spelling, so shaders that use these are `.metal`.
-        "Commands" => "nga_commands",
-        "PipelineHandle" => "nga_pipeline",
-        "Draw" => "nga_draw",
-        "DrawIndexed" => "nga_draw_indexed",
-        "Dispatch" => "nga_dispatch",
-        "DispatchThreads" => "nga_dispatch_threads",
-        _ => return None,
-    })
+/// Every type name `#[gpu_struct]` knows without being told. Anything else is a user struct,
+/// and the expansion asserts it implements `DeviceAbi`. The spellings the two backends give
+/// these live in `msl.rs` and `spirv.rs`; all this decides is which of the two kinds a field is.
+fn scalar(name: &str) -> bool {
+    matches!(
+        name,
+        "f32" | "f16" | "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "u64" | "i64" | "bool"
+            | "f16x2" | "f16x3" | "f16x4"
+            | "f32x2" | "f32x3" | "f32x4"
+            | "u32x2" | "u32x3" | "u32x4"
+            | "i32x2" | "i32x3" | "i32x4"
+            | "f32x3x3" | "f32x4x4"
+            | "AtomicU32"
+            | "Texture2d" | "Texture2dW" | "Texture2dRW" | "Texture2dArray"
+            | "Texture3d" | "Texture3dW" | "Texture3dRW" | "TextureCube"
+            | "Depth2d" | "Sampler"
+            // Metal-only. Indirect command buffers have no `#[gpu]` spelling, so the shaders
+            // that encode through these are the hand-written `.metal` ones.
+            | "Commands" | "PipelineHandle"
+            | "Draw" | "DrawIndexed" | "Dispatch" | "DispatchThreads"
+    )
 }
 
 fn compile_error(span: Span, message: &str) -> TokenStream {
@@ -79,7 +45,10 @@ fn compile_error(span: Span, message: &str) -> TokenStream {
     literal.set_span(span);
     let mut bang = Punct::new('!', Spacing::Alone);
     bang.set_span(span);
-    let mut group = Group::new(Delimiter::Brace, TokenStream::from(TokenTree::Literal(literal)));
+    let mut group = Group::new(
+        Delimiter::Brace,
+        TokenStream::from(TokenTree::Literal(literal)),
+    );
     group.set_span(span);
     [
         TokenTree::Ident(Ident::new("compile_error", span)),
@@ -118,10 +87,16 @@ fn parse_struct(tokens: &[TokenTree]) -> Result<(Ident, Vec<Field>), Fail> {
     let body = match tokens.get(i + 2) {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => g,
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
-            return Err((g.span(), "tuple structs cannot be shared with Slang".into()));
+            return Err((
+                g.span(),
+                "tuple structs cannot be shared with the GPU".into(),
+            ));
         }
         Some(t) if punct(Some(t), '<') => {
-            return Err((t.span(), "generic structs cannot be shared with Slang".into()));
+            return Err((
+                t.span(),
+                "generic structs cannot be shared with the GPU".into(),
+            ));
         }
         _ => return Err((name.span(), "expected a braced struct body".into())),
     };
@@ -190,42 +165,24 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
             let [TokenTree::Literal(len)] = &inner[semi + 1..] else {
                 return Err((span, "array length must be an integer literal".into()));
             };
-            let Ok(len) = len.to_string().parse::<u32>() else {
+            if len.to_string().parse::<u32>().is_err() {
                 return Err((span, "array length must be an integer literal".into()));
-            };
-            let element = parse_ty(&inner[..semi], false)?;
-            // `float3` is 12 bytes on both targets: scalar layout gives that on SPIR-V, and
-            // slangc emits `packed_float3` for the Metal target. No packed spelling needed here.
-            if let (Ty::Slang(t), 2..=4) = (&element, len)
-                && matches!(
-                    t.as_str(),
-                    "float"
-                        | "half"
-                        | "uint"
-                        | "int"
-                        | "uint16_t"
-                        | "int16_t"
-                        | "uint8_t"
-                        | "int8_t"
-                )
-            {
-                return Ok(Ty::Slang(format!("{t}{len}")));
             }
-            Ok(Ty::Array(Box::new(element), len))
+            let element = parse_ty(&inner[..semi], false)?;
+            Ok(Ty::Array(Box::new(element)))
         }
         TokenTree::Ident(id) => {
             let name = id.to_string();
             if tokens.len() == 1 {
-                return Ok(match scalar(&name) {
-                    Some(msl) => Ty::Slang(msl.into()),
-                    None => Ty::User(name),
+                return Ok(if scalar(&name) {
+                    Ty::Builtin
+                } else {
+                    Ty::User(name)
                 });
             }
-            let mutable = match name.as_str() {
-                "Gpu" => false,
-                "GpuMut" => true,
-                _ => return Err((span, format!("`{name}` cannot be shared with Slang"))),
-            };
+            if name != "Gpu" && name != "GpuMut" {
+                return Err((span, format!("`{name}` cannot be shared with the GPU")));
+            }
             let generics = &tokens[1..];
             if !punct(generics.first(), '<') || !punct(generics.last(), '>') {
                 return Err((span, format!("expected `{name}<'static, T>`")));
@@ -243,10 +200,7 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
                 ));
             }
             match parse_ty(pointee, true)? {
-                pointee @ (Ty::Slang(_) | Ty::User(_)) => Ok(Ty::Ptr {
-                    mutable,
-                    pointee: Box::new(pointee),
-                }),
+                pointee @ (Ty::Builtin | Ty::User(_)) => Ok(Ty::Ptr(Box::new(pointee))),
                 _ => Err((
                     span,
                     "a GPU pointer must point at a scalar, vector or #[gpu_struct] type".into(),
@@ -255,37 +209,24 @@ fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
         }
         TokenTree::Punct(p) if p.as_char() == '&' => Err((
             span,
-            "references cannot be shared with Slang; use Gpu<'static, T>".into(),
+            "references cannot be shared with the GPU; use Gpu<'static, T>".into(),
         )),
         TokenTree::Punct(p) if p.as_char() == '*' => Err((
             span,
-            "raw pointers cannot be shared with Slang; use Gpu<'static, T>".into(),
+            "raw pointers cannot be shared with the GPU; use Gpu<'static, T>".into(),
         )),
         TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis => {
-            Err((span, "tuple types cannot be shared with Slang".into()))
+            Err((span, "tuple types cannot be shared with the GPU".into()))
         }
-        _ => Err((span, "this type cannot be shared with Slang".into())),
-    }
-}
-
-fn declare(ty: &Ty, name: &str) -> String {
-    match ty {
-        Ty::Slang(t) | Ty::User(t) => format!("{t} {name}"),
-        Ty::Ptr { pointee, .. } => {
-            let (Ty::Slang(t) | Ty::User(t)) = &**pointee else {
-                unreachable!()
-            };
-            format!("{t}* {name}")
-        }
-        Ty::Array(element, len) => format!("{}[{len}]", declare(element, name)),
+        _ => Err((span, "this type cannot be shared with the GPU".into())),
     }
 }
 
 fn users(ty: &Ty, out: &mut Vec<String>) {
     match ty {
         Ty::User(t) => out.push(t.clone()),
-        Ty::Ptr { pointee, .. } => users(pointee, out),
-        Ty::Array(element, _) => users(element, out),
+        Ty::Ptr(pointee) => users(pointee, out),
+        Ty::Array(element) => users(element, out),
         _ => {}
     }
 }
@@ -327,10 +268,6 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
     };
 
     let (name, fields) = parse_struct(&tokens)?;
-    let mut decl = match &align {
-        Some(align) => format!("\nstruct alignas({align}) {name} {{\n"),
-        None => format!("\nstruct {name} {{\n"),
-    };
     let mut offsets = String::new();
     let mut nested = Vec::new();
     for field in &fields {
@@ -341,7 +278,6 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
             }
         };
         users(&ty, &mut nested);
-        decl += &format!("    {};\n", declare(&ty, &field.name));
         let ty_tokens: TokenStream = field.tokens.iter().cloned().collect();
         let ir = match gpu::ir_ty(&field.tokens) {
             Ok(ir) => ir,
@@ -359,8 +295,6 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
             field.name
         );
     }
-    decl += "};\n";
-
     let asserts = nested
         .iter()
         .map(|t| format!("assert::<{t}>();"))
@@ -374,7 +308,6 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
         "impl ::nga::DeviceAbi for {name} {{
              const ABI: ::nga::TypeAbi = ::nga::TypeAbi {{
                  name: \"{name}\",
-                 decl: {decl:?},
                  size: ::core::mem::size_of::<{name}>(),
                  align: ::core::mem::align_of::<{name}>(),
                  fields: &[{offsets}],
@@ -398,30 +331,8 @@ pub fn constants(item: TokenStream) -> TokenStream {
         Err((span, message)) => return compile_error(span, &message),
     };
 
-    let mut format_string = String::new();
-    let mut types = String::new();
     let mut sets = String::new();
     for (index, field) in fields.iter().enumerate() {
-        let ty: TokenStream = field.tokens.iter().cloned().collect();
-        let name = &field.name;
-        match parse_ty(&field.tokens, false) {
-            Ok(Ty::Ptr { pointee, .. }) => {
-                let (Ty::Slang(t) | Ty::User(t)) = &*pointee else {
-                    unreachable!()
-                };
-                format_string += &format!(
-                    "[[vk::constant_id({index})]] const uint64_t nga_{name} = 0;\n                     static {t}* {name} = ({t}*)nga_{name};\n"
-                );
-            }
-            _ => {
-                format_string += &format!(
-                    "[[vk::constant_id({index})]] const {{}} {name} = ({{}})0;\n"
-                );
-                types += &format!(
-                    "<{ty} as ::nga::ConstantValue>::SLANG_TYPE, <{ty} as ::nga::ConstantValue>::SLANG_TYPE,"
-                );
-            }
-        }
         sets += &format!(
             "::nga::Constant::push(&mut values, {index}, self.{});",
             field.name
@@ -430,9 +341,6 @@ pub fn constants(item: TokenStream) -> TokenStream {
 
     format!(
         "impl ::nga::Constants for {name} {{
-             fn slang() -> ::std::string::String {{
-                 ::std::format!(\"{format_string}\", {types})
-             }}
              fn values(&self) -> ::std::vec::Vec<::nga::Constant> {{
                  let mut values = ::std::vec::Vec::new();
                  {sets}

@@ -1,6 +1,85 @@
 use minwin::*;
 use nga::*;
-use nga_shaders::bindless::{self, Vertex, Material, Data, Paint};
+use bindless::{Data, Material, Paint, Vertex};
+
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+mod bindless {
+    use nga::*;
+
+    /// Every entry point, which is what one library holds.
+    pub const ENTRIES: &[&nga::ir::GpuFn] = &[&PAINT, &VERTEX, &FRAGMENT];
+
+    #[gpu_struct]
+    pub struct Vertex {
+        pub position: f32x2,
+        pub uv: f32x2,
+    }
+
+    #[gpu_struct]
+    pub struct Material {
+        pub layers: [Texture2d; 3],
+        pub samp: Sampler,
+        pub tint: f32x3,
+    }
+
+    #[gpu_struct(align(16))]
+    pub struct Data {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub materials: Gpu<'static, [Material]>,
+        pub mvp: f32x4x4,
+    }
+
+    #[gpu_struct]
+    pub struct Paint {
+        pub target: Texture2dRW,
+        pub size: u32,
+        pub time: f32,
+    }
+
+    #[gpu(compute(8, 8, 1))]
+    fn paint(root: Gpu<'static, Paint>, #[thread_id] tid: u32x3) {
+        if tid.x >= root.size || tid.y >= root.size {
+            return;
+        }
+        let p = (f32x2::new(tid.x as f32, tid.y as f32) + 0.5) / root.size as f32 * 2.0 - 1.0;
+        let r = p.length();
+        let wave = (r * 18.0 - root.time * 6.0).sin() * 0.5 + 0.5;
+        let prev = root.target.load(tid.xy());
+        root.target.store(
+            tid.xy(),
+            f32x4::new(wave, wave * (1.0 - r), prev.z * 0.9 + 0.1 * r, 1.0),
+        );
+    }
+
+    /// `material` is an integer varying, so it is flat on both targets — that is not a choice
+    /// either language leaves open.
+    #[gpu_struct]
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub uv: f32x2,
+        pub material: u32,
+    }
+
+    #[gpu(vertex)]
+    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+        let v = root.vertices[vid];
+        VertexOut {
+            position: root
+                .mvp
+                .mul(f32x4::new(v.position.x, v.position.y, 0.0, 1.0)),
+            uv: v.uv,
+            material: vid / 6,
+        }
+    }
+
+    #[gpu(fragment)]
+    fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
+        let m = root.materials[input.material];
+        let layer = ((input.uv.x * 3.0) as u32).min(2);
+        let c = m.layers[layer as usize].sample(m.samp, input.uv).xyz() * m.tint;
+        f32x4::new(c.x, c.y, c.z, 1.0)
+    }
+}
 
 
 

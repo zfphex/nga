@@ -1,6 +1,8 @@
 use minwin::*;
 use nga::*;
-use nga_shaders::sync::{self, Instance, Vertex, SimData, BuildData, DrawData};
+#[path = "shaders/sync.rs"]
+mod sync;
+use sync::{BuildData, DrawData, Instance, SimData, Vertex};
 
 
 

@@ -442,7 +442,7 @@ pub struct Device {
     pub(crate) descriptor_buffer_ext: ash::ext::descriptor_buffer::Device,
     pub(crate) commands: Extensions,
     pub(crate) descriptor_sizes: DescriptorSizes,
-    /// Sampled images, storage images, samplers. Fixed by `SLANG_PRELUDE`, created once, and
+    /// Sampled images, storage images, samplers. Fixed by `spirv.rs`, created once, and
     /// shared by every pipeline layout so pipelines stay interchangeable under one binding
     /// model, the property Metal gets from having a single argument table.
     pub(crate) set_layouts: [vk::DescriptorSetLayout; 3],

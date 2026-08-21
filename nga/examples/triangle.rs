@@ -2,10 +2,54 @@
 
 use minwin::*;
 use nga::*;
-use nga_shaders::triangle::{self, Vertex, Data};
+use triangle::{Data, Vertex};
 
+/// The shader, in Rust. `#[gpu]` records each body as IR beside the function it leaves
+/// untouched, so `rustc` type-checks the shader and `nga::compile` turns the same body into
+/// SPIR-V or MSL. The structs are the ABI: the host writes them and the shader reads them,
+/// and there is one definition rather than two kept in step by hand.
+mod triangle {
+    use nga::*;
 
+    /// Every entry point, which is what one library holds.
+    pub const ENTRIES: &[&nga::ir::GpuFn] = &[&VERTEX, &FRAGMENT];
 
+    #[gpu_struct]
+    pub struct Vertex {
+        pub position: f32x3,
+        pub color: f32x3,
+    }
+
+    #[gpu_struct(align(16))]
+    pub struct Data {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub mvp: f32x4x4,
+    }
+
+    /// The interface between the two stages. `position` is the clip-space builtin on both
+    /// sides; every other member is a varying, in declaration order.
+    #[gpu_struct]
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x3,
+    }
+
+    #[gpu(vertex)]
+    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+        let v = root.vertices[vid];
+        VertexOut {
+            position: root
+                .mvp
+                .mul(f32x4::new(v.position.x, v.position.y, v.position.z, 1.0)),
+            color: v.color,
+        }
+    }
+
+    #[gpu(fragment)]
+    fn fragment(input: VertexOut) -> f32x4 {
+        f32x4::new(input.color.x, input.color.y, input.color.z, 1.0)
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = create_window("nga triangle", None, 800, 600, true, WindowStyle::Standard);
