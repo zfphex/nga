@@ -5,17 +5,8 @@
 //! handle whose meaning drifted between the host and the prelude.
 
 use nga::*;
+use nga_shaders::sample::{self, Data};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    layers: [Texture2d; 3],
-    samp: Sampler,
-    target: Texture2dRW,
-    size: [u32; 2],
-}
-
-const SHADERS: &[u8] = nga::shader!("sample");
 
 const TEX: u32 = 8;
 const SIZE: u32 = 96;
@@ -30,8 +21,8 @@ fn shader_samples_through_bindless_handles() -> Result<(), Box<dyn std::error::E
         return Ok(());
     };
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
-    let pipeline = shaders.compute("sample_main", None)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(sample::ENTRIES))?;
+    let pipeline = shaders.compute("sample", None)?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
     let mut heap = GpuHeap::new(&device, 32 * 1024 * 1024)?;
@@ -73,7 +64,7 @@ fn shader_samples_through_bindless_handles() -> Result<(), Box<dyn std::error::E
             layers,
             samp,
             target: target_handle,
-            size: [SIZE, SIZE],
+            size: u32x2([SIZE, SIZE]),
         })
         .unwrap();
     let root = data.gpu;

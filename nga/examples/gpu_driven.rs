@@ -1,52 +1,13 @@
 use minwin::*;
 use nga::*;
+use nga_shaders::gpu_driven::{self, Instance, DrawArgs, SimData, EncodeData, DrawData, BoundaryData};
 
-#[gpu_struct]
-struct Instance {
-    center: f32x2,
-    angle: f32,
-    scale: f32,
-    color: f32x4,
-}
 
-#[gpu_struct]
-struct DrawArgs {
-    vertex_count: u32,
-    instance_count: u32,
-    first_vertex: u32,
-    first_instance: u32,
-}
 
-#[gpu_struct]
-struct SimData {
-    instances: GpuMut<'static, Instance>,
-    time: f32,
-    count: u32,
-}
 
-#[gpu_struct]
-struct EncodeData {
-    instances: Gpu<'static, Instance>,
-    draws: GpuMut<'static, DrawArgs>,
-    count: GpuMut<'static, AtomicU32>,
-    cull_radius: f32,
-    total: u32,
-}
 
-#[gpu_struct(align(16))]
-struct DrawData {
-    instances: Gpu<'static, Instance>,
-    mvp: f32x4x4,
-}
 
-#[gpu_struct(align(16))]
-struct BoundaryData {
-    mvp: f32x4x4,
-    radius: f32,
-    segments: u32,
-}
 
-const SHADERS: &[u8] = nga::shader!("gpu_driven");
 const COUNT: usize = 4096;
 const GROUP: usize = 64;
 const SEGMENTS: u32 = 128;
@@ -72,33 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    slang::dump(
-        "gpu_driven",
-        &format!(
-            "{SLANG_PRELUDE}{}",
-            slang::header!(
-                Instance,
-                DrawArgs,
-                SimData,
-                EncodeData,
-                DrawData,
-                BoundaryData
-            )
-        ),
-    );
-
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+        let mut shaders = Shaders::new(&device, &nga::compile(gpu_driven::ENTRIES))?;
     let simulate = shaders.compute("simulate", None)?;
     let encode = shaders.compute("encode", None)?;
     let draw = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
+        "vertex",
+        "fragment",
         &[ColorTarget::new(surface.format())],
     ))?;
     let boundary = shaders.raster(&RasterDesc {
         topology: Topology::TriangleStrip,
         ..RasterDesc::new(
-            "boundary_main",
+            "boundary",
             "boundary_fragment",
             &[ColorTarget {
                 blend: BlendMode::Alpha,

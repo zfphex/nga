@@ -3,22 +3,9 @@
 //! it, a single-sample edge is only ever 0 or 255.
 
 use nga::*;
+use nga_shaders::triangle::{self, Data, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
-
-const SHADERS: &[u8] = nga::shader!("triangle");
 
 const SIZE: u32 = 128;
 const IDENTITY: f32x4x4 = f32x4x4([
@@ -32,11 +19,11 @@ const IDENTITY: f32x4x4 = f32x4x4([
 fn render(samples: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let device = Device::new(cfg!(debug_assertions))?;
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
     let pipeline = shaders.raster(
         &RasterDesc::new(
-            "vertex_main",
-            "fragment_main",
+            "vertex",
+            "fragment",
             &[ColorTarget::new(Format::Rgba8Unorm)],
         )
         .depth(Format::D32Float)
@@ -68,25 +55,25 @@ fn render(samples: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
     // A slanted edge, so the resolve has something to average. White, so coverage is the only
     // thing the pixel values can be measuring.
-    let white = [1.0, 1.0, 1.0];
+    let white = f32x3([1.0, 1.0, 1.0]);
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh
         .alloc_slice(&[
             Vertex {
-                position: [-0.9, 0.8, 0.0],
+                position: f32x3([-0.9, 0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [-0.9, -0.8, 0.0],
+                position: f32x3([-0.9, -0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [0.7, -0.8, 0.0],
+                position: f32x3([0.7, -0.8, 0.0]),
                 color: white,
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     let pixels = readback

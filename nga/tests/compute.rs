@@ -2,15 +2,8 @@
 //! is safe to run from a build script or CI and is the exit criterion for the command layer.
 
 use nga::*;
+use nga_shaders::fill::{self, Data};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    output: GpuMut<'static, u32>,
-    count: u32,
-}
-
-const SHADERS: &[u8] = nga::shader!("fill");
 
 const COUNT: usize = 256;
 
@@ -21,15 +14,15 @@ fn fill_writes_every_element() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
-    let pipeline = shaders.compute("fill_main", None)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(fill::ENTRIES))?;
+    let pipeline = shaders.compute("fill", None)?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
     // Readback memory is host-cached, which is what makes the CPU-side read below cheap
     // rather than an uncached crawl over the PCIe window.
     let output = Arena::new(&device, 64 * 1024, Memory::Readback)?;
     let slot = output.alloc_scratch::<u32>(COUNT).unwrap();
-    let target: GpuMut<'static, u32> = GpuMut::new(slot.gpu.0.get());
+    let target: GpuMut<'static, [u32]> = GpuMut::new(slot.gpu.0.get());
 
     let mut frame = ctx.begin_frame()?;
     let data = frame

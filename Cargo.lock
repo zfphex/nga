@@ -42,12 +42,20 @@ dependencies = [
  "ash",
  "minmetal",
  "minwin",
- "nga-slang",
+ "nga-gpu",
+ "nga-shaders",
 ]
 
 [[package]]
-name = "nga-slang"
+name = "nga-gpu"
 version = "0.1.0"
+
+[[package]]
+name = "nga-shaders"
+version = "0.1.0"
+dependencies = [
+ "nga",
+]
 
 [[package]]
 name = "windows-link"

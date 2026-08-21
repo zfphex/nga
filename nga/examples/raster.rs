@@ -1,26 +1,10 @@
 use minwin::*;
 use nga::*;
+use nga_shaders::raster::{self, Vertex, Data, Options};
 
-#[gpu_struct]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[gpu_struct]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-    tint: f32x4,
-}
 
-#[derive(Constants)]
-struct Options {
-    boost: bool,
-    gamma: f32,
-}
 
-const SHADERS: &[u8] = nga::shader!("raster");
 const DEPTH_FORMAT: Format = Format::D32Float;
 
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -54,16 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    slang::dump(
-        "raster",
-        &format!(
-            "{SLANG_PRELUDE}{}{}",
-            slang::header!(Vertex, Data),
-            Options::slang()
-        ),
-    );
-
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+        let mut shaders = Shaders::new(&device, &nga::compile(raster::ENTRIES))?;
     let opaque = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         constants: Some(&Options {
@@ -71,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gamma: 1.0,
         }),
         ..RasterDesc::new(
-            "vertex_main",
-            "fragment_main",
+            "vertex",
+            "fragment",
             &[ColorTarget::new(surface.format())],
         )
     })?;
@@ -83,8 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gamma: 0.6,
         }),
         ..RasterDesc::new(
-            "vertex_main",
-            "fragment_main",
+            "vertex",
+            "fragment",
             &[ColorTarget {
                 blend: BlendMode::Alpha,
                 ..ColorTarget::new(surface.format())
@@ -94,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let screen = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         ..RasterDesc::new(
-            "vertex_main",
+            "vertex",
             "fragment_screen",
             &[ColorTarget {
                 blend: BlendMode::Screen,
@@ -117,8 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ((i >> 2) & 1) as f32 - 0.5,
         );
         corners.push(Vertex {
-            position: [x, y, z],
-            color: [x + 0.5, y + 0.5, z + 0.5],
+            position: f32x3([x, y, z]),
+            color: f32x3([x + 0.5, y + 0.5, z + 0.5]),
         });
     }
     let indices: [u16; 36] = [
@@ -131,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index_buffer = heap.alloc_buffer(size_of_val(&indices))?;
     heap.write(&index_buffer, 0, &indices);
     heap.flush()?;
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertex_buffer.address());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertex_buffer.address());
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

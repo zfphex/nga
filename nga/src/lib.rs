@@ -10,12 +10,15 @@ use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
 
-pub mod slang;
+pub mod ir;
+pub mod msl;
+pub mod spirv;
+pub mod vector;
 pub mod tlsf;
 
-pub use nga_slang::{Constants, gpu_struct};
-pub use slang::SLANG_PRELUDE;
+pub use nga_gpu::{Constants, gpu, gpu_struct};
 pub use tlsf::{Alloc, Tlsf};
+pub use vector::*;
 
 #[cfg(not(target_vendor = "apple"))]
 mod vulkan;
@@ -28,6 +31,41 @@ mod metal;
 use metal as backend;
 
 pub use backend::*;
+
+/// Everything `Shaders::new` wants, from the `#[gpu]` functions that are the entry points. The
+/// two backends produce different bytes — a SPIR-V module here, MSL source there — and this is
+/// the only place that has to know which.
+///
+/// Emitting a SPIR-V module costs microseconds, so calling this at pipeline creation is not a
+/// cost worth avoiding. Metal costs a `newLibraryWithSource`, which is not; [`dump`] is the
+/// ahead-of-time half.
+pub fn compile(entries: &[&'static ir::GpuFn]) -> Vec<u8> {
+    #[cfg(not(target_vendor = "apple"))]
+    return spirv::module(entries);
+    #[cfg(target_vendor = "apple")]
+    return msl::module(entries).into_bytes();
+}
+
+/// Writes both targets to `dir` as `name.spv` and `name.metal`, and answers with the paths.
+///
+/// This is what an ahead-of-time build runs: a bin target in the workspace links the crate its
+/// shaders live in, calls this, and the `build.rs` next door compiles the `.metal` to a
+/// `.metallib` exactly as it does for a hand-written one. Both files are produced on every
+/// host — neither emitter needs a toolchain — which is also what makes the Metal output
+/// checkable from a machine that cannot build for Apple at all.
+pub fn dump(
+    dir: impl AsRef<std::path::Path>,
+    name: &str,
+    entries: &[&'static ir::GpuFn],
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+    let spirv = dir.join(format!("{name}.spv"));
+    let metal = dir.join(format!("{name}.metal"));
+    std::fs::write(&spirv, spirv::module(entries))?;
+    std::fs::write(&metal, msl::module(entries))?;
+    Ok((spirv, metal))
+}
 
 /// One error type for both backends. `VkResult` and `NSError` are stringified at the boundary
 /// rather than escaping, because neither is meaningful to a caller that cannot name it.
@@ -50,8 +88,8 @@ impl std::error::Error for Error {}
 
 // -- device pointers ---------------------------------------------------------------------
 
-/// A device address with a borrow attached. Eight bytes, `Copy`, embeddable in a struct shared
-/// with Slang. Covariant, so a `Gpu<'static, T>` coerces into any shorter frame lifetime; the
+/// A device address with a borrow attached. Eight bytes, `Copy`, embeddable in a struct a
+/// shader shares. Covariant, so a `Gpu<'static, T>` coerces into any shorter frame lifetime; the
 /// reverse, storing a frame-arena pointer in a persistent structure, is a compile error.
 #[repr(transparent)]
 #[derive(Debug)]
@@ -103,6 +141,75 @@ impl<T: ?Sized> Clone for GpuMut<'_, T> {
 
 impl<T: ?Sized> Copy for GpuMut<'_, T> {}
 
+// A `#[gpu]` body reads and writes through these exactly as it would through a reference, and
+// the host bodies below are what make that ordinary Rust. They are never called: the address is
+// a device one, so dereferencing here would be unsound. Their only job is to type-check, which
+// is what the shader compiler used to do and now does not have to.
+
+impl<T> Deref for Gpu<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*(self.0.get() as *const T) }
+    }
+}
+
+impl<T> Deref for GpuMut<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*(self.0.get() as *const T) }
+    }
+}
+
+impl<T> DerefMut for GpuMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *(self.0.get() as *mut T) }
+    }
+}
+
+impl<T> Index<u32> for Gpu<'_, [T]> {
+    type Output = T;
+    fn index(&self, index: u32) -> &T {
+        unsafe { &*(self.0.get() as *const T).add(index as usize) }
+    }
+}
+
+impl<T> Index<u32> for GpuMut<'_, [T]> {
+    type Output = T;
+    fn index(&self, index: u32) -> &T {
+        unsafe { &*(self.0.get() as *const T).add(index as usize) }
+    }
+}
+
+impl<T> IndexMut<u32> for GpuMut<'_, [T]> {
+    fn index_mut(&mut self, index: u32) -> &mut T {
+        unsafe { &mut *(self.0.get() as *mut T).add(index as usize) }
+    }
+}
+
+impl AtomicU32 {
+    pub fn atomic_add(&mut self, value: u32) -> u32 {
+        let previous = self.0;
+        self.0 = previous.wrapping_add(value);
+        previous
+    }
+
+    pub fn atomic_min(&mut self, value: u32) -> u32 {
+        let previous = self.0;
+        self.0 = previous.min(value);
+        previous
+    }
+
+    pub fn atomic_max(&mut self, value: u32) -> u32 {
+        let previous = self.0;
+        self.0 = previous.max(value);
+        previous
+    }
+
+    pub fn atomic_exchange(&mut self, value: u32) -> u32 {
+        std::mem::replace(&mut self.0, value)
+    }
+}
+
 /// A host-mapped allocation and its device address. Deref writes go straight into mapped
 /// memory; there is no staging step and no flush on either backend.
 pub struct GpuBox<'a, T: ?Sized> {
@@ -125,7 +232,7 @@ impl<T: ?Sized> DerefMut for GpuBox<'_, T> {
 
 // -- bindless handles --------------------------------------------------------------------
 
-/// A slot in the resource heap, as written into a struct shared with Slang.
+/// A slot in the resource heap, as written into a struct a shader shares.
 ///
 /// `DescriptorHandle<T>` lowers to a `uint2` on SPIR-V, where only the low word is the
 /// descriptor index, and to a bare argument-buffer member holding an `MTLResourceID` on
@@ -206,14 +313,23 @@ pub struct DispatchThreads {
 
 // -- shared ABI --------------------------------------------------------------------------
 
-/// Recorded by `#[gpu_struct]`. `fields` carries name, offset and size because the Slang
-/// emitter needs the size to work out how much padding to insert after each field.
+/// Recorded by `#[gpu_struct]`.
+#[derive(PartialEq, Debug)]
 pub struct TypeAbi {
     pub name: &'static str,
-    pub decl: &'static str,
     pub size: usize,
     pub align: usize,
-    pub fields: &'static [(&'static str, usize, usize)],
+    pub fields: &'static [FieldAbi],
+}
+
+/// `size` is here because the MSL emitter needs it to work out how much padding follows a
+/// field; `ty` is here because both emitters need to know what the field is.
+#[derive(PartialEq, Debug)]
+pub struct FieldAbi {
+    pub name: &'static str,
+    pub offset: usize,
+    pub size: usize,
+    pub ty: ir::Ty,
 }
 
 pub trait DeviceAbi: Copy {
@@ -272,85 +388,38 @@ impl Constant {
 
 pub trait ConstantValue: Copy {
     const SCALAR: Scalar;
-    const SLANG_TYPE: &'static str;
 }
 
 pub trait Constants {
-    fn slang() -> String
-    where
-        Self: Sized;
-
     fn values(&self) -> Vec<Constant>;
 }
 
-macro_rules! vector {
-    ($($name:ident: [$element:ty; $count:literal] align $align:tt = $slang:literal @ $scalar:ident,)*) => {
-        $(
-            #[repr(C, align($align))]
-            #[derive(Clone, Copy, Debug, PartialEq)]
-            pub struct $name(pub [$element; $count]);
-
-            impl ConstantValue for $name {
-                const SCALAR: Scalar = Scalar::$scalar;
-                const SLANG_TYPE: &'static str = $slang;
-            }
-        )*
-    };
-}
-
-vector! {
-    f32x2: [f32; 2] align 8 = "float2" @ F32x2,
-    f32x3: [f32; 3] align 16 = "float3" @ F32x3,
-    f32x4: [f32; 4] align 16 = "float4" @ F32x4,
-    u32x2: [u32; 2] align 8 = "uint2" @ U32x2,
-    u32x3: [u32; 3] align 16 = "uint3" @ U32x3,
-    u32x4: [u32; 4] align 16 = "uint4" @ U32x4,
-    i32x2: [i32; 2] align 8 = "int2" @ I32x2,
-    i32x3: [i32; 3] align 16 = "int3" @ I32x3,
-    i32x4: [i32; 4] align 16 = "int4" @ I32x4,
-}
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct f32x3x3(pub [f32x3; 3]);
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct f32x4x4(pub [[f32; 4]; 4]);
-
 impl ConstantValue for bool {
     const SCALAR: Scalar = Scalar::Bool;
-    const SLANG_TYPE: &'static str = "bool";
 }
 
 impl ConstantValue for f32 {
     const SCALAR: Scalar = Scalar::F32;
-    const SLANG_TYPE: &'static str = "float";
 }
 
 impl ConstantValue for u32 {
     const SCALAR: Scalar = Scalar::U32;
-    const SLANG_TYPE: &'static str = "uint";
 }
 
 impl ConstantValue for i32 {
     const SCALAR: Scalar = Scalar::I32;
-    const SLANG_TYPE: &'static str = "int";
 }
 
 impl ConstantValue for u64 {
     const SCALAR: Scalar = Scalar::U64;
-    const SLANG_TYPE: &'static str = "uint64_t";
 }
 
 impl<T: ?Sized> ConstantValue for Gpu<'static, T> {
     const SCALAR: Scalar = Scalar::U64;
-    const SLANG_TYPE: &'static str = "uint64_t";
 }
 
 impl<T: ?Sized> ConstantValue for GpuMut<'static, T> {
     const SCALAR: Scalar = Scalar::U64;
-    const SLANG_TYPE: &'static str = "uint64_t";
 }
 
 // -- enums -------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 [workspace]
-members = ["nga", "nga-slang"]
+members = ["nga", "nga-gpu", "nga-shaders"]
 resolver = "3"
 
 [workspace.package]

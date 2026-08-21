@@ -3,22 +3,9 @@
 //! screenshot, and having it headless means it runs in CI and needs no window.
 
 use nga::*;
+use nga_shaders::triangle::{self, Data, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
-
-const SHADERS: &[u8] = nga::shader!("triangle");
 
 const SIZE: u32 = 128;
 
@@ -29,10 +16,10 @@ fn raster_draws_into_a_texture() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
+        "vertex",
+        "fragment",
         &[ColorTarget::new(Format::Rgba8Unorm)],
     ))?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
@@ -45,25 +32,25 @@ fn raster_draws_into_a_texture() -> Result<(), Box<dyn std::error::Error>> {
 
     // A triangle covering the middle of the frame, white, so the coverage test does not
     // depend on how the three vertex colours interpolate.
-    let white = [1.0, 1.0, 1.0];
+    let white = f32x3([1.0, 1.0, 1.0]);
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh
         .alloc_slice(&[
             Vertex {
-                position: [0.0, 0.8, 0.0],
+                position: f32x3([0.0, 0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [-0.8, -0.8, 0.0],
+                position: f32x3([-0.8, -0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [0.8, -0.8, 0.0],
+                position: f32x3([0.8, -0.8, 0.0]),
                 color: white,
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     let pixels = readback

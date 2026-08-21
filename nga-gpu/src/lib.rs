@@ -1,3 +1,5 @@
+mod gpu;
+
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 type Fail = (Span, String);
@@ -288,6 +290,13 @@ fn users(ty: &Ty, out: &mut Vec<String>) {
     }
 }
 
+/// A shader function. The body is re-emitted unchanged so `rustc` checks it, and a `GpuFn`
+/// const beside it carries the same body as IR for `nga`'s two backends.
+#[proc_macro_attribute]
+pub fn gpu(attr: TokenStream, item: TokenStream) -> TokenStream {
+    gpu::gpu(attr, item)
+}
+
 #[proc_macro_attribute]
 pub fn gpu_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand(attr, item.clone()) {
@@ -334,8 +343,19 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
         users(&ty, &mut nested);
         decl += &format!("    {};\n", declare(&ty, &field.name));
         let ty_tokens: TokenStream = field.tokens.iter().cloned().collect();
+        let ir = match gpu::ir_ty(&field.tokens) {
+            Ok(ir) => ir,
+            Err((_, message)) => {
+                return Err((field.span, format!("field `{}`: {message}", field.name)));
+            }
+        };
         offsets += &format!(
-            "(\"{}\", ::core::mem::offset_of!({name}, {0}), ::core::mem::size_of::<{ty_tokens}>()),",
+            "::nga::FieldAbi {{
+                 name: \"{}\",
+                 offset: ::core::mem::offset_of!({name}, {0}),
+                 size: ::core::mem::size_of::<{ty_tokens}>(),
+                 ty: {ir},
+             }},",
             field.name
         );
     }

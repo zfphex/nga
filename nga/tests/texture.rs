@@ -4,15 +4,8 @@
 //! Nothing in this file names Vulkan or Metal.
 
 use nga::*;
+use nga_shaders::gradient::{self, Data};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    target: Texture2dRW,
-    size: [u32; 2],
-}
-
-const SHADERS: &[u8] = nga::shader!("gradient");
 
 const SIZE: u32 = 64;
 
@@ -23,8 +16,8 @@ fn compute_writes_a_bindless_storage_texture() -> Result<(), Box<dyn std::error:
         return Ok(());
     };
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
-    let pipeline = shaders.compute("gradient_main", None)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(gradient::ENTRIES))?;
+    let pipeline = shaders.compute("gradient", None)?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
     let mut heap = GpuHeap::new(&device, 16 * 1024 * 1024)?;
@@ -50,7 +43,7 @@ fn compute_writes_a_bindless_storage_texture() -> Result<(), Box<dyn std::error:
         .arena(0)
         .alloc(Data {
             target,
-            size: [SIZE, SIZE],
+            size: u32x2([SIZE, SIZE]),
         })
         .unwrap();
     let root = data.gpu;

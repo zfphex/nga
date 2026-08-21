@@ -1,34 +1,11 @@
 use minwin::*;
 use nga::*;
+use nga_shaders::bindless::{self, Vertex, Material, Data, Paint};
 
-#[gpu_struct]
-struct Vertex {
-    position: [f32; 2],
-    uv: [f32; 2],
-}
 
-#[gpu_struct]
-struct Material {
-    layers: [Texture2d; 3],
-    samp: Sampler,
-    tint: [f32; 3],
-}
 
-#[gpu_struct]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    materials: Gpu<'static, Material>,
-    mvp: f32x4x4,
-}
 
-#[gpu_struct]
-struct Paint {
-    target: Texture2dRW,
-    size: u32,
-    time: f32,
-}
 
-const SHADERS: &[u8] = nga::shader!("bindless");
 const QUADS: u32 = 4;
 const LAYERS: u32 = 3;
 const TEX: u32 = 64;
@@ -58,18 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    slang::dump(
-        "bindless",
-        &format!(
-            "{SLANG_PRELUDE}{}",
-            slang::header!(Vertex, Material, Data, Paint)
-        ),
-    );
-
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+        let mut shaders = Shaders::new(&device, &nga::compile(bindless::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
+        "vertex",
+        "fragment",
         &[ColorTarget::new(surface.format())],
     ))?;
     let paint_pipeline = shaders.compute("paint", None)?;
@@ -91,8 +60,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (x1, y1, 1.0, 0.0),
         ] {
             quads.push(Vertex {
-                position: [px, py],
-                uv: [u, v],
+                position: f32x2([px, py]),
+                uv: f32x2([u, v]),
             });
         }
     }
@@ -160,11 +129,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         materials.push(Material {
             layers: layer_handles,
             samp,
-            tint: [
+            tint: f32x3([
                 1.0 - quad as f32 * 0.15,
                 0.6 + quad as f32 * 0.1,
                 0.5 + quad as f32 * 0.12,
-            ],
+            ]),
         });
         eprintln!("material {quad}: layers {layer_handles:?}");
     }

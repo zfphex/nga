@@ -3,22 +3,9 @@
 //! and checks them against a triangle whose coverage `raster.rs` already pins.
 
 use nga::*;
+use nga_shaders::triangle::{self, Data, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
-
-const SHADERS: &[u8] = nga::shader!("triangle");
 
 const SIZE: u32 = 128;
 
@@ -38,11 +25,11 @@ fn a_pass_reports_its_time_and_its_coverage() -> Result<(), Box<dyn std::error::
     assert!(device.supports(Feature::Timestamps));
     assert!(device.supports(Feature::Occlusion));
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
     let pipeline = shaders.raster(
         &RasterDesc::new(
-            "vertex_main",
-            "fragment_main",
+            "vertex",
+            "fragment",
             &[ColorTarget::new(Format::Rgba8Unorm)],
         )
         .depth(Format::D32Float),
@@ -57,25 +44,25 @@ fn a_pass_reports_its_time_and_its_coverage() -> Result<(), Box<dyn std::error::
 
     // The same triangle `raster.rs` draws: 80% of the frame in each axis, so a little under a
     // third of the pixels pass the depth test.
-    let white = [1.0, 1.0, 1.0];
+    let white = f32x3([1.0, 1.0, 1.0]);
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh
         .alloc_slice(&[
             Vertex {
-                position: [0.0, 0.8, 0.0],
+                position: f32x3([0.0, 0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [-0.8, -0.8, 0.0],
+                position: f32x3([-0.8, -0.8, 0.0]),
                 color: white,
             },
             Vertex {
-                position: [0.8, -0.8, 0.0],
+                position: f32x3([0.8, -0.8, 0.0]),
                 color: white,
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let mut timers = Timers::new(&device, 2)?;
     let mut occlusion = Occlusion::new(&device, 1)?;

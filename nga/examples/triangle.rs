@@ -2,22 +2,10 @@
 
 use minwin::*;
 use nga::*;
+use nga_shaders::triangle::{self, Vertex, Data};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
 
-const SHADERS: &[u8] = nga::shader!("triangle");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = create_window("nga triangle", None, 800, 600, true, WindowStyle::Standard);
@@ -33,10 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
+        "vertex",
+        "fragment",
         &[ColorTarget::new(surface.format())],
     ))?;
 
@@ -44,22 +32,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let triangle = [
         Vertex {
-            position: [0.0, 0.6, 0.0],
-            color: [1.0, 0.2, 0.2],
+            position: f32x3([0.0, 0.6, 0.0]),
+            color: f32x3([1.0, 0.2, 0.2]),
         },
         Vertex {
-            position: [-0.6, -0.5, 0.0],
-            color: [0.2, 1.0, 0.3],
+            position: f32x3([-0.6, -0.5, 0.0]),
+            color: f32x3([0.2, 1.0, 0.3]),
         },
         Vertex {
-            position: [0.6, -0.5, 0.0],
-            color: [0.3, 0.4, 1.0],
+            position: f32x3([0.6, -0.5, 0.0]),
+            color: f32x3([0.3, 0.4, 1.0]),
         },
     ];
 
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let mut angle = 0.0f32;
     let mut resized = false;

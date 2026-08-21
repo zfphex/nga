@@ -1,42 +1,12 @@
 use minwin::*;
 use nga::*;
+use nga_shaders::sync::{self, Instance, Vertex, SimData, BuildData, DrawData};
 
-#[gpu_struct]
-struct Instance {
-    center: f32x2,
-    angle: f32,
-    scale: f32,
-    color: f32x4,
-}
 
-#[gpu_struct]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[gpu_struct]
-struct SimData {
-    instances: GpuMut<'static, Instance>,
-    time: f32,
-    count: u32,
-}
 
-#[gpu_struct]
-struct BuildData {
-    instances: Gpu<'static, Instance>,
-    vertices: GpuMut<'static, Vertex>,
-    count: u32,
-    pad: u32,
-}
 
-#[gpu_struct(align(16))]
-struct DrawData {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
 
-const SHADERS: &[u8] = nga::shader!("sync");
 const COUNT: usize = 1024;
 const GROUP: usize = 64;
 const DEPTH_FORMAT: Format = Format::D32Float;
@@ -62,22 +32,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    slang::dump(
-        "sync",
-        &format!(
-            "{SLANG_PRELUDE}{}",
-            slang::header!(Instance, Vertex, SimData, BuildData, DrawData)
-        ),
-    );
-
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+        let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
     let simulate = shaders.compute("simulate", None)?;
     let build = shaders.compute("build_vertices", None)?;
     let draw = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         ..RasterDesc::new(
-            "vertex_main",
-            "fragment_main",
+            "vertex",
+            "fragment",
             &[ColorTarget::new(surface.format())],
         )
     })?;
@@ -86,10 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let vertices = heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
-    let instances_rw: GpuMut<'static, Instance> = GpuMut::new(instances.address());
-    let instances_ro: Gpu<'static, Instance> = Gpu::new(instances.address());
-    let vertices_rw: GpuMut<'static, Vertex> = GpuMut::new(vertices.address());
-    let vertices_ro: Gpu<'static, Vertex> = Gpu::new(vertices.address());
+    let instances_rw: GpuMut<'static, [Instance]> = GpuMut::new(instances.address());
+    let instances_ro: Gpu<'static, [Instance]> = Gpu::new(instances.address());
+    let vertices_rw: GpuMut<'static, [Vertex]> = GpuMut::new(vertices.address());
+    let vertices_ro: Gpu<'static, [Vertex]> = Gpu::new(vertices.address());
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

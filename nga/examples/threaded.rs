@@ -1,42 +1,12 @@
 use minwin::*;
 use nga::*;
+use nga_shaders::sync::{self, Instance, Vertex, SimData, BuildData, DrawData};
 
-#[gpu_struct]
-struct Instance {
-    center: f32x2,
-    angle: f32,
-    scale: f32,
-    color: f32x4,
-}
 
-#[gpu_struct]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
 
-#[gpu_struct]
-struct SimData {
-    instances: GpuMut<'static, Instance>,
-    time: f32,
-    count: u32,
-}
 
-#[gpu_struct]
-struct BuildData {
-    instances: Gpu<'static, Instance>,
-    vertices: GpuMut<'static, Vertex>,
-    count: u32,
-    pad: u32,
-}
 
-#[gpu_struct(align(16))]
-struct DrawData {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
 
-const SHADERS: &[u8] = nga::shader!("sync");
 
 const THREADS: usize = 4;
 const SLICE: usize = 256;
@@ -64,12 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
     let simulate = shaders.compute("simulate", None)?;
     let build = shaders.compute("build_vertices", None)?;
     let draw = shaders.raster(&RasterDesc::new(
-        "vertex_main",
-        "fragment_main",
+        "vertex",
+        "fragment",
         &[ColorTarget::new(surface.format())],
     ))?;
 

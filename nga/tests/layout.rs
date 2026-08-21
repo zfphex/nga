@@ -100,13 +100,14 @@ fn rust_and_slang_agree_on_field_offsets() {
 
     let mut checked = 0;
     for abi in [<Vertex as DeviceAbi>::ABI, <Data as DeviceAbi>::ABI] {
-        for (name, offset, _) in abi.fields {
+        for field in abi.fields {
+            let (name, offset) = (field.name, field.offset);
             let key = (abi.name.to_string(), name.to_string());
             let Some(&slang) = found.get(&key) else {
                 continue;
             };
             assert_eq!(
-                slang, *offset,
+                slang, offset,
                 "{}::{name} is at {offset} in Rust but {slang} in Slang. \
                  Add padding to the Slang struct (see nga::slang::declare)",
                 abi.name

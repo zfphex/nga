@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-nga-slang = { version = "0.1.0", path = "../nga-slang" }
+nga-gpu = { version = "0.1.0", path = "../nga-gpu" }
 
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]
 ash = { git = "https://github.com/ash-rs/ash", default-features = false, features = ["loaded"] }
@@ -14,3 +14,4 @@ minmetal = { git = "https://github.com/zfphex/minmetal.git" }
 
 [dev-dependencies]
 minwin = { version = "0.1.0", path = "../../minwin" }
+nga-shaders = { version = "0.1.0", path = "../nga-shaders" }
