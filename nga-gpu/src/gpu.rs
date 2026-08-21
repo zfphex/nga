@@ -1,4 +1,4 @@
-//! `#[gpu]`: a Rust function in, a `GpuFn` const out.
+//! The function half of `#[gpu_mod]`: a Rust function in, a `GpuFn` const out.
 //!
 //! The body is also re-emitted unchanged, so `rustc` type-checks every shader for us. That is
 //! the point of the whole arrangement: the errors `slangc` used to report at build time, and the
@@ -7,11 +7,11 @@
 //! Nothing here knows what SPIR-V or MSL look like. It parses, and it prints the IR as text for
 //! the compiler to parse back; both backends live in `nga` where they can be stepped through.
 
-use crate::{Fail, compile_error, punct};
+use crate::{Fail, punct};
 use proc_macro::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 
 /// The Rust type spellings that reach the GPU, as `nga::ir::Ty` expressions. Shared with
-/// `#[gpu_struct]`, which records the same types in `FieldAbi`.
+/// the struct half, which records the same types in `FieldAbi`.
 pub fn ir_ty(mut tokens: &[TokenTree]) -> Result<String, Fail> {
     let Some(first) = tokens.first() else {
         return Ok("::nga::ir::Ty::Void".into());
@@ -119,8 +119,8 @@ fn named_ty(name: &str) -> String {
         | "DispatchThreads" => handle("Opaque"),
         _ => match vector_spelling(name) {
             Some((p, n)) => vector(p, n),
-            // Anything left is a `#[gpu_struct]`, and saying so is Rust's job, not ours: an
-            // unknown name fails as a missing `DeviceAbi` impl at the use site.
+            // Anything left is a struct from the same module, and saying so is Rust's job,
+            // not ours: an unknown name fails as a missing `DeviceAbi` impl at the use site.
             None => format!("::nga::ir::Ty::Struct(&<{name} as ::nga::DeviceAbi>::ABI)"),
         },
     }
@@ -710,7 +710,7 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         }
         let last = path.last().unwrap().clone();
         // `f32x4::new(..)` builds a vector; `f32x4::splat(..)` is the intrinsic, and so is
-        // anything else in the table. Everything left is a call to another `#[gpu]` function.
+        // anything else in the table. Everything left is a call to another shader function.
         // `f32x4::splat(x)` is a one-argument construction, not an intrinsic: the type is in the
         // path and nowhere else, so it has to be read here or it is lost.
         if path.len() >= 2 && matches!(last.as_str(), "new" | "from_array" | "splat") {
@@ -806,16 +806,6 @@ fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
 
 // -- the attribute -----------------------------------------------------------------------
 
-pub fn gpu(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match expand(attr, item.clone()) {
-        Ok(expanded) => expanded,
-        Err((span, message)) => item
-            .into_iter()
-            .chain(compile_error(span, &message))
-            .collect(),
-    }
-}
-
 fn stage(attr: &[TokenTree]) -> Result<String, Fail> {
     match attr {
         [] => Ok("::nga::ir::Stage::Helper".into()),
@@ -849,7 +839,7 @@ fn stage(attr: &[TokenTree]) -> Result<String, Fail> {
         }
         _ => Err((
             attr[0].span(),
-            "#[gpu] takes nothing, `vertex`, `fragment` or `compute(x, y, z)`".into(),
+            "a shader fn takes nothing, `#[vertex]`, `#[fragment]` or `#[compute(x, y, z)]`".into(),
         )),
     }
 }
@@ -869,14 +859,14 @@ fn builtin(name: &str) -> Option<&'static str> {
     })
 }
 
-fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
+pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
     let t: Vec<TokenTree> = item.into_iter().collect();
     let stage = stage(&attr.into_iter().collect::<Vec<_>>())?;
 
     let Some(keyword) = t.iter().position(
         |token| matches!(token, TokenTree::Ident(id) if id.to_string() == "fn"),
     ) else {
-        return Err((Span::call_site(), "#[gpu] only applies to functions".into()));
+        return Err((Span::call_site(), "expected a function".into()));
     };
     let Some(TokenTree::Ident(name)) = t.get(keyword + 1) else {
         return Err((span_at(&t, keyword), "expected a function name".into()));

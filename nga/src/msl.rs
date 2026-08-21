@@ -1,7 +1,7 @@
 //! The Metal backend: `GpuFn` in, MSL source out.
 //!
 //! A recursive walk of the arena, printing as it goes. The only structural work is padding:
-//! struct members land on the byte offsets `#[gpu_struct]` recorded from Rust, so a `uint`
+//! struct members land on the byte offsets `#[gpu_mod]` recorded from Rust, so a `uint`
 //! array fills every gap. Rust's layout is authoritative and MSL is made to match, and nothing
 //! is inferred on the way: the offsets are stated outright, not arranged for.
 

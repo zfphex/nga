@@ -1,6 +1,6 @@
 //! The vector and matrix types a shader is written in, with real host bodies.
 //!
-//! Nothing here runs on a GPU. It exists so that a `#[gpu]` function is ordinary Rust that
+//! Nothing here runs on a GPU. It exists so that a shader function is ordinary Rust that
 //! `rustc` type-checks, which is what replaces `slangc`'s diagnostics. Every operation is also
 //! an `ir::Intrinsic`, so the two backends know what to emit for it; a method with no intrinsic
 //! is a method a shader cannot call.

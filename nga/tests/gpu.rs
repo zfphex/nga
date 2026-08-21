@@ -1,81 +1,86 @@
-//! `#[gpu]` end to end: the body compiles as Rust, the IR beside it says the same thing, and
-//! both backends agree about what it means.
+//! `#[gpu_mod]` end to end: the body compiles as Rust, the IR beside it says the same thing,
+//! and both backends agree about what it means.
 
 use nga::ir::{self, Stage, Ty};
 use nga::*;
+use shader::*;
 use std::mem::offset_of;
 
-#[gpu_struct]
-struct Scene {
-    pixels: GpuMut<'static, [f32x4]>,
-    width: u32,
-    height: u32,
-    tint: f32x4,
-}
+/// One tag for the whole module: every struct in it is shared with the GPU and every function
+/// is a shader, so nothing inside carries a tag of its own except the stage of an entry point.
+#[gpu_mod]
+mod shader {
+    use nga::*;
 
-#[gpu(compute(8, 8, 1))]
-fn clear(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
-    if id.x >= root.width || id.y >= root.height {
-        return;
+    pub struct Scene {
+        pub pixels: GpuMut<'static, [f32x4]>,
+        pub width: u32,
+        pub height: u32,
+        pub tint: f32x4,
     }
-    let index = id.x + id.y * root.width;
-    let mut colour = f32x4::new(id.x as f32 / 64.0, id.y as f32 / 64.0, 0.0, 1.0);
-    colour = colour * root.tint;
-    root.pixels[index] = colour;
-}
 
-#[gpu]
-fn luma(colour: f32x4) -> f32 {
-    colour.xyz().dot(f32x3::new(0.2126, 0.7152, 0.0722))
-}
-
-#[gpu(compute(64))]
-fn grey(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
-    let mut total = 0.0;
-    for i in 0..4 {
-        total += luma(root.pixels[id.x * 4 + i]);
+    #[compute(8, 8, 1)]
+    fn clear(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
+        if id.x >= root.width || id.y >= root.height {
+            return;
+        }
+        let index = id.x + id.y * root.width;
+        let mut colour = f32x4::new(id.x as f32 / 64.0, id.y as f32 / 64.0, 0.0, 1.0);
+        colour = colour * root.tint;
+        root.pixels[index] = colour;
     }
-    root.pixels[id.x] = f32x4::splat(total * 0.25);
-}
 
-#[gpu_struct]
-struct Varyings {
-    position: f32x4,
-    colour: f32x3,
-}
-
-#[gpu(vertex)]
-fn vertex_main(root: Gpu<'static, Scene>, #[vertex_id] vid: u32) -> Varyings {
-    let uv = f32x2::new((vid & 1) as f32, (vid >> 1) as f32);
-    Varyings {
-        position: f32x4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0),
-        colour: f32x3::new(uv.x, uv.y, root.tint.z),
+    fn luma(colour: f32x4) -> f32 {
+        colour.xyz().dot(f32x3::new(0.2126, 0.7152, 0.0722))
     }
-}
 
-#[gpu(fragment)]
-fn fragment_main(input: Varyings) -> f32x4 {
-    let mut c = input.colour;
-    if c.x > 0.5 {
-        c = c * 0.5;
+    #[compute(64)]
+    fn grey(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
+        let mut total = 0.0;
+        for i in 0..4 {
+            total += luma(root.pixels[id.x * 4 + i]);
+        }
+        root.pixels[id.x] = f32x4::splat(total * 0.25);
     }
-    f32x4::new(c.x, c.y, c.z, 1.0)
-}
 
-/// A pointer then a matrix. `mvp` is sixteen-aligned and the pointer is eight bytes, so eight
-/// bytes of hole sit between them, and that hole is the whole reason this struct exists. Both
-/// emitters have to reproduce it: SPIR-V as an `Offset` decoration, MSL as a padding member.
-#[gpu_struct(align(16))]
-struct Transform {
-    scene: Gpu<'static, Scene>,
-    mvp: f32x4x4,
-}
+    pub struct Varyings {
+        pub position: f32x4,
+        pub colour: f32x3,
+    }
 
-#[gpu(compute(64))]
-fn transform(root: Gpu<'static, Transform>, #[thread_id] id: u32x3) {
-    let scene = root.scene;
-    let mut out = scene.pixels;
-    out[id.x] = root.mvp.mul(scene.tint);
+    #[vertex]
+    fn vertex_main(root: Gpu<'static, Scene>, #[vertex_id] vid: u32) -> Varyings {
+        let uv = f32x2::new((vid & 1) as f32, (vid >> 1) as f32);
+        Varyings {
+            position: f32x4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0),
+            colour: f32x3::new(uv.x, uv.y, root.tint.z),
+        }
+    }
+
+    #[fragment]
+    fn fragment_main(input: Varyings) -> f32x4 {
+        let mut c = input.colour;
+        if c.x > 0.5 {
+            c = c * 0.5;
+        }
+        f32x4::new(c.x, c.y, c.z, 1.0)
+    }
+
+    /// A pointer then a matrix. `mvp` is sixteen-aligned and the pointer is eight bytes, so eight
+    /// bytes of hole sit between them, and that hole is the whole reason this struct exists. Both
+    /// emitters have to reproduce it: SPIR-V as an `Offset` decoration, MSL as a padding member.
+    #[repr(C, align(16))]
+    pub struct Transform {
+        pub scene: Gpu<'static, Scene>,
+        pub mvp: f32x4x4,
+    }
+
+    #[compute(64)]
+    fn transform(root: Gpu<'static, Transform>, #[thread_id] id: u32x3) {
+        let scene = root.scene;
+        let mut out = scene.pixels;
+        out[id.x] = root.mvp.mul(scene.tint);
+    }
 }
 
 #[test]
@@ -91,6 +96,108 @@ fn shape() {
     assert_eq!(LUMA.ret, Ty::F32);
     assert_eq!(GREY.calls.len(), 1);
     assert_eq!(GREY.calls[0].name, "luma");
+}
+
+/// An inner attribute belongs to the module, not to the item under it.
+#[gpu_mod]
+mod inner_attribute {
+    #![allow(clippy::needless_range_loop)]
+    use nga::*;
+
+    pub struct Value {
+        pub x: f32,
+    }
+
+    #[compute(1)]
+    fn double(mut root: GpuMut<'static, Value>) {
+        root.x = root.x * 2.0;
+    }
+}
+
+#[test]
+fn an_inner_attribute_is_the_modules() {
+    assert_eq!(inner_attribute::ENTRIES.len(), 1);
+}
+
+/// `#[host]` is the way out: the item passes through untouched, so a host-side type or helper
+/// can live next to the shader it belongs to.
+#[gpu_mod]
+mod mixed {
+    use nga::*;
+
+    pub struct Params {
+        pub scale: f32,
+    }
+
+    #[host]
+    pub struct Buffers {
+        pub staging: Vec<f32>,
+    }
+
+    #[host]
+    pub fn fill(count: usize) -> Buffers {
+        Buffers { staging: vec![0.0; count] }
+    }
+
+    #[compute(32)]
+    fn scale(mut root: GpuMut<'static, Params>, #[thread_id] id: u32x3) {
+        root.scale = root.scale * id.x as f32;
+    }
+}
+
+/// What the three Metal-only examples do: a host module that shares a struct with a
+/// hand-written `.metal` shader nests the struct in a `#[gpu_mod]` of its own, so the host code
+/// around it is never asked to be shader code.
+mod hand_written {
+    use nga::*;
+
+    #[gpu_mod]
+    mod data {
+        use nga::*;
+
+        pub struct Corner {
+            pub position: [f32; 3],
+            pub uv: f32x2,
+        }
+
+        #[repr(C, align(16))]
+        pub struct Camera {
+            pub corners: Gpu<'static, Corner>,
+            pub mvp: f32x4x4,
+        }
+    }
+
+    use data::*;
+
+    pub fn corner() -> Corner {
+        Corner { position: [0.0; 3], uv: f32x2::splat(0.0) }
+    }
+
+    pub fn camera_size() -> usize {
+        <Camera as DeviceAbi>::ABI.size
+    }
+}
+
+#[test]
+fn a_nested_gpu_mod_shares_structs_with_a_hand_written_shader() {
+    assert_eq!(hand_written::corner().position.len(), 3);
+    // The pointer, eight bytes of hole, then the matrix.
+    assert_eq!(hand_written::camera_size(), 80);
+}
+
+#[test]
+fn host_items_pass_through() {
+    assert_eq!(mixed::fill(3).staging.len(), 3);
+    assert_eq!(mixed::ENTRIES.len(), 1);
+    // The shader half of the same module is still a shader.
+    assert_eq!(<mixed::Params as DeviceAbi>::ABI.fields.len(), 1);
+}
+
+/// The entry list is derived from the stage attributes, so a shader cannot be left out of it.
+#[test]
+fn entries() {
+    let names: Vec<&str> = shader::ENTRIES.iter().map(|f| f.name).collect();
+    assert_eq!(names, ["clear", "grey", "vertex_main", "fragment_main", "transform"]);
 }
 
 #[test]
@@ -165,7 +272,7 @@ fn reachable() {
 
 // -- struct layout -------------------------------------------------------------------------
 //
-// `#[gpu_struct]` records what Rust chose and both emitters write those numbers out rather
+// `#[gpu_mod]` records what Rust chose and both emitters write those numbers out rather
 // than arranging for them to happen. So this does not catch a shader compiler picking a layout
 // behind our back, the way it had to when shaders were Slang. It catches an emitter that
 // stopped using the offsets it was handed.

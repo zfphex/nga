@@ -2,41 +2,36 @@ use minwin::*;
 use nga::*;
 use bindless::{Data, Material, Paint, Vertex};
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
+#[gpu_mod]
 mod bindless {
     use nga::*;
 
-    /// Every entry point, which is what one library holds.
-    pub const ENTRIES: &[&nga::ir::GpuFn] = &[&PAINT, &VERTEX, &FRAGMENT];
-
-    #[gpu_struct]
     pub struct Vertex {
         pub position: f32x2,
         pub uv: f32x2,
     }
 
-    #[gpu_struct]
     pub struct Material {
         pub layers: [Texture2d; 3],
         pub samp: Sampler,
         pub tint: f32x3,
     }
 
-    #[gpu_struct(align(16))]
+    #[repr(C, align(16))]
     pub struct Data {
         pub vertices: Gpu<'static, [Vertex]>,
         pub materials: Gpu<'static, [Material]>,
         pub mvp: f32x4x4,
     }
 
-    #[gpu_struct]
     pub struct Paint {
         pub target: Texture2dRW,
         pub size: u32,
         pub time: f32,
     }
 
-    #[gpu(compute(8, 8, 1))]
+    #[compute(8, 8, 1)]
     fn paint(root: Gpu<'static, Paint>, #[thread_id] tid: u32x3) {
         if tid.x >= root.size || tid.y >= root.size {
             return;
@@ -53,14 +48,13 @@ mod bindless {
 
     /// `material` is an integer varying, so it is flat on both targets — that is not a choice
     /// either language leaves open.
-    #[gpu_struct]
     pub struct VertexOut {
         pub position: f32x4,
         pub uv: f32x2,
         pub material: u32,
     }
 
-    #[gpu(vertex)]
+    #[vertex]
     fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
@@ -72,7 +66,7 @@ mod bindless {
         }
     }
 
-    #[gpu(fragment)]
+    #[fragment]
     fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
         let m = root.materials[input.material];
         let layer = ((input.uv.x * 3.0) as u32).min(2);
@@ -80,10 +74,6 @@ mod bindless {
         f32x4::new(c.x, c.y, c.z, 1.0)
     }
 }
-
-
-
-
 
 const QUADS: u32 = 4;
 const LAYERS: u32 = 3;
@@ -114,13 +104,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, &nga::compile(bindless::ENTRIES))?;
+    let mut shaders = Shaders::new(&device, &nga::compile(bindless::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
-        "vertex",
-        "fragment",
+        bindless::VERTEX.name,
+        bindless::FRAGMENT.name,
         &[ColorTarget::new(surface.format())],
     ))?;
-    let paint_pipeline = shaders.compute("paint", None)?;
+    let paint_pipeline = shaders.compute(bindless::PAINT.name, None)?;
 
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let mut textures = ResourceHeap::new(&device, device.max_resources())?;

@@ -5,7 +5,8 @@ use std::path::PathBuf;
 const PRELUDE: &str = include_str!("src/prelude.metal");
 
 /// What the hand-written shaders need on top of it. Mesh pipelines and indirect command
-/// buffers have no `#[gpu]` spelling, which is why those shaders are still MSL, and the types
+/// buffers have no `#[gpu_mod]` spelling, which is why those shaders are still MSL, and the
+/// types
 /// they encode through appear nowhere else.
 const EXTRA: &str = r#"
 #include <metal_mesh>
@@ -26,8 +27,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shaders.display());
     println!("cargo:rerun-if-changed=src/prelude.metal");
 
-    // Everything under `shaders/` is a feature `#[gpu]` is not asked to reach: tile shaders and
-    // imageblocks have no Vulkan equivalent, and encoding an indirect command buffer from a
+    // Everything under `shaders/` is a feature `#[gpu_mod]` is not asked to reach: tile shaders
+    // and imageblocks have no Vulkan equivalent, and encoding an indirect command buffer from a
     // shader has no Rust spelling. They are copied through on Apple and ignored elsewhere,
     // which is what `#[cfg(target_vendor = "apple")]` does to the tests that use them.
     if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple") {

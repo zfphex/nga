@@ -8,7 +8,7 @@
 //! flow is structured because Rust's `if`/`while`/`loop` already are — the merge blocks fall
 //! out of the AST instead of being reconstructed from a graph.
 //!
-//! Layout needs no arranging either: `#[gpu_struct]` recorded the byte offset of every field
+//! Layout needs no arranging either: `#[gpu_mod]` recorded the byte offset of every field
 //! from Rust, and those numbers become `OpMemberDecorate Offset` unchanged. That is what
 //! `-fvk-use-scalar-layout` used to buy from slangc.
 

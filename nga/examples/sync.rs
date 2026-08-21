@@ -4,11 +4,6 @@ use nga::*;
 mod sync;
 use sync::{BuildData, DrawData, Instance, SimData, Vertex};
 
-
-
-
-
-
 const COUNT: usize = 1024;
 const GROUP: usize = 64;
 const DEPTH_FORMAT: Format = Format::D32Float;
@@ -34,14 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
-    let simulate = shaders.compute("simulate", None)?;
-    let build = shaders.compute("build_vertices", None)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
+    let simulate = shaders.compute(sync::SIMULATE.name, None)?;
+    let build = shaders.compute(sync::BUILD_VERTICES.name, None)?;
     let draw = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         ..RasterDesc::new(
-            "vertex",
-            "fragment",
+            sync::VERTEX.name,
+            sync::FRAGMENT.name,
             &[ColorTarget::new(surface.format())],
         )
     })?;

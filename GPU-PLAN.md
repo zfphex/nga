@@ -1,40 +1,40 @@
 # nga-gpu: Rust functions as shaders, straight to SPIR-V and MSL
 
-Replaces the `.slang` sources and `slangc` with `#[gpu]`-tagged Rust functions compiled by us.
-`#[gpu_struct]` stays and grows a typed field list; `slang.rs` goes when the last `.slang` file
-does.
+Replaces the `.slang` sources and `slangc` with Rust functions compiled by us. A module tagged
+`#[gpu_mod]` holds them: every struct in it is shared with the GPU and every function is a
+shader, so nothing inside carries a tag of its own. See `GPU-MOD-PLAN.md` for that macro.
 
 No dependencies: `proc_macro` only in the macro crate, plain `std` in `nga`.
 
-**Status:** done. All five phases are built and tested (§8), every shader is a `#[gpu]`
-function, and `slangc`, `slang.rs`, `prelude.slang` and the `.slang` sources are gone. What
+**Status:** done. All five phases are built and tested (§8), every shader is a function in a
+`#[gpu_mod]`, and `slangc`, `slang.rs`, `prelude.slang` and the `.slang` sources are gone. What
 remains is the list of subset gaps at the end of §8 and the deliberate omissions in §9.
 
 ## 1. The split
 
-The macro crate stays a parser, exactly like `#[gpu_struct]` does today: it turns tokens into a
-`const` and never thinks about a backend. Both backends live in `nga`, as ordinary code that can
+The macro crate is only a parser: it turns tokens into a `const` and never thinks about a
+backend. Both backends live in `nga`, as ordinary code that can
 be read, stepped through and unit-tested.
 
 ```
-nga-gpu/src/gpu.rs      #[gpu] : tokens -> GpuFn const  (+ the body re-emitted as normal Rust)
-nga-gpu/src/lib.rs      #[gpu_struct] and #[derive(Constants)], sharing the same type parser
+nga-gpu/src/gpu.rs      a fn : tokens -> GpuFn const  (+ the body re-emitted as normal Rust)
+nga-gpu/src/lib.rs      #[gpu_mod], the struct half and #[derive(Constants)], one type parser
 nga/src/ir.rs           GpuFn / Node / Ty, and the one type-inference pass both backends run
 nga/src/spirv.rs        &GpuFn... -> Vec<u8>
 nga/src/msl.rs          &GpuFn... -> String
 nga/src/vector.rs       f32x4 and friends, with host bodies, so a shader body compiles
 ```
 
-`nga-slang` was renamed `nga-gpu`: it holds both macros now, and they share one Rust-type
-parser rather than two.
+`nga-slang` was renamed `nga-gpu`: the struct half and the function half live there together
+and share one Rust-type parser rather than two.
 
 Nothing about SPIR-V or Metal is reachable from a proc macro, so a backend bug is a normal
 breakpoint instead of a `cargo expand` session.
 
-## 2. What `#[gpu]` emits
+## 2. What a shader function emits
 
 ```rust
-#[gpu(compute(8, 8, 1))]
+#[compute(8, 8, 1)]
 fn clear(root: Gpu<'static, Scene>, #[thread_id] id: u32x3) {
     let px = id.x + id.y * root.width;
     root.pixels[px] = f32x4::splat(0.0);
@@ -67,14 +67,14 @@ normal "cannot find value" error rather than something we have to diagnose.
 
 Accepted: `let` (annotated or inferred), assignment and compound assignment, `if`/`else`,
 `while`, `loop`, `for i in a..b`, `break`, `continue`, `return`, unary/binary operators, field
-access, swizzles, indexing, `as` casts between scalars, calls to `#[gpu]` functions and to
+access, swizzles, indexing, `as` casts between scalars, calls to other shader functions and to
 intrinsics, struct literals, array literals.
 
 Rejected with a span: closures, generics, traits, `match`, `impl` blocks, references, `Box`/`Vec`/`String`, `?`, iterators other than a bare range,
 recursion (SPIR-V forbids it; detected by walking `calls`), and anything else.
 
 Types: `f16 f32 i32 u32 bool`, the `f32x2..4 / u32x2..4 / i32x2..4` vectors and `f32x3x3
-f32x4x4` already spelled in `#[gpu_struct]`, `[T; N]`, `#[gpu_struct]` structs, and
+f32x4x4` already spelled in a shared struct, `[T; N]`, `#[gpu_mod]` structs, and
 `Gpu<'static, T>` / `GpuMut<'static, T>` pointers. Identical vocabulary to the struct macro, so
 one type table serves both.
 
@@ -202,7 +202,7 @@ SPIR-V decorates with. The existing `METAL_PRELUDE` in `build.rs` survives rough
 Slang prelude does not.
 
 Metal keeps the features Slang cannot spell (`icb.metal`, `tile.metal`): those stay hand-written
-`.metal` and the `#[gpu]` path is not asked to reach them.
+`.metal` and the `#[gpu_mod]` path is not asked to reach them.
 
 ## 7. Where the bytes come from
 
@@ -223,7 +223,7 @@ Both emitters are plain functions, so both scheduling options stay open:
 | # | Deliverable | Done when | Status |
 |---|---|---|---|
 
-| 0 | `ir.rs`, `#[gpu]` parses to `GpuFn`, `infer()` | `tests/gpu.rs` reads a parsed body back | done |
+| 0 | `ir.rs`, a shader fn parses to `GpuFn`, `infer()` | `tests/gpu.rs` reads a parsed body back | done |
 | 1 | MSL backend | `tests/gpu.rs` checks the emitted MSL | done |
 | 2 | SPIR-V backend, compute | `examples/sync` simulates and draws; `spirv-val` clean | done |
 | 3 | vertex + fragment, stage IO, builtins | `examples/triangle` draws | done |

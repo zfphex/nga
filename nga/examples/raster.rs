@@ -2,20 +2,17 @@ use minwin::*;
 use nga::*;
 use raster::{Data, Options, Vertex};
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
+#[gpu_mod]
 mod raster {
     use nga::*;
 
-    /// Every entry point, which is what one library holds.
-    pub const ENTRIES: &[&nga::ir::GpuFn] = &[&VERTEX, &FRAGMENT, &FRAGMENT_SCREEN];
-
-    #[gpu_struct]
     pub struct Vertex {
         pub position: f32x3,
         pub color: f32x3,
     }
 
-    #[gpu_struct(align(16))]
+    #[repr(C, align(16))]
     pub struct Data {
         pub vertices: Gpu<'static, [Vertex]>,
         pub mvp: f32x4x4,
@@ -25,21 +22,19 @@ mod raster {
     /// One specialization constant per field, numbered by field index — the same number
     /// `Constants::values` pushes, so the host and the module cannot disagree about which is
     /// which.
-    #[gpu_struct]
     #[derive(Constants)]
     pub struct Options {
         pub boost: bool,
         pub gamma: f32,
     }
 
-    #[gpu_struct]
     pub struct VertexOut {
         pub position: f32x4,
         pub color: f32x3,
         pub alpha: f32,
     }
 
-    #[gpu(vertex)]
+    #[vertex]
     fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
@@ -51,7 +46,7 @@ mod raster {
         }
     }
 
-    #[gpu(fragment)]
+    #[fragment]
     fn fragment(input: VertexOut, #[constants] options: Options) -> f32x4 {
         let mut c = input.color.pow(f32x3::splat(options.gamma));
         if options.boost {
@@ -64,15 +59,12 @@ mod raster {
     /// screen blending itself. Desktop Vulkan has no framebuffer fetch, so this emits `src`
     /// only and the screen formula is a fixed blend equation instead: `ONE`,
     /// `ONE_MINUS_SRC_COLOR` is `src + dst * (1 - src)`, which is exactly screen.
-    #[gpu(fragment)]
+    #[fragment]
     fn fragment_screen(input: VertexOut) -> f32x4 {
         let c = input.color * input.alpha;
         f32x4::new(c.x, c.y, c.z, 1.0)
     }
 }
-
-
-
 
 const DEPTH_FORMAT: Format = Format::D32Float;
 
@@ -107,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, &nga::compile(raster::ENTRIES))?;
+    let mut shaders = Shaders::new(&device, &nga::compile(raster::ENTRIES))?;
     let opaque = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         constants: Some(&Options {
@@ -115,8 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gamma: 1.0,
         }),
         ..RasterDesc::new(
-            "vertex",
-            "fragment",
+            raster::VERTEX.name,
+            raster::FRAGMENT.name,
             &[ColorTarget::new(surface.format())],
         )
     })?;
@@ -127,8 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gamma: 0.6,
         }),
         ..RasterDesc::new(
-            "vertex",
-            "fragment",
+            raster::VERTEX.name,
+            raster::FRAGMENT.name,
             &[ColorTarget {
                 blend: BlendMode::Alpha,
                 ..ColorTarget::new(surface.format())
@@ -138,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let screen = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         ..RasterDesc::new(
-            "vertex",
-            "fragment_screen",
+            raster::VERTEX.name,
+            raster::FRAGMENT_SCREEN.name,
             &[ColorTarget {
                 blend: BlendMode::Screen,
                 ..ColorTarget::new(surface.format())

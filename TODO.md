@@ -34,7 +34,7 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 ## Vocabulary that comes back with the code that needs it
 
 - `TextureKind` (1D, 3D, cube, arrays) and `BlendOp` were dropped rather than left unused.
-  The array, 3D and cube handle types are in `#[gpu_struct]`'s vocabulary so a shared struct can
+  The array, 3D and cube handle types are in `#[gpu_mod]`'s vocabulary so a shared struct can
   hold one, but sampling through them needs the matching intrinsic in `msl.rs` and `spirv.rs`.
 - `Format` is intersection-only and grows on demand: a variant exists only if both
   `vk::Format` and `MTLPixelFormat` have it. Adding one means adding a row to the `match` in each
@@ -42,7 +42,7 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 
 ## Shading language
 
-Every shader is a `#[gpu]` Rust function in the example that draws with it, and `nga::compile`
+Every shader is a Rust function in a `#[gpu_mod]` in the example that draws with it, and `nga::compile`
 emits SPIR-V or MSL from it. Slang and `slangc` are gone; see `GPU-PLAN.md` for what replaced
 them and for the gaps in the accepted Rust subset.
 
@@ -71,7 +71,7 @@ type-checks the Metal half without an Apple toolchain, because `check` never lin
 `PlatformWindow`, so it is `--lib` only. That covers `metal.rs`, which is the file that matters.
 
 It proves a backend half compiles, not that it runs. The examples are what prove the API: each
-one owns the shader it draws with, so running it exercises the whole path from `#[gpu]` body to
+one owns the shader it draws with, so running it exercises the whole path from a shader body to
 pixels. `nga/tests` keeps only what a window cannot show, which is `gpu.rs` (the IR, both
 emitters and the struct layout), `fence.rs`, and the three Apple-gated MSL ones (`mesh`, `icb`,
 `tile`), which prove nothing on Vulkan by construction.

@@ -1,4 +1,4 @@
-//! The shader IR. `#[gpu]` parses Rust into this; `msl.rs` and `spirv.rs` read it back out.
+//! The shader IR. `#[gpu_mod]` parses Rust into this; `msl.rs` and `spirv.rs` read it back out.
 //!
 //! Flat arenas, `Copy` everywhere, indices instead of pointers, so a whole function is one
 //! `const` the proc macro can emit as text and the linker resolves across crates. A call to
@@ -40,7 +40,7 @@ pub enum HandleKind {
     Depth2d,
     Sampler,
     /// A prelude typedef with no IR meaning: an indirect command buffer, a pipeline handle.
-    /// Eight bytes in a struct and nothing a `#[gpu]` function can do with it.
+    /// Eight bytes in a struct and nothing a shader function can do with it.
     Opaque,
 }
 

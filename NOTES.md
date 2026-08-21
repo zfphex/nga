@@ -191,7 +191,7 @@ gets alignment 4, where Rust `f32x4x4` is `align(16)`. A two-field struct alread
 
 **Offline compilation also breaks the generated-header trick.** `nga` builds its MSL header at
 runtime from `TypeAbi` and hands it to Metal's runtime compiler. `nga-vk` compiles SPIR-V in
-`build.rs`, which runs before rustc expands `#[gpu_struct]`, so the shader cannot be generated
+`build.rs`, which runs before rustc expands `#[gpu_mod]`, so the shader cannot be generated
 from the Rust types at all. Shaders are hand-written and verified instead:
 
 - `nga_vk::slang::declare` synthesises the correct padding from the recorded Rust offsets, so a
@@ -208,7 +208,7 @@ Data::mvp is at 16 in Rust but 8 in Slang. Add padding to the Slang struct
 ```
 
 This finding is what `GPU-PLAN.md` acts on, and the mechanism above is gone. Shaders are
-`#[gpu]` Rust functions now, both emitters write the Rust offsets out as `OpMemberDecorate
+`#[gpu_mod]` Rust functions now, both emitters write the Rust offsets out as `OpMemberDecorate
 Offset` and explicit MSL padding, and nothing is arranged for or guessed at. The check survives
 in `tests/gpu.rs`, but it now asks whether the emitters used the offsets they were handed rather
 than whether a shader compiler happened to agree.

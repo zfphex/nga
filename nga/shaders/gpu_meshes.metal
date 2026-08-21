@@ -1,12 +1,12 @@
 // The `gpu_meshes` example: a compute kernel encodes a whole render pass into an indirect
 // command buffer, choosing the pipeline per object as well as the arguments.
 //
-// That last part is what separates this from `nga_shaders::gpu_driven`, the portable version of
+// That last part is what separates this from `examples/gpu_driven.rs`, the portable version of
 // the same idea: `draw_indirect_count` lets the GPU pick how many draws and what arguments, but
 // every one of them shares the pipeline and the root pointer the host bound. Here each command
 // carries its own.
 //
-// Hand-written MSL because encoding a command buffer from a shader has no `#[gpu]` spelling,
+// Hand-written MSL because encoding a command buffer from a shader has no `#[gpu_mod]` spelling,
 // and indirect command buffers are Metal-only anyway.
 
 struct Vertex {

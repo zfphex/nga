@@ -1,7 +1,7 @@
 // A mesh pipeline emitting one triangle, so `tests/mesh.rs` can check the same coverage
 // `tests/raster.rs` checks for the vertex path.
 //
-// Hand-written MSL. `#[gpu]` has no mesh stage: the IR generalises to one, but mesh pipelines
+// Hand-written MSL. `#[gpu_mod]` has no mesh stage: the IR generalises to one, but mesh pipelines
 // are Metal-only, so writing the emitter would buy a stage that only ever has one backend. See
 // section 9 of `GPU-PLAN.md`.
 

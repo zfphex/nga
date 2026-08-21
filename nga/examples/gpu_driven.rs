@@ -2,23 +2,13 @@ use minwin::*;
 use nga::*;
 use gpu_driven::{BoundaryData, DrawArgs, DrawData, EncodeData, Instance, SimData};
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu]` does with it.
+/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
+#[gpu_mod]
 mod gpu_driven {
     use nga::*;
 
     const TAU: f32 = 6.2831853;
 
-    /// Every entry point, which is what one library holds.
-    pub const ENTRIES: &[&nga::ir::GpuFn] = &[
-        &SIMULATE,
-        &ENCODE,
-        &VERTEX,
-        &FRAGMENT,
-        &BOUNDARY,
-        &BOUNDARY_FRAGMENT,
-    ];
-
-    #[gpu_struct]
     pub struct Instance {
         pub center: f32x2,
         pub angle: f32,
@@ -27,7 +17,6 @@ mod gpu_driven {
     }
 
     /// `VkDrawIndirectCommand`, laid out by the spec rather than by us.
-    #[gpu_struct]
     pub struct DrawArgs {
         pub vertex_count: u32,
         pub instance_count: u32,
@@ -35,14 +24,12 @@ mod gpu_driven {
         pub first_instance: u32,
     }
 
-    #[gpu_struct]
     pub struct SimData {
         pub instances: GpuMut<'static, [Instance]>,
         pub time: f32,
         pub count: u32,
     }
 
-    #[gpu_struct]
     pub struct EncodeData {
         pub instances: Gpu<'static, [Instance]>,
         pub draws: GpuMut<'static, [DrawArgs]>,
@@ -51,20 +38,20 @@ mod gpu_driven {
         pub total: u32,
     }
 
-    #[gpu_struct(align(16))]
+    #[repr(C, align(16))]
     pub struct DrawData {
         pub instances: Gpu<'static, [Instance]>,
         pub mvp: f32x4x4,
     }
 
-    #[gpu_struct(align(16))]
+    #[repr(C, align(16))]
     pub struct BoundaryData {
         pub mvp: f32x4x4,
         pub radius: f32,
         pub segments: u32,
     }
 
-    #[gpu(compute(64))]
+    #[compute(64)]
     fn simulate(root: Gpu<'static, SimData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.count {
@@ -90,7 +77,7 @@ mod gpu_driven {
     /// Vulkan has no GPU-side encoder, so this writes a `VkDrawIndirectCommand` instead and
     /// smuggles the instance index through `first_instance`, which the vertex stage reads back
     /// as the base instance.
-    #[gpu(compute(64))]
+    #[compute(64)]
     fn encode(root: Gpu<'static, EncodeData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.total {
@@ -111,13 +98,12 @@ mod gpu_driven {
         };
     }
 
-    #[gpu_struct]
     pub struct VertexOut {
         pub position: f32x4,
         pub color: f32x4,
     }
 
-    #[gpu(vertex)]
+    #[vertex]
     fn vertex(
         root: Gpu<'static, DrawData>,
         #[vertex_id] vid: u32,
@@ -132,13 +118,13 @@ mod gpu_driven {
         }
     }
 
-    #[gpu(fragment)]
+    #[fragment]
     fn fragment(input: VertexOut) -> f32x4 {
         input.color
     }
 
     /// A vertex stage that returns a bare `f32x4` is returning clip space and nothing else.
-    #[gpu(vertex)]
+    #[vertex]
     fn boundary(root: Gpu<'static, BoundaryData>, #[vertex_id] vid: u32) -> f32x4 {
         let a = (vid / 2) as f32 / root.segments as f32 * TAU;
         let mut r = root.radius + 0.004;
@@ -149,17 +135,11 @@ mod gpu_driven {
             .mul(f32x4::new(a.cos() * r, a.sin() * r, 0.25, 1.0))
     }
 
-    #[gpu(fragment)]
+    #[fragment]
     fn boundary_fragment() -> f32x4 {
         f32x4::new(1.0, 1.0, 1.0, 0.6)
     }
 }
-
-
-
-
-
-
 
 const COUNT: usize = 4096;
 const GROUP: usize = 64;
@@ -186,19 +166,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = window.ns_view as isize;
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, &nga::compile(gpu_driven::ENTRIES))?;
-    let simulate = shaders.compute("simulate", None)?;
-    let encode = shaders.compute("encode", None)?;
+    let mut shaders = Shaders::new(&device, &nga::compile(gpu_driven::ENTRIES))?;
+    let simulate = shaders.compute(gpu_driven::SIMULATE.name, None)?;
+    let encode = shaders.compute(gpu_driven::ENCODE.name, None)?;
     let draw = shaders.raster(&RasterDesc::new(
-        "vertex",
-        "fragment",
+        gpu_driven::VERTEX.name,
+        gpu_driven::FRAGMENT.name,
         &[ColorTarget::new(surface.format())],
     ))?;
     let boundary = shaders.raster(&RasterDesc {
         topology: Topology::TriangleStrip,
         ..RasterDesc::new(
-            "boundary",
-            "boundary_fragment",
+            gpu_driven::BOUNDARY.name,
+            gpu_driven::BOUNDARY_FRAGMENT.name,
             &[ColorTarget {
                 blend: BlendMode::Alpha,
                 ..ColorTarget::new(surface.format())

@@ -4,12 +4,6 @@ use nga::*;
 mod sync;
 use sync::{BuildData, DrawData, Instance, SimData, Vertex};
 
-
-
-
-
-
-
 const THREADS: usize = 4;
 const SLICE: usize = 256;
 const COUNT: usize = THREADS * SLICE;
@@ -37,11 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
     let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
-    let simulate = shaders.compute("simulate", None)?;
-    let build = shaders.compute("build_vertices", None)?;
+    let simulate = shaders.compute(sync::SIMULATE.name, None)?;
+    let build = shaders.compute(sync::BUILD_VERTICES.name, None)?;
     let draw = shaders.raster(&RasterDesc::new(
-        "vertex",
-        "fragment",
+        sync::VERTEX.name,
+        sync::FRAGMENT.name,
         &[ColorTarget::new(surface.format())],
     ))?;
 

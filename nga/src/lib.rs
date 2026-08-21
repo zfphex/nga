@@ -16,7 +16,7 @@ pub mod spirv;
 pub mod vector;
 pub mod tlsf;
 
-pub use nga_gpu::{Constants, gpu, gpu_struct};
+pub use nga_gpu::{Constants, gpu_mod};
 pub use tlsf::{Alloc, Tlsf};
 pub use vector::*;
 
@@ -32,7 +32,7 @@ use metal as backend;
 
 pub use backend::*;
 
-/// Everything `Shaders::new` wants, from the `#[gpu]` functions that are the entry points. The
+/// Everything `Shaders::new` wants, from the shader functions that are the entry points. The
 /// two backends produce different bytes — a SPIR-V module here, MSL source there — and this is
 /// the only place that has to know which.
 ///
@@ -141,7 +141,7 @@ impl<T: ?Sized> Clone for GpuMut<'_, T> {
 
 impl<T: ?Sized> Copy for GpuMut<'_, T> {}
 
-// A `#[gpu]` body reads and writes through these exactly as it would through a reference, and
+// A shader body reads and writes through these exactly as it would through a reference, and
 // the host bodies below are what make that ordinary Rust. They are never called: the address is
 // a device one, so dereferencing here would be unsound. Their only job is to type-check, which
 // is what the shader compiler used to do and now does not have to.
@@ -313,7 +313,7 @@ pub struct DispatchThreads {
 
 // -- shared ABI --------------------------------------------------------------------------
 
-/// Recorded by `#[gpu_struct]`.
+/// Recorded by `#[gpu_mod]`.
 #[derive(PartialEq, Debug)]
 pub struct TypeAbi {
     pub name: &'static str,
@@ -855,7 +855,7 @@ pub enum ResolveMode {
 /// stage. There are no vertices and no index buffer; the mesh stage emits primitives directly.
 ///
 /// Metal-only today; ask [`Device::supports`] with [`Feature::MeshShaders`] before building one.
-/// The shader side is hand-written MSL, since `#[gpu]` has no mesh stage; see `GPU-PLAN.md`.
+/// The shader side is hand-written MSL, since `#[gpu_mod]` has no mesh stage; see `GPU-PLAN.md`.
 #[derive(Clone, Copy)]
 pub struct MeshDesc<'a> {
     /// The object stage, or `""` for a mesh pipeline with no amplification.
@@ -902,7 +902,7 @@ impl<'a> MeshDesc<'a> {
 /// imageblock the pass is rendering into without a round trip to memory.
 ///
 /// This one is Apple-only for good. It is the tile-based deferred hardware showing through,
-/// and there is no Vulkan equivalent to grow into. `#[gpu]` has no tile stage either, so the
+/// and there is no Vulkan equivalent to grow into. `#[gpu_mod]` has no tile stage either, so the
 /// function has to come from an MSL source; see `shaders/tbdr.metal`.
 #[derive(Clone, Copy)]
 pub struct TileDesc<'a> {
@@ -1009,7 +1009,7 @@ impl<T> IndexMut<u32> for Pool<'_, T> {
 
 /// The MSL source `build.rs` copied out of `shaders/`, as bytes.
 ///
-/// Only the shaders `#[gpu]` is not asked to reach are still hand-written, and all of them are
+/// Only the shaders `#[gpu_mod]` is not asked to reach are still hand-written, and all of them are
 /// Metal-only, so there is no Vulkan arm to write. Everything else goes through [`compile`].
 #[macro_export]
 macro_rules! shader {

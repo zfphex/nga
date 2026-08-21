@@ -21,21 +21,27 @@ mod meshlets {
     use minwin::*;
     use nga::*;
 
-    #[gpu_struct]
-    struct Meshlet {
-        /// xyz is the centre, w the radius, so this is the sphere the object stage culls against.
-        bounds: f32x4,
-        color: [f32; 3],
+    #[gpu_mod]
+    mod data {
+        use nga::*;
+
+        pub struct Meshlet {
+            /// xyz is the centre, w the radius, so this is the sphere the object stage culls against.
+            pub bounds: f32x4,
+            pub color: [f32; 3],
+        }
+
+        #[repr(C, align(16))]
+        pub struct Scene {
+            pub meshlets: Gpu<'static, Meshlet>,
+            pub mvp: f32x4x4,
+            pub cull_radius: f32,
+            pub time: f32,
+            pub meshlet_count: u32,
+        }
     }
 
-    #[gpu_struct(align(16))]
-    struct Scene {
-        meshlets: Gpu<'static, Meshlet>,
-        mvp: f32x4x4,
-        cull_radius: f32,
-        time: f32,
-        meshlet_count: u32,
-    }
+    use data::*;
 
     const SHADERS: &[u8] = nga::shader!("meshlets");
 

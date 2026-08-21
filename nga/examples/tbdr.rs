@@ -19,25 +19,30 @@ mod tiles {
     use minwin::*;
     use nga::*;
 
-    #[gpu_struct]
-    struct Vertex {
-        position: [f32; 3],
-        color: [f32; 3],
+    #[gpu_mod]
+    mod data {
+        use nga::*;
+
+        pub struct Vertex {
+            pub position: [f32; 3],
+            pub color: [f32; 3],
+        }
+
+        #[repr(C, align(16))]
+        pub struct Data {
+            pub vertices: Gpu<'static, Vertex>,
+            pub mvp: f32x4x4,
+        }
+
+        pub struct Vignette {
+            pub size: f32x2,
+            pub tile: f32x2,
+            pub strength: f32,
+            pub levels: f32,
+        }
     }
 
-    #[gpu_struct(align(16))]
-    struct Data {
-        vertices: Gpu<'static, Vertex>,
-        mvp: f32x4x4,
-    }
-
-    #[gpu_struct]
-    struct Vignette {
-        size: f32x2,
-        tile: f32x2,
-        strength: f32,
-        levels: f32,
-    }
+    use data::*;
 
     const SHADERS: &[u8] = nga::shader!("tbdr");
 

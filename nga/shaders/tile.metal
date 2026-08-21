@@ -3,7 +3,7 @@
 //
 // This is the one feature in the crate that is Apple-only for good rather than for now: an
 // imageblock is tile-based deferred hardware, and there is nothing in Vulkan to grow into.
-// That is why `#[gpu]` has no tile stage and this shader is hand-written MSL.
+// That is why `#[gpu_mod]` has no tile stage and this shader is hand-written MSL.
 
 struct Vertex {
     packed_float3 position;

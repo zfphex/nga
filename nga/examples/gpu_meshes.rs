@@ -25,38 +25,44 @@ mod commands {
     use minwin::*;
     use nga::*;
 
-    #[gpu_struct]
-    struct Vertex {
-        position: [f32; 3],
-        color: [f32; 3],
+    #[gpu_mod]
+    mod data {
+        use nga::*;
+
+        pub struct Vertex {
+            pub position: [f32; 3],
+            pub color: [f32; 3],
+        }
+
+        #[repr(C, align(16))]
+        pub struct Object {
+            pub cell: [f32; 3],
+            pub scale: f32,
+            pub orbit: f32,
+            pub phase: f32,
+            pub style: u32,
+            pub color: f32x4,
+        }
+
+        #[repr(C, align(16))]
+        pub struct EncodeData {
+            pub objects: Gpu<'static, Object>,
+            pub vertices: Gpu<'static, Vertex>,
+            pub draws: GpuMut<'static, u8>,
+            pub commands: Commands,
+            pub pipelines: [PipelineHandle; 2],
+            pub viewproj: f32x4x4,
+            pub time: f32,
+            pub cull_radius: f32,
+            pub count: u32,
+            pub tri_start: u32,
+            pub tri_count: u32,
+            pub line_start: u32,
+            pub line_count: u32,
+        }
     }
 
-    #[gpu_struct(align(16))]
-    struct Object {
-        cell: [f32; 3],
-        scale: f32,
-        orbit: f32,
-        phase: f32,
-        style: u32,
-        color: f32x4,
-    }
-
-    #[gpu_struct(align(16))]
-    struct EncodeData {
-        objects: Gpu<'static, Object>,
-        vertices: Gpu<'static, Vertex>,
-        draws: GpuMut<'static, u8>,
-        commands: Commands,
-        pipelines: [PipelineHandle; 2],
-        viewproj: f32x4x4,
-        time: f32,
-        cull_radius: f32,
-        count: u32,
-        tri_start: u32,
-        tri_count: u32,
-        line_start: u32,
-        line_count: u32,
-    }
+    use data::*;
 
     const SHADERS: &[u8] = nga::shader!("gpu_meshes");
 

@@ -2,7 +2,7 @@
 // emits their geometry directly. No vertex buffer, no index buffer, no draw per meshlet. The
 // GPU decides how much work there is after the CPU has stopped looking.
 //
-// Hand-written MSL, for the reason in `shaders/mesh.metal`: `#[gpu]` has no mesh stage, and a
+// Hand-written MSL, for the reason in `shaders/mesh.metal`: `#[gpu_mod]` has no mesh stage, and a
 // mesh pipeline only ever runs on Metal.
 
 #define MESHLETS_PER_GROUP 32
