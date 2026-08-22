@@ -43,8 +43,7 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 ## Shading language
 
 Every shader is a Rust function in a `#[gpu_mod]` in the example that draws with it, and `nga::compile`
-emits SPIR-V or MSL from it. Slang and `slangc` are gone; see `GPU-PLAN.md` for what replaced
-them and for the gaps in the accepted Rust subset.
+emits SPIR-V or MSL from it.
 
 Six shaders under `shaders/*.metal` stay hand-written, and `build.rs` copies them through on
 Apple:

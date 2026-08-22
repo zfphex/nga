@@ -2,6 +2,9 @@
 members = ["nga", "nga-gpu"]
 resolver = "3"
 
+[profile.release]
+debug = true
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

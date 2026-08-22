@@ -1,41 +1,44 @@
 # nga-vk: where Vulkan follows Metal, and where it doesn't
 
-Findings from porting `nga` (Metal 4 + MSL) to Vulkan 1.4 + Slang. This file is the deliverable;
-the code exists to produce it.
+Findings from porting `nga` (Metal 4 + MSL) to Vulkan 1.4. Shaders are `#[gpu_mod]` Rust
+functions that `nga` compiles straight to SPIR-V and MSL itself, so there is no shader language
+or offline compiler in the loop. This file is the deliverable; the code exists to produce it.
 
 Hardware: NVIDIA GTX 1070 Ti (Pascal), driver 582.66, Vulkan 1.4.312. Vulkan SDK 1.4.357.
 Every example runs with zero validation errors under `VK_LAYER_KHRONOS_validation`.
 
-| Example | Ports? | What it proves |
-| --- | --- | --- |
-| `triangle` | yes | BDA root pointer, dynamic rendering, timeline semaphore |
-| `triangle_shader_object` | yes | the same frame with no `VkPipeline` at all |
-| `raster` | yes | `GpuHeap`/TLSF, depth + blend as dynamic state, specialization constants |
-| `sync` | yes | compute → compute → raster barriers |
-| `bindless` | yes | descriptor buffers, GPU-painted storage image |
-| `threaded` | yes | 4 threads, 4 command pools, one target |
-| `gpu_driven` | reformulated | GPU-decided draw count via `vkCmdDrawIndirectCount` |
-| `meshlets` | no | no mesh-shader extension on Pascal |
-| `tbdr` | no | no tile shading in Vulkan at all |
+| Example                  | Ports?       | What it proves                                                           |
+| ------------------------ | ------------ | ------------------------------------------------------------------------ |
+| `triangle`               | yes          | BDA root pointer, dynamic rendering, timeline semaphore                  |
+| `triangle_shader_object` | yes          | the same frame with no `VkPipeline` at all                               |
+| `raster`                 | yes          | `GpuHeap`/TLSF, depth + blend as dynamic state, specialization constants |
+| `sync`                   | yes          | compute → compute → raster barriers                                      |
+| `bindless`               | yes          | descriptor buffers, GPU-painted storage image                            |
+| `threaded`               | yes          | 4 threads, 4 command pools, one target                                   |
+| `gpu_driven`             | reformulated | GPU-decided draw count via `vkCmdDrawIndirectCount`                      |
+| `meshlets`               | no           | no mesh-shader extension on Pascal                                       |
+| `tbdr`                   | no           | no tile shading in Vulkan at all                                         |
 
 ---
 
 ## Where Vulkan is better
 
-### Slang erases the post's main complaint about Vulkan
+### Real pointers erase the post's main complaint about Vulkan
 
 Aaltonen argues BDA "will remain a niche until HLSL and GLSL support pointers natively", since
-the user is stuck casting raw `uint64_t`. Slang removes this completely:
+the user is stuck casting raw `uint64_t`. Writing the shader in Rust removes this completely:
 
-```slang
-struct Data { Vertex* vertices; uint _nga_pad0[2]; float4x4 mvp; };
-Data* data = (Data*)push.root;
-out.position = mul(data.mvp, float4(data.vertices[vid].position, 1.0));
+```rust
+pub struct Data { pub vertices: Gpu<'static, [Vertex]>, pub mvp: f32x4x4 }
+
+#[vertex]
+fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut { .. }
 ```
 
-That compiles straight to `PhysicalStorageBuffer` addressing and reads the same as the MSL
-`device const Data* data [[buffer(0)]]` it replaces. Slang also gave us pointer atomics
-(`Atomic<uint>*` → `OpAtomicIAdd`), which `gpu_driven` depends on.
+`Gpu<'_, T>` emits `PhysicalStorageBuffer` addressing and reads the same as the MSL
+`device const Data* data [[buffer(0)]]` it replaces. Pointer atomics come with it
+(`GpuMut<'static, AtomicU32>` → `OpAtomicIAdd`), which `gpu_driven` depends on. The struct is
+also the host's struct rather than a second declaration kept in step by hand.
 
 ### The root pointer is simpler than Metal's
 
@@ -148,13 +151,13 @@ device once per resource, and staging was capped at 8 MiB with a panic past it. 
 into an open batch over a wrapping ring and submits once on `flush`, signalling a timeline instead
 of idling:
 
-| | before | now |
-| --- | --- | --- |
-| cost of one `write`/`upload`/`transition` | submit + full device drain | memcpy + a few command words |
-| a 32-texture load | 64+ drains | 1 submission |
-| write larger than staging | panic at 8 MiB | chunked through the ring |
-| staging memory | 8 MiB of the BAR window | 32 MiB of system RAM |
-| write of 64 KiB or less | staged copy | `vkCmdUpdateBuffer`, ring untouched |
+|                                           | before                     | now                                 |
+| ----------------------------------------- | -------------------------- | ----------------------------------- |
+| cost of one `write`/`upload`/`transition` | submit + full device drain | memcpy + a few command words        |
+| a 32-texture load                         | 64+ drains                 | 1 submission                        |
+| write larger than staging                 | panic at 8 MiB             | chunked through the ring            |
+| staging memory                            | 8 MiB of the BAR window    | 32 MiB of system RAM                |
+| write of 64 KiB or less                   | staged copy                | `vkCmdUpdateBuffer`, ring untouched |
 
 `GpuHeap::flush` blocks once for the whole batch, which is what load-time code wants.
 `flush_async` returns the timeline value instead, and `Frame::after_uploads` makes the GPU wait
@@ -177,41 +180,28 @@ is illegal with `DRAW_INDIRECT`. Validation caught both. Keeping `barrier(after,
 portable across the whole API means `Visibility::Device` maps to `MEMORY_READ`/`MEMORY_WRITE`,
 the only masks legal with every stage. Correct, but strictly more conservative than Metal.
 
-### 5. Struct layout has to be checked outside the shader language
+### 5. Struct layout is Rust's, and Vulkan has to be told so
 
-MSL checks this in-language with `static_assert(__builtin_offsetof(...))`. Slang has no offsetof.
-Worse, under `-fvk-use-scalar-layout`, needed because it makes `float3` 12 bytes, matching
-`packed_float3` and `[f32; 3]`, which is what lets the shared structs port at all, `float4x4`
-gets alignment 4, where Rust `f32x4x4` is `align(16)`. A two-field struct already diverges:
+MSL checks layout in-language with `static_assert(__builtin_offsetof(...))`. SPIR-V has no
+offsetof, and its default block rules do not agree with `#[repr(C)]`: std430 makes a 3-vector
+16 bytes where `packed_float3` and `[f32; 3]` are 12, so `scalarBlockLayout` is a hard
+requirement for the shared structs to port at all. Even under scalar rules a matrix wants
+alignment 4 where Rust's `f32x4x4` is `align(16)`, so a two-field struct diverges the moment
+anything is left to be inferred:
 
-| | `vertices` | `mvp` | size |
-| --- | --- | --- | --- |
-| Rust `#[repr(C)]` | 0 | 16 | 80 |
-| Slang, scalar layout | 0 | 8 | 72 |
+|                             | `vertices` | `mvp` | size |
+| --------------------------- | ---------- | ----- | ---- |
+| Rust `#[repr(C, align(16))]` | 0          | 16    | 80   |
+| inferred scalar layout       | 0          | 8     | 72   |
 
-**Offline compilation also breaks the generated-header trick.** `nga` builds its MSL header at
-runtime from `TypeAbi` and hands it to Metal's runtime compiler. `nga-vk` compiles SPIR-V in
-`build.rs`, which runs before rustc expands `#[gpu_mod]`, so the shader cannot be generated
-from the Rust types at all. Shaders are hand-written and verified instead:
+Nothing is inferred any more. `#[gpu_mod]` records the byte offset of every field from Rust,
+and both emitters state those numbers outright: `spirv.rs` as `OpMemberDecorate ... Offset`,
+`msl.rs` as explicit `uint` padding members. Rust's layout is authoritative and the shader is
+made to match, in one definition rather than two.
 
-- `nga_vk::slang::declare` synthesises the correct padding from the recorded Rust offsets, so a
-  mismatch is fixable, not merely detectable. It emits `uint _nga_pad0[2]` before `mvp`.
-- `tests/layout.rs` parses `OpMemberDecorate ... Offset` out of the compiled SPIR-V and compares
-  against `TypeAbi`. Note that `slangc -reflection-json` is not usable for this: it describes
-  only the binding interface, so structs reached through a pointer, which is every struct in this
-  design, never appear in it.
-
-Deleting the padding from `triangle.slang` produces:
-
-```
-Data::mvp is at 16 in Rust but 8 in Slang. Add padding to the Slang struct
-```
-
-This finding is what `GPU-PLAN.md` acts on, and the mechanism above is gone. Shaders are
-`#[gpu_mod]` Rust functions now, both emitters write the Rust offsets out as `OpMemberDecorate
-Offset` and explicit MSL padding, and nothing is arranged for or guessed at. The check survives
-in `tests/gpu.rs`, but it now asks whether the emitters used the offsets they were handed rather
-than whether a shader compiler happened to agree.
+The check survives in `tests/gpu.rs`, which parses the `Offset` decorations back out of the
+emitted module and compares them against `TypeAbi`. It now asks whether the emitters used the
+offsets they were handed rather than whether a shader compiler happened to agree.
 
 ### 6. One bindless heap becomes three
 
@@ -241,27 +231,28 @@ stage reads back as `gl_BaseInstance`. Metal needs no such trick. Resetting the 
 
 Vendor-locked, but this GPU has it: `VK_NV_device_generated_commands` rev 3 and
 `VK_NV_device_generated_commands_compute` rev 2 on driver 582.66. The cross-vendor
-`VK_EXT_device_generated_commands` (Vulkan 1.3.296) is *not* exposed here; it is a redesign
+`VK_EXT_device_generated_commands` (Vulkan 1.3.296) is _not_ exposed here; it is a redesign
 around indirect execution sets rather than a rename, and Pascal is on a maintenance driver
 branch. Mapping `gpu_meshes` onto the NV form, command field by field:
 
-| Metal ICB command | NV token | Fit |
-| --- | --- | --- |
-| `set_render_pipeline_state(handle)` | `SHADER_GROUP_NV` | partial: an index, not a handle |
-| `set_vertex_buffer(draw, 1)` (per-draw root) | `PUSH_CONSTANT_NV` | exact, and cleaner |
-| `draw_primitives(type, start, count, 1, 0)` | `DRAW_NV` = `VkDrawIndirectCommand` | exact but for `type` |
-| a reset slot replays as nothing | `sequencesCountBuffer` | better: a real GPU-written count |
-| `IndirectCommands::dispatches` | `DISPATCH_NV` + `PIPELINE_NV` | exact; pipeline by address |
-| `IndirectCommands::meshes` | `DRAW_TASKS_NV` | needs NV mesh shaders, so dead on Pascal |
+| Metal ICB command                            | NV token                            | Fit                                      |
+| -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
+| `set_render_pipeline_state(handle)`          | `SHADER_GROUP_NV`                   | partial: an index, not a handle          |
+| `set_vertex_buffer(draw, 1)` (per-draw root) | `PUSH_CONSTANT_NV`                  | exact, and cleaner                       |
+| `draw_primitives(type, start, count, 1, 0)`  | `DRAW_NV` = `VkDrawIndirectCommand` | exact but for `type`                     |
+| a reset slot replays as nothing              | `sequencesCountBuffer`              | better: a real GPU-written count         |
+| `IndirectCommands::dispatches`               | `DISPATCH_NV` + `PIPELINE_NV`       | exact; pipeline by address               |
+| `IndirectCommands::meshes`                   | `DRAW_TASKS_NV`                     | needs NV mesh shaders, so dead on Pascal |
 
 Two things fall out that matter more than the parity itself. The push-constant token is a direct
 hit on this design: the root pointer is already one 64-bit push constant, and each generated
 sequence may write its own range, which is Metal's per-command root pointer exactly and would
 delete the `first_instance` smuggling above. And there is no encoder object to emulate: the
-input is a plain buffer of structs laid out per the `VkIndirectCommandsLayoutNV`, so a Slang
-kernel writes `{ groupIndex }`, `{ u64 root }`, `{ vertexCount, instanceCount, firstVertex,
-firstInstance }` with ordinary pointer stores. `Commands` becomes a device address rather than a
-resource id, and the shader stays in the pointer style the rest of the API uses.
+input is a plain buffer of structs laid out per the `VkIndirectCommandsLayoutNV`, so a
+`#[compute]` kernel writes `{ groupIndex }`, `{ u64 root }`, `{ vertexCount, instanceCount,
+firstVertex, firstInstance }` with ordinary pointer stores. `Commands` becomes a device
+address rather than a resource id, and the shader stays in the pointer style the rest of the
+API uses.
 
 The gap is per-command render state. Shader groups vary the stages and vertex input; every group
 shares the parent pipeline's input assembly, rasterization and blend. The only per-sequence state
@@ -276,8 +267,9 @@ free 64-bit id. `RasterDesc::indirect()` already maps onto that bit; declaring t
 upfront has no Metal counterpart.
 
 So `Feature::IndirectCommands` could answer true on NVIDIA with the split-by-topology form, and
-the shared Rust API survives. The divergence is confined to the encode shader source, MSL
-`render_command` against Slang struct stores. The extra machinery is the layout object, a
+the shared Rust API survives. The divergence is confined to what the encode
+kernel lowers to, MSL `render_command` against plain struct stores in SPIR-V. The extra
+machinery is the layout object, a
 preprocess buffer sized by `vkGetGeneratedCommandsMemoryRequirementsNV`, and a reset that becomes
 `vkCmdFillBuffer` on the count.
 
@@ -297,7 +289,8 @@ A formula that genuinely needs the previous value cannot be ported.
 ### 10. Two feature bits the Metal design implies
 
 `shaderInt64` (for the `uint64_t` push constant and pointer arithmetic) and `shaderDrawParameters`
-(Slang's `SV_VertexID` lowers to `DrawParameters`). Also `drawIndirectCount`. Metal simply has
+(`#[base_instance]` lowers to the `BaseInstance` builtin under `SPV_KHR_shader_draw_parameters`).
+Also `drawIndirectCount`, and `scalarBlockLayout` from §5. Metal simply has
 64-bit addressing on. Validation caught all three.
 
 ---
@@ -384,25 +377,3 @@ keep their pipelines.
 - **`tbdr`.** Vulkan has no tile shading or imageblocks on desktop at all. `tile_vignette` reads
   and writes the imageblock in place; the nearest reformulation is
   `VK_KHR_dynamic_rendering_local_read` (which is supported here) or an extra full-screen pass.
-
----
-
-## Verdict against the post's design principles
-
-| Principle | Metal 4 | Vulkan 1.4 + Slang |
-| --- | --- | --- |
-| Single 64-bit root pointer | yes | yes, simpler (push constant, no table object) |
-| Native pointers in shaders | yes | yes, via Slang |
-| Bindless via 32-bit indices | no (64-bit ids, no ranges) | yes |
-| No persistent binding objects | yes | yes (descriptor buffers are plain memory) |
-| Stage-only barriers | yes | yes for buffers, no for images |
-| Dynamic depth/blend state | yes | yes |
-| Minimal PSO state | yes | yes (and `VK_EXT_shader_object` removes the PSO entirely) |
-| CPU writes directly to GPU memory | yes (UMA) | partly (214 MiB BAR; no working host image copy) |
-| Upload without a stall | free (memcpy) | batched: one submission per flush, none per resource |
-| GPU-side command encoding | yes | not in core; `VK_NV_device_generated_commands` covers most of it |
-| Timeline semaphores | yes | yes |
-
-The design survives the port. Six of the eight `nga` examples run unmodified in structure, and two
-subsystems, the root pointer and residency, come out simpler. The costs are concentrated in
-image layouts, host-visible memory, and GPU-side encoding.
