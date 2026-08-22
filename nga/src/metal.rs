@@ -29,10 +29,10 @@
 
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
-    Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
-    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, ResolveMode,
-    Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology,
-    Usage, Viewport, Winding,
+    Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
+    Gpu, GpuBox, GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
+    RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW,
+    TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
@@ -1648,6 +1648,30 @@ impl<'a> Raster<'a> {
             indices.gpu,
             indices.len,
         );
+    }
+
+    pub fn draw_indexed_indirect<I: IndexFormat, T>(
+        &self,
+        root: Gpu<'_, T>,
+        indices: &HeapBuffer,
+        _arena: &Arena,
+        draws: Gpu<'_, [DrawIndexed]>,
+        count: u32,
+    ) {
+        self.bind(root);
+        let index_type = match I::WIDE {
+            true => IndexType::UInt32,
+            false => IndexType::UInt16,
+        };
+        for index in 0..count as u64 {
+            self.encoder.draw_indexed_primitives_with_indirect_buffer(
+                self.primitive.get(),
+                index_type,
+                indices.gpu,
+                indices.len,
+                draws.0.get() + index * size_of::<DrawIndexed>() as u64,
+            );
+        }
     }
 
     /// Metal has no `vkCmdDrawIndirectCount`: the count lives on the GPU and only an indirect

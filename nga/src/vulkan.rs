@@ -17,7 +17,8 @@
 
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
-    Constants, Cull, DepthState, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format, Gpu, GpuBox,
+    Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
+    Gpu, GpuBox,
     GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, ResolveMode,
     Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology,
     Usage, Viewport, Winding,
@@ -3202,6 +3203,32 @@ impl<'a> Raster<'a> {
                 vk::ShaderStageFlags::ALL,
                 0,
                 std::slice::from_raw_parts(&push as *const Push as *const u8, PUSH_SIZE as usize),
+            )
+        };
+    }
+
+    /// One call for a whole pass. The commands sit in the frame's arena, which is already
+    /// `INDIRECT_BUFFER`-capable host-visible memory, so there is no staging copy and no second
+    /// buffer to keep alive. Every draw shares one root push; per-draw data travels through
+    /// `first_instance`, the same channel `draw_indirect_count` below documents. All the draws
+    /// share the bound index buffer, so the caller has to have put their indices in one.
+    pub fn draw_indexed_indirect<I: IndexFormat, T>(
+        &self,
+        root: Gpu<'_, T>,
+        indices: &HeapBuffer,
+        arena: &Arena,
+        draws: Gpu<'_, [DrawIndexed]>,
+        count: u32,
+    ) {
+        self.bind_indices::<I>(indices);
+        self.bind(root);
+        unsafe {
+            self.device.cmd_draw_indexed_indirect(
+                self.command_buffer,
+                arena.buffer,
+                draws.0.get() - arena.base,
+                count,
+                size_of::<DrawIndexed>() as u32,
             )
         };
     }
