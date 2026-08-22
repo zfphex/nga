@@ -29,7 +29,7 @@ use std::collections::VecDeque;
 use std::ffi::{CStr, c_char};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// A compiled pipeline. Opaque so that `VkPipeline` never reaches a caller, and `Copy` so it
 /// can be passed around as freely as the `MTLRenderPipelineState` the Metal side hands out.
@@ -412,7 +412,7 @@ pub(crate) fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAt
         .dst_alpha_blend_factor(blend_factor(dst_alpha))
 }
 
-/// Metal binds two argument-table addresses; Vulkan gets one push-constant range instead.
+/// Metal binds two argument-table addresses; Vulkan gets one push-cant range instead.
 /// Every pipeline layout in `nga-vk` is this range plus the two descriptor-buffer sets, so
 /// pipelines are freely interchangeable the way they are under one `MTL4ArgumentTable`.
 #[repr(C)]
@@ -470,6 +470,10 @@ pub(crate) struct DescriptorSizes {
     pub(crate) offset_alignment: u64,
 }
 
+/// Errors the validation layer has reported since the process started. A test that renders can
+/// assert on this; without it a validation error only prints, and a passing test proves nothing.
+static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
+
 unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     kind: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -487,6 +491,9 @@ unsafe extern "system" fn debug_callback(
         vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "performance",
         _ => "general",
     };
+    if severity == vk::DebugUtilsMessageSeverityFlagsEXT::ERROR {
+        VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
+    }
     eprintln!("[{level} {scope}] {}", message.to_string_lossy());
     vk::FALSE
 }
@@ -597,6 +604,7 @@ impl Device {
             .scalar_block_layout(true)
             .runtime_descriptor_array(true)
             .descriptor_binding_partially_bound(true)
+            .descriptor_binding_variable_descriptor_count(true)
             .shader_sampled_image_array_non_uniform_indexing(true)
             .shader_storage_image_array_non_uniform_indexing(true);
         let mut features11 =
@@ -650,7 +658,29 @@ impl Device {
         let limits = props.properties.limits;
         let timestamp_period = limits.timestamp_period;
 
-        let bindless_cap = 1024;
+        // What the hardware allows, and nothing invented on top of it. A slot reserves an
+        // entry in all three arrays, so the ceiling is the smallest of them — per-stage as
+        // well as per-set, because these layouts bind to every stage — and then whatever the
+        // descriptor buffer ranges allow. A `ResourceHeap` pays only for the slots it asks
+        // for, so a large ceiling here costs nothing until someone uses it.
+        let stride = (descriptor_props.sampled_image_descriptor_size
+            + descriptor_props.storage_image_descriptor_size)
+            .max(1) as u64;
+        let bindless_cap = limits
+            .max_per_stage_descriptor_sampled_images
+            .min(limits.max_per_stage_descriptor_storage_images)
+            .min(limits.max_per_stage_descriptor_samplers)
+            .min(limits.max_descriptor_set_sampled_images)
+            .min(limits.max_descriptor_set_storage_images)
+            .min(limits.max_descriptor_set_samplers)
+            .min(
+                (descriptor_props.max_resource_descriptor_buffer_range / stride)
+                    .min(
+                        descriptor_props.max_sampler_descriptor_buffer_range
+                            / descriptor_props.sampler_descriptor_size.max(1) as u64,
+                    )
+                    .min(u32::MAX as u64) as u32,
+            );
         let set_layouts = [
             Self::set_layout(&device, vk::DescriptorType::SAMPLED_IMAGE, bindless_cap)?,
             Self::set_layout(&device, vk::DescriptorType::STORAGE_IMAGE, bindless_cap)?,
@@ -697,11 +727,22 @@ impl Device {
             .descriptor_type(kind)
             .descriptor_count(count)
             .stage_flags(vk::ShaderStageFlags::ALL)];
+        // `VARIABLE_DESCRIPTOR_COUNT` is what lets a `ResourceHeap` allocate a buffer smaller
+        // than this layout. Without it, VUID-vkCmdSetDescriptorBufferOffsetsEXT-pOffsets-08063
+        // requires every element of the binding to land inside the bound buffer, which would
+        // mean paying for `count` descriptors whether or not any are used — and `count` here
+        // is the hardware ceiling. `PARTIALLY_BOUND` says the rest of the table may be
+        // unwritten, which a sparse bindless table always is.
+        let flags = [vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+            | vk::DescriptorBindingFlags::PARTIALLY_BOUND];
+        let mut binding_flags =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
         let layout = unsafe {
             device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default()
                     .flags(vk::DescriptorSetLayoutCreateFlags::DESCRIPTOR_BUFFER_EXT)
-                    .bindings(&bindings),
+                    .bindings(&bindings)
+                    .push(&mut binding_flags),
                 None,
             )?
         };
@@ -715,6 +756,13 @@ impl Device {
 
     /// Blocks until the device is idle. The one piece of teardown a caller has to drive, and
     /// the only reason `vkDeviceWaitIdle` used to appear in an example.
+    /// How many errors the validation layer has reported, process-wide. Always zero unless
+    /// `Device::new` was asked for validation. Metal has no counterpart that reports rather
+    /// than aborting, so it answers zero.
+    pub fn validation_errors(&self) -> u64 {
+        VALIDATION_ERRORS.load(Ordering::Relaxed)
+    }
+
     pub fn wait_idle(&self) -> Result<(), Error> {
         unsafe { self.device.device_wait_idle()? };
         Ok(())
@@ -1871,23 +1919,23 @@ pub struct ResourceHeap {
 
 impl ResourceHeap {
     pub fn new(device: &Device, cap: u32) -> Result<Self, Error> {
-        let sampled_size = unsafe {
-            device
-                .descriptor_buffer_ext
-                .get_descriptor_set_layout_size(device.set_layouts[0])
-        };
-        let storage_size = unsafe {
-            device
-                .descriptor_buffer_ext
-                .get_descriptor_set_layout_size(device.set_layouts[1])
-        };
-        let sampler_size = unsafe {
-            device
-                .descriptor_buffer_ext
-                .get_descriptor_set_layout_size(device.set_layouts[2])
-        };
+        // The arrays are sized by the set layouts, which were built for `max_resources` slots.
+        // Asking for more than that used to allocate an undersized buffer and write past it.
+        if cap > device.bindless_cap {
+            return Err(Error::new(format!(
+                "a resource heap of {cap} slots is past this device's ceiling of {}",
+                device.bindless_cap
+            )));
+        }
+        // The layouts are variable-count, so their reported size is the hardware ceiling and
+        // is not what to allocate. One binding at binding 0 per set puts element `i` at
+        // `i * descriptor_size`, which is the same arithmetic `write_texture` does.
+        let sizes = device.descriptor_sizes;
+        let sampled_size = cap as u64 * sizes.sampled_image as u64;
+        let storage_size = cap as u64 * sizes.storage_image as u64;
+        let sampler_size = cap as u64 * sizes.sampler as u64;
 
-        let align = device.descriptor_sizes.offset_alignment;
+        let align = sizes.offset_alignment;
         let sampled_offset = 0;
         let storage_offset = (sampled_size + align - 1) & !(align - 1);
         let resources_size = storage_offset + storage_size;
@@ -1972,7 +2020,10 @@ impl ResourceHeap {
 
     pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, Error> {
         if self.head + len > self.cap {
-            return Err(Error::new("resource heap is full"));
+            return Err(Error::new(format!(
+                "a range of {len} slots does not fit: {} of {} are taken",
+                self.head, self.cap
+            )));
         }
         let base = self.head;
         self.head += len;

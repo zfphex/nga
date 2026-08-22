@@ -91,10 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let device = Device::new(cfg!(debug_assertions))?;
     eprintln!("device: {}", device.name());
-    eprintln!(
-        "resource heap holds up to {} descriptors",
-        device.max_resources()
-    );
+    eprintln!("this device holds up to {} descriptors", device.max_resources());
 
     let (mut width, mut height) = window.scaled_size();
     // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
@@ -113,7 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paint_pipeline = shaders.compute(bindless::PAINT.name, None)?;
 
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
-    let mut textures = ResourceHeap::new(&device, device.max_resources())?;
+    // One sampler plus one range of layers per quad. A heap costs descriptor bytes for the
+    // slots it is asked for, so this asks for what it uses rather than for the ceiling.
+    let mut textures = ResourceHeap::new(&device, 1 + QUADS * LAYERS)?;
 
     let mut quads = Vec::new();
     for quad in 0..QUADS {

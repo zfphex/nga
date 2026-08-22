@@ -524,6 +524,12 @@ impl Device {
     /// Metal's argument buffers have no descriptor ceiling, because the handle is the resource
     /// ID rather than an index into a fixed table. So this is the heap's own capacity, whatever
     /// it was asked for. Vulkan's answer is a driver limit.
+    /// Metal's API validation aborts rather than reporting, so there is nothing to count.
+    /// The name exists because the Vulkan side has it and a test may check either.
+    pub fn validation_errors(&self) -> u64 {
+        0
+    }
+
     pub fn max_resources(&self) -> u32 {
         u32::MAX
     }
@@ -982,7 +988,10 @@ impl ResourceHeap {
 
     pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, Error> {
         if self.head + len > self.cap {
-            return Err(Error::new("resource heap is full"));
+            return Err(Error::new(format!(
+                "a range of {len} slots does not fit: {} of {} are taken",
+                self.head, self.cap
+            )));
         }
         let base = self.head;
         self.head += len;
