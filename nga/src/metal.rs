@@ -697,12 +697,17 @@ pub struct HeapTexture {
     pub(crate) format: Format,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) mips: u32,
     pub(crate) alloc: Alloc,
 }
 
 impl HeapTexture {
     pub fn width(&self) -> u32 {
         self.width
+    }
+
+    pub fn mips(&self) -> u32 {
+        self.mips
     }
 
     pub fn height(&self) -> u32 {
@@ -721,6 +726,7 @@ pub struct TextureDesc {
     pub(crate) height: u32,
     pub(crate) usage: Usage,
     pub(crate) samples: u32,
+    pub(crate) mips: u32,
 }
 
 impl TextureDesc {
@@ -731,6 +737,7 @@ impl TextureDesc {
             height,
             usage: Usage::SAMPLED | Usage::COPY_DST,
             samples: 1,
+            mips: 1,
         }
     }
 
@@ -741,7 +748,24 @@ impl TextureDesc {
             height,
             usage: Usage::DEPTH_STENCIL,
             samples: 1,
+            mips: 1,
         }
+    }
+
+    /// Build the texture with `mips` levels, each half the extent of the one above and rounded
+    /// down to a minimum of one. Filling them is the caller's job: [`GpuHeap::upload`] takes the
+    /// level it writes. Metal does have `generateMipmaps` on a blit encoder, but nga does not
+    /// expose it, because Vulkan has no counterpart and levels computed offline filter better.
+    pub fn mips(mut self, mips: u32) -> Self {
+        let full = 32 - self.width.max(self.height).leading_zeros();
+        assert!(
+            (1..=full).contains(&mips),
+            "{mips} is outside the 1..={full} mip levels a {}x{} image has",
+            self.width,
+            self.height
+        );
+        self.mips = mips;
+        self
     }
 
     /// Extra usage beyond what the constructor implies: storage writes, colour attachment.
@@ -761,6 +785,9 @@ impl TextureDesc {
         );
         self.samples = samples;
         if samples > 1 {
+            // A multisample texture is one level by definition, and it is never sampled, so the
+            // count the caller may have asked for is dropped along with the usage.
+            self.mips = 1;
             self.usage = match self.usage.has(Usage::DEPTH_STENCIL) {
                 true => Usage::DEPTH_STENCIL,
                 false => Usage::COLOR,
@@ -775,6 +802,9 @@ impl TextureDesc {
         desc.set_width(self.width as usize);
         desc.set_height(self.height as usize);
         desc.set_usage(usage(self.usage));
+        if self.mips > 1 {
+            desc.set_mipmap_level_count(self.mips as usize);
+        }
         if self.samples > 1 {
             desc.set_texture_type(TextureType::D2Multisample);
             desc.set_sample_count(self.samples as usize);
@@ -855,6 +885,7 @@ impl GpuHeap {
             format: desc.format,
             width: desc.width,
             height: desc.height,
+            mips: desc.mips,
             alloc,
         })
     }
@@ -886,8 +917,15 @@ impl GpuHeap {
 
     /// `replaceRegion` writes straight into the texture. No staging buffer, no command buffer.
     /// This is the call `VK_EXT_host_image_copy` was meant to be.
-    pub fn upload(&mut self, texture: &HeapTexture, bytes: &[u8]) -> Result<(), Error> {
-        let (width, height) = (texture.width, texture.height);
+    pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+        if level >= texture.mips {
+            return Err(Error::new(format!(
+                "mip level {level} is outside the {} this texture has",
+                texture.mips
+            )));
+        }
+        let width = (texture.width >> level).max(1);
+        let height = (texture.height >> level).max(1);
         let texels = width as usize * height as usize;
         if texels == 0 || bytes.is_empty() {
             return Ok(());
@@ -901,7 +939,7 @@ impl GpuHeap {
         let row = bytes.len() / height as usize;
         texture.texture.replace_region(
             Region::new_2d(0, 0, width as usize, height as usize),
-            0,
+            level as usize,
             bytes,
             row,
         );

@@ -72,8 +72,13 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     let sampler = device.sampler(&SamplerDesc::nearest())?;
     let samp = resources.write_sampler(range, SLOTS - 2, &sampler);
 
-    let source = heap.alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE))?;
-    heap.upload(&source, &[0x20, 0x40, 0x60, 0xff].repeat((SIZE * SIZE) as usize))?;
+    // Two levels, both filled by the caller, so the mip plumbing is under the validation layer
+    // rather than only under a build. The sampler is nearest and the draw is at lod 0, so the
+    // colour read back is still level 0's.
+    let source =
+        heap.alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE).mips(2))?;
+    heap.upload(&source, 0, &[0x20, 0x40, 0x60, 0xff].repeat((SIZE * SIZE) as usize))?;
+    heap.upload(&source, 1, &[0x80, 0x80, 0x80, 0xff].repeat((SIZE * SIZE / 4) as usize))?;
     heap.transition(&source, Usage::SAMPLED);
     let texture = resources.write_texture(range, SLOTS - 1, &source);
 

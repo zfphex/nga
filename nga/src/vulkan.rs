@@ -241,7 +241,7 @@ pub(crate) fn image_barrier(
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
+                .level_count(vk::REMAINING_MIP_LEVELS)
                 .layer_count(1),
         )
 }
@@ -1143,6 +1143,7 @@ pub struct HeapTexture {
     pub(crate) format: vk::Format,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) mips: u32,
     pub(crate) alloc: Alloc,
     pub(crate) layout: Cell<vk::ImageLayout>,
 }
@@ -1154,6 +1155,10 @@ impl HeapTexture {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn mips(&self) -> u32 {
+        self.mips
     }
 
     pub fn format(&self) -> Format {
@@ -1169,6 +1174,7 @@ pub struct TextureDesc {
     pub(crate) usage: vk::ImageUsageFlags,
     pub(crate) aspect: vk::ImageAspectFlags,
     pub(crate) samples: vk::SampleCountFlags,
+    pub(crate) mips: u32,
 }
 
 impl TextureDesc {
@@ -1180,6 +1186,7 @@ impl TextureDesc {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect: vk::ImageAspectFlags::COLOR,
             samples: vk::SampleCountFlags::TYPE_1,
+            mips: 1,
         }
     }
 
@@ -1191,7 +1198,24 @@ impl TextureDesc {
             usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             aspect: vk::ImageAspectFlags::DEPTH,
             samples: vk::SampleCountFlags::TYPE_1,
+            mips: 1,
         }
+    }
+
+    /// Build the texture with `mips` levels, each half the extent of the one above and rounded
+    /// down to a minimum of one. Filling them is the caller's job: [`GpuHeap::upload`] takes the
+    /// level it writes, and there is no generate pass, because neither the blit unit here nor
+    /// Metal's works on every format, and levels computed offline filter better anyway.
+    pub fn mips(mut self, mips: u32) -> Self {
+        let full = 32 - self.width.max(self.height).leading_zeros();
+        assert!(
+            (1..=full).contains(&mips),
+            "{mips} is outside the 1..={full} mip levels a {}x{} image has",
+            self.width,
+            self.height
+        );
+        self.mips = mips;
+        self
     }
 
     /// Extra usage beyond what the constructor implies: storage writes, colour attachment.
@@ -1207,6 +1231,9 @@ impl TextureDesc {
     pub fn samples(mut self, samples: u32) -> Self {
         self.samples = sample_count(samples);
         if samples > 1 {
+            // A multisample image is one level by definition, and it is never sampled, so the
+            // count the caller may have asked for is dropped along with the usage.
+            self.mips = 1;
             self.usage &= !(vk::ImageUsageFlags::SAMPLED
                 | vk::ImageUsageFlags::STORAGE
                 | vk::ImageUsageFlags::TRANSFER_SRC
@@ -1565,7 +1592,7 @@ impl GpuHeap {
                 height: desc.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(desc.mips)
             .array_layers(1)
             .samples(desc.samples)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -1601,7 +1628,7 @@ impl GpuHeap {
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(desc.aspect)
-                            .level_count(1)
+                            .level_count(desc.mips)
                             .layer_count(1),
                     ),
                 None,
@@ -1613,6 +1640,7 @@ impl GpuHeap {
             format: desc.format,
             width: desc.width,
             height: desc.height,
+            mips: desc.mips,
             alloc,
             layout: Cell::new(vk::ImageLayout::UNDEFINED),
         })
@@ -1684,8 +1712,15 @@ impl GpuHeap {
     /// `HOST_TRANSFER_EXT` reports `memoryTypeBits == 0`, so no memory can back it, even though
     /// the extension is advertised and `R8G8B8A8_UNORM` claims `HOST_IMAGE_TRANSFER` support.
     /// See `examples/probe.rs`. So uploads stage through a buffer, exactly like `write`.
-    pub fn upload(&mut self, texture: &HeapTexture, bytes: &[u8]) -> Result<(), Error> {
-        let (width, height) = (texture.width, texture.height);
+    pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+        if level >= texture.mips {
+            return Err(Error::new(format!(
+                "mip level {level} is outside the {} this texture has",
+                texture.mips
+            )));
+        }
+        let width = (texture.width >> level).max(1);
+        let height = (texture.height >> level).max(1);
         let texels = width as usize * height as usize;
         if texels == 0 || bytes.is_empty() {
             return Ok(());
@@ -1697,7 +1732,7 @@ impl GpuHeap {
             )));
         }
         // The texel size comes from the caller's own slice rather than a format table: an upload
-        // is by definition the whole image, so the division is exact and every format works.
+        // is by definition a whole level, so the division is exact and every format works.
         let row = bytes.len() / height as usize;
         if row > self.uploader.ring.size {
             return Err(Error::new(format!(
@@ -1743,7 +1778,7 @@ impl GpuHeap {
                         buffer_offset: staged,
                         image_subresource: vk::ImageSubresourceLayers {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            mip_level: 0,
+                            mip_level: level,
                             base_array_layer: 0,
                             layer_count: 1,
                         },
@@ -1798,7 +1833,10 @@ impl GpuHeap {
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
+                    // Every level at once. A transition that covered only the level being
+                    // uploaded would leave the rest in whatever layout they were last in, and
+                    // the sampler reads all of them.
+                    .level_count(vk::REMAINING_MIP_LEVELS)
                     .layer_count(1),
             )
     }

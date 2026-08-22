@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 desc = desc.usage(Usage::STORAGE);
             }
             let texture = heap.alloc_texture(&desc)?;
-            heap.upload(&texture, &pixels)?;
+            heap.upload(&texture, 0, &pixels)?;
 
             // A painted texture is read and written in the same frame, so it stays in GENERAL.
             // Metal needs no such distinction, because there is no layout to choose.
