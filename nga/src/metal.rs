@@ -1137,6 +1137,9 @@ impl Shaders {
     }
 
     fn function(&self, name: &str, values: Option<&dyn Constants>) -> M4FunctionDescriptor {
+        // The emitter renames anything MSL reserves, so a pipeline naming its stage `vertex`
+        // has to ask the library for the same spelling `msl.rs` printed.
+        let name = &crate::msl::escape(name);
         let function = M4LibraryFunctionDescriptor::new();
         function.set_name(name);
         function.set_library(Some(&self.library));

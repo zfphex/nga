@@ -10,6 +10,27 @@ use crate::TypeAbi;
 
 pub const PRELUDE: &str = include_str!("prelude.metal");
 
+/// Names Rust allows and MSL does not. A shader function called `vertex` is perfectly good
+/// Rust and a syntax error in Metal, so any identifier that lands on one of these is emitted
+/// with a trailing underscore. `metal.rs` runs the same pass on the name a pipeline asks for,
+/// which is why this is public: the two spellings have to agree.
+pub fn escape(name: &str) -> String {
+    const RESERVED: &[&str] = &[
+        "vertex", "fragment", "kernel", "constant", "device", "threadgroup", "thread",
+        "threadgroup_imageblock", "ray_data", "object_data", "half", "float", "int", "uint",
+        "short", "ushort", "char", "uchar", "long", "ulong", "bool", "void", "sampler",
+        "texture", "packed_float3", "auto", "class", "template", "typename", "namespace",
+        "using", "public", "private", "protected", "operator", "new", "delete", "this",
+        "inline", "extern", "static", "register", "volatile", "union", "signed", "unsigned",
+        "sizeof", "typedef", "goto", "switch", "case", "default", "do", "try", "catch",
+        "throw", "friend", "virtual", "explicit", "export", "asm",
+    ];
+    match RESERVED.contains(&name) {
+        true => format!("{name}_"),
+        false => name.into(),
+    }
+}
+
 /// Everything one `MTLLibrary` holds: the entry points asked for, and every function they reach.
 pub fn module(entries: &[&'static GpuFn]) -> String {
     let mut functions: Vec<&'static GpuFn> = Vec::new();
@@ -244,7 +265,7 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
         let shadowed = f.locals[..index].iter().any(|other| other.name == local.name);
         names.push(match shadowed {
             true => format!("{}_{index}", local.name),
-            false => local.name.into(),
+            false => escape(local.name),
         });
     }
 
@@ -257,20 +278,20 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
             ir::Binding::Root => {
                 root = format!(
                     "    {} = ({})nga_push_data->root;\n",
-                    decl(param.ty, param.name, true),
+                    decl(param.ty, &escape(param.name), true),
                     name(param.ty, true)
                 );
                 String::new()
             }
             ir::Binding::Builtin(b) => {
-                format!("{} {}", decl(param.ty, param.name, false), builtin(b))
+                format!("{} {}", decl(param.ty, &escape(param.name), false), builtin(b))
             }
             ir::Binding::Constants => String::new(),
             // A stage-in struct carries no binding of its own; the fragment stage takes one.
             _ if f.stage == Stage::Fragment => {
-                format!("{} [[stage_in]]", decl(param.ty, param.name, false))
+                format!("{} [[stage_in]]", decl(param.ty, &escape(param.name), false))
             }
-            _ => decl(param.ty, param.name, false),
+            _ => decl(param.ty, &escape(param.name), false),
         });
     }
     arguments.retain(|argument| !argument.is_empty());
@@ -296,7 +317,7 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
     w.out += &format!(
         "\n{qualifier}{} {}({}) {{\n{root}",
         name(f.ret, false),
-        f.name,
+        escape(f.name),
         arguments.join(", ")
     );
     stmt(&mut w, f.body, 1);
@@ -431,7 +452,7 @@ fn coerced(w: &mut W, node: u32, want: Ty) -> String {
 fn expr(w: &mut W, node: u32) -> String {
     match w.f.nodes[node as usize] {
         Node::Local(i) => w.names[i as usize].clone(),
-        Node::Param(i) => w.f.params[i as usize].name.into(),
+        Node::Param(i) => escape(w.f.params[i as usize].name),
         Node::Const(Const::Bool(value)) => value.to_string(),
         Node::Const(Const::Int(value)) => match w.types.nodes[node as usize] {
             Ty::Scalar(Prim::U32) => format!("{value}u"),
@@ -529,7 +550,7 @@ fn expr(w: &mut W, node: u32) -> String {
                 .enumerate()
                 .map(|(i, &a)| coerced(w, a, callee.params[i].ty))
                 .collect();
-            format!("{}({})", callee.name, args.join(", "))
+            format!("{}({})", escape(callee.name), args.join(", "))
         }
         Node::Intrinsic { op, args } => intrinsic(w, op, args),
         other => panic!("{other:?} is not an MSL expression"),

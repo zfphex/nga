@@ -207,7 +207,7 @@ mod commands {
         let object_list = storage.alloc_slice(&objects).unwrap();
         let object_list: Gpu<'static, Object> = Gpu::new(object_list.gpu.0.get());
 
-        let mut heap = GpuHeap::new(&device, 32 * 1024 * 1024)?;
+        let mut heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
         let draws = heap.alloc_buffer(DRAW_DATA * OBJECTS as usize)?;
         let mut depth = heap.alloc_texture(&TextureDesc::depth(
             Format::D32Float,
@@ -226,6 +226,10 @@ mod commands {
             }
 
             window.draw(|win| {
+                // Before anything allocates: a live resize can run several times per frame, and
+                // each one hands the old depth target over to be freed later.
+                heap.retire(ctx.completed());
+
                 let (new_width, new_height) = win.scaled_size();
                 if (new_width, new_height) != (width, height) || resized {
                     (width, height) = (new_width, new_height);
@@ -266,7 +270,6 @@ mod commands {
                     [0.0, 0.0, 0.5, 1.0],
                 ]);
 
-                heap.retire(ctx.completed());
                 let mut frame = ctx.begin_frame().unwrap();
                 let mut rec = frame.recorder();
 
