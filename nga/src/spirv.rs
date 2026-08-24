@@ -286,6 +286,9 @@ impl M {
     }
 
     fn type_of(&mut self, ty: Ty, laid: bool) -> u32 {
+        if let Ty::PackedVec(p, n) = ty {
+            return self.type_of(Ty::Vec(p, n), laid);
+        }
         // Only aggregates carry layout, so everything else has one id either way.
         let laid = laid && matches!(ty, Ty::Struct(_) | Ty::Array(..));
         if let Some((.., id)) = self
@@ -331,6 +334,7 @@ impl M {
                 inst(&mut self.globals, OP_TYPE_VECTOR, &[id, element, n as u32]);
                 id
             }
+            Ty::PackedVec(..) => unreachable!(),
             Ty::Mat(columns, rows) => {
                 let column = self.ty(Ty::Vec(Prim::F32, rows));
                 let id = self.id();
@@ -403,7 +407,12 @@ impl M {
                 inst(
                     &mut self.decorations,
                     OP_MEMBER_DECORATE,
-                    &[id, index as u32, DEC_MATRIX_STRIDE, 4 * rows as u32],
+                    &[
+                        id,
+                        index as u32,
+                        DEC_MATRIX_STRIDE,
+                        if rows == 3 { 16 } else { 4 * rows as u32 },
+                    ],
                 );
             }
         }
@@ -1405,7 +1414,7 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
             let base_ty = w.types.nodes[base as usize];
             match base_ty.deref() {
                 // A swizzle is a shuffle of a value, never a place.
-                Ty::Vec(..) => {
+                Ty::Vec(..) | Ty::PackedVec(..) => {
                     let source = value(m, w, base);
                     let type_id = m.ty(ty);
                     let id = m.id();
@@ -1451,13 +1460,13 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
         Node::Cast { value: source, to } => coerced(m, w, source, to),
         Node::Construct { ty, args } => {
             let element = match ty {
-                Ty::Vec(p, _) => Ty::Scalar(p),
+                Ty::Vec(p, _) | Ty::PackedVec(p, _) => Ty::Scalar(p),
                 Ty::Array(element, _) => *element,
                 other => other,
             };
             let mut components: Vec<u32> = args.iter().map(|&a| coerced(m, w, a, element)).collect();
             // `f32x4::splat(x)` is one component standing for all of them.
-            if let Ty::Vec(_, n) = ty {
+            if let Ty::Vec(_, n) | Ty::PackedVec(_, n) = ty {
                 while components.len() < n as usize {
                     components.push(components[0]);
                 }
@@ -1604,6 +1613,9 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
         let semantics = m.constant(Ty::U32, 0x2 | 0x40 | 0x100);
         inst(&mut w.body, OP_CONTROL_BARRIER, &[scope, scope, semantics]);
         return 0;
+    }
+    if op == Intrinsic::Unpack {
+        return value(m, w, args[0]);
     }
 
     let glsl = |m: &mut M, w: &mut W, number: u32, operands: &[u32]| {

@@ -49,6 +49,8 @@ pub enum Ty {
     Void,
     Scalar(Prim),
     Vec(Prim, u8),
+    /// A compact vector used only in device memory. Shader code converts it to `Vec` explicitly.
+    PackedVec(Prim, u8),
     /// Columns, rows. `f32` only, which is all either backend spells.
     Mat(u8, u8),
     Array(&'static Ty, u32),
@@ -75,7 +77,7 @@ impl Ty {
     /// The element type of a vector or matrix column, and the scalar itself for a scalar.
     pub fn prim(self) -> Prim {
         match self {
-            Ty::Scalar(p) | Ty::Vec(p, _) => p,
+            Ty::Scalar(p) | Ty::Vec(p, _) | Ty::PackedVec(p, _) => p,
             Ty::Mat(..) | Ty::FloatLit => Prim::F32,
             Ty::IntLit => Prim::I32,
             _ => panic!("{self:?} has no scalar type"),
@@ -86,9 +88,9 @@ impl Ty {
         match self {
             Ty::Void => 0,
             Ty::Scalar(p) => prim_size(p),
-            // `f32x3` is twelve bytes, matching Rust and the scalar block layout both backends
-            // are set up for. Nothing here rounds a three-vector up to four.
-            Ty::Vec(p, n) => prim_size(p) * n as usize,
+            Ty::Vec(p, 3) => prim_size(p) * 4,
+            Ty::Vec(p, n) | Ty::PackedVec(p, n) => prim_size(p) * n as usize,
+            Ty::Mat(c, 3) => 16 * c as usize,
             Ty::Mat(c, r) => 4 * c as usize * r as usize,
             Ty::Array(e, n) => e.size() * n as usize,
             Ty::Struct(abi) => abi.size,
@@ -99,11 +101,11 @@ impl Ty {
 
     pub fn align(self) -> usize {
         match self {
-            // A three-vector aligns to its scalar, which is what `packed_float3` and SPIR-V's
-            // scalar block layout both say, and what makes it twelve bytes rather than sixteen.
-            Ty::Vec(_, 3) => prim_size(self.prim()),
+            Ty::Vec(p, 3) => prim_size(p) * 4,
             Ty::Vec(p, n) => prim_size(p) * n as usize,
+            Ty::PackedVec(p, _) => prim_size(p),
             Ty::Scalar(p) => prim_size(p),
+            Ty::Mat(_, 3) => 16,
             Ty::Mat(..) => 4,
             Ty::Array(e, _) => e.align(),
             Ty::Struct(abi) => abi.align,
@@ -176,6 +178,7 @@ impl BinOp {
 /// maps it to its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intrinsic {
+    Unpack,
     Sqrt,
     InverseSqrt,
     Abs,
@@ -532,7 +535,7 @@ fn coerce(f: &GpuFn, types: &mut Types, node: u32, want: Ty) {
         return;
     }
     types.nodes[node as usize] = match want {
-        Ty::Vec(p, _) => Ty::Scalar(p),
+        Ty::Vec(p, _) | Ty::PackedVec(p, _) => Ty::Scalar(p),
         other => other,
     };
     // The children of a constructed value are literals in their own right.
@@ -555,6 +558,8 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
             match base {
                 Ty::Vec(p, _) if name.len() == 1 => Ty::Scalar(p),
                 Ty::Vec(p, _) => Ty::Vec(p, name.len() as u8),
+                Ty::PackedVec(p, _) if name.len() == 1 => Ty::Scalar(p),
+                Ty::PackedVec(p, _) => Ty::Vec(p, name.len() as u8),
                 Ty::Mat(_, r) => Ty::Vec(Prim::F32, r),
                 Ty::Struct(abi) => field(abi, name).ty,
                 other => panic!("`.{name}` on {other:?}"),
@@ -570,6 +575,7 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
                 Ty::Ptr { pointee, .. } => *pointee,
                 Ty::Array(e, _) => *e,
                 Ty::Vec(p, _) => Ty::Scalar(p),
+                Ty::PackedVec(p, _) => Ty::Scalar(p),
                 Ty::Mat(_, r) => Ty::Vec(Prim::F32, r),
                 other => other,
             }
@@ -657,6 +663,10 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
 fn intrinsic(op: Intrinsic, first: Ty, f: &GpuFn, types: &Types, args: &[u32]) -> Ty {
     let _ = f;
     match op {
+        Intrinsic::Unpack => match first {
+            Ty::PackedVec(p, n) => Ty::Vec(p, n),
+            other => panic!("unpack({other:?})"),
+        },
         Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance => Ty::Scalar(first.prim()),
         Intrinsic::Any | Intrinsic::All => Ty::BOOL,
         Intrinsic::Barrier | Intrinsic::Store => Ty::Void,

@@ -153,7 +153,7 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
             for (index, field) in abi.fields.iter().enumerate() {
                 out += &format!(
                     "constant {} [[function_constant({index})]];\n",
-                    decl(field.ty, &constant_name(abi, field.name), false)
+                    decl(field.ty, &constant_name(abi, field.name))
                 );
             }
         }
@@ -217,47 +217,36 @@ fn handle(kind: HandleKind) -> &'static str {
     }
 }
 
-/// `packed` is the difference between a struct member and everything else: a three-vector is
-/// twelve bytes in memory and sixteen in a register, and only the memory one may be indexed by
-/// a byte offset Rust chose.
-fn name(ty: Ty, packed: bool) -> String {
+fn name(ty: Ty) -> String {
     match ty {
         Ty::Void => "void".into(),
         Ty::Scalar(p) => prim(p).into(),
-        Ty::Vec(p, 3) if packed => format!("packed_{}3", prim(p)),
         Ty::Vec(p, n) => format!("{}{n}", prim(p)),
+        Ty::PackedVec(p, n) => format!("packed_{}{n}", prim(p)),
         Ty::Mat(c, r) => format!("float{c}x{r}"),
         Ty::Struct(abi) => abi.name.into(),
         Ty::Handle(kind) => handle(kind).into(),
         Ty::Ptr { mutable, pointee } => match mutable {
-            true => format!("device {}*", name(*pointee, true)),
-            false => format!("device const {}*", name(*pointee, true)),
+            true => format!("device {}*", name(*pointee)),
+            false => format!("device const {}*", name(*pointee)),
         },
         // An array only ever appears through `decl`, which puts the length after the name.
-        Ty::Array(element, _) => name(*element, packed),
+        Ty::Array(element, _) => name(*element),
         other => panic!("{other:?} has no MSL spelling"),
     }
 }
 
 /// C declarator order: an array's length belongs to the name, not the type.
-fn decl(ty: Ty, binding: &str, packed: bool) -> String {
+fn decl(ty: Ty, binding: &str) -> String {
     match ty {
-        Ty::Array(element, count) => format!("{} {binding}[{count}]", name(*element, packed)),
-        // Native `float3x3` columns are sixteen bytes. Rust's `f32x3x3` is three packed
-        // three-vectors, so a memory member has to be that array or the columns land on the
-        // wrong bytes.
-        Ty::Mat(columns, 3) if packed => format!("packed_float3 {binding}[{columns}]"),
-        other => format!("{} {binding}", name(other, packed)),
+        Ty::Array(element, count) => format!("{} {binding}[{count}]", name(*element)),
+        other => format!("{} {binding}", name(other)),
     }
 }
 
-/// How many bytes the MSL spelling of a packed member actually occupies. `f32x3x3` is 48
-/// bytes in Rust because of `align(16)`, but `packed_float3[3]` is 36, so the emitter has to
-/// write the other 12 or every later field — and the array stride — slides.
-fn emitted_size(ty: Ty, packed: bool) -> usize {
+fn emitted_size(ty: Ty) -> usize {
     match ty {
-        Ty::Mat(columns, 3) if packed => 12 * columns as usize,
-        Ty::Array(element, count) => emitted_size(*element, packed) * count as usize,
+        Ty::Array(element, count) => emitted_size(*element) * count as usize,
         Ty::Struct(abi) => abi.size,
         other => other.size(),
     }
@@ -281,14 +270,14 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
                 "position" => " [[position]]".into(),
                 _ => format!(" [[user(nga{index})]]{flat}"),
             };
-            out += &format!("    {}{attribute};\n", decl(field.ty, field.name, false));
+            out += &format!("    {}{attribute};\n", decl(field.ty, field.name));
             continue;
         }
         if field.offset > cursor {
             out += &padding(field.offset - cursor, &mut pad);
         }
-        out += &format!("    {};\n", decl(field.ty, field.name, true));
-        let occupied = emitted_size(field.ty, true);
+        out += &format!("    {};\n", decl(field.ty, field.name));
+        let occupied = emitted_size(field.ty);
         if field.size > occupied {
             out += &padding(field.size - occupied, &mut pad);
         }
@@ -367,15 +356,15 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
             ir::Binding::Root => {
                 root = format!(
                     "    {} = ({})nga_push_data->root;\n",
-                    decl(param.ty, &escape(param.name), true),
-                    name(param.ty, true)
+                    decl(param.ty, &escape(param.name)),
+                    name(param.ty)
                 );
                 String::new()
             }
             ir::Binding::Builtin(b) => {
                 format!(
                     "{} {}",
-                    decl(param.ty, &escape(param.name), false),
+                    decl(param.ty, &escape(param.name)),
                     builtin(b)
                 )
             }
@@ -384,10 +373,10 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
             _ if f.stage == Stage::Fragment => {
                 format!(
                     "{} [[stage_in]]",
-                    decl(param.ty, &escape(param.name), false)
+                    decl(param.ty, &escape(param.name))
                 )
             }
-            _ => decl(param.ty, &escape(param.name), false),
+            _ => decl(param.ty, &escape(param.name)),
         });
     }
     arguments.retain(|argument| !argument.is_empty());
@@ -412,7 +401,7 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
     // business and appear nowhere in the source.
     w.out += &format!(
         "\n{qualifier}{} {}({}) {{\n{root}",
-        name(f.ret, false),
+        name(f.ret),
         escape(f.name),
         arguments.join(", ")
     );
@@ -441,7 +430,7 @@ fn stmt(w: &mut W, node: u32, depth: usize) {
             let value = coerced(w, value, ty);
             w.out += &format!(
                 "{pad}{} = {value};\n",
-                decl(ty, &w.names[local as usize].clone(), false)
+                decl(ty, &w.names[local as usize].clone())
             );
         }
         Node::Store { place, value } => {
@@ -485,7 +474,7 @@ fn stmt(w: &mut W, node: u32, depth: usize) {
             let end = expr(w, end);
             w.out += &format!(
                 "{pad}for ({} = {start}; {name} < {end}; {name}++) {{\n",
-                decl(ty, &name, false)
+                decl(ty, &name)
             );
             stmt(w, body, depth + 1);
             w.out += &format!("{pad}}}\n");
@@ -532,40 +521,6 @@ fn binary(op: BinOp) -> &'static str {
     }
 }
 
-/// A packed three-vector or 3-row matrix as a register value. `float3(packed)` is the single-
-/// float constructor after an implicit conversion to `.x`, which is why a debug normal view
-/// showed magenta and cyan: Y and Z were zero. Columns are named the same way so a packed
-/// `float3x3` is not read with Metal's 16-byte stride.
-fn unpack_packed(ty: Ty, value: &str) -> String {
-    match ty {
-        Ty::Vec(p, 3) => format!("{}3({value}.x, {value}.y, {value}.z)", prim(p)),
-        Ty::Mat(columns, 3) => {
-            let cols: Vec<String> = (0..columns)
-                .map(|i| format!("float3({value}[{i}].x, {value}[{i}].y, {value}[{i}].z)"))
-                .collect();
-            format!("float{columns}x3({})", cols.join(", "))
-        }
-        other => panic!("unpack_packed({other:?})"),
-    }
-}
-
-/// Memory three-vectors are packed; stage interfaces and locals already use `float3`.
-fn packed_load(w: &W, node: u32) -> bool {
-    match w.f.nodes[node as usize] {
-        Node::Field { base, name } => match w.types.nodes[base as usize].deref() {
-            Ty::Struct(abi) => {
-                if w.io.iter().any(|other| std::ptr::eq(*other, abi)) {
-                    return false;
-                }
-                matches!(ir::field(abi, name).ty, Ty::Vec(_, 3) | Ty::Mat(_, 3))
-            }
-            _ => false,
-        },
-        Node::Index { .. } => matches!(w.types.nodes[node as usize], Ty::Vec(_, 3) | Ty::Mat(_, 3)),
-        _ => false,
-    }
-}
-
 /// A value where the type around it is fixed. Rust inferred the shader's integer literals for
 /// itself and `infer` only approximates that, so wherever the recorded types disagree the
 /// conversion is written out rather than left to a language that may not do it silently — MSL
@@ -575,13 +530,9 @@ fn coerced(w: &mut W, node: u32, want: Ty) -> String {
     let convertible =
         matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
     let value = expr(w, node);
-    let value = match packed_load(w, node) {
-        true => unpack_packed(have, &value),
-        false => value,
-    };
     match have == want || !convertible {
         true => value,
-        false => format!("{}({value})", name(want, false)),
+        false => format!("{}({value})", name(want)),
     }
 }
 
@@ -643,24 +594,19 @@ fn expr(w: &mut W, node: u32) -> String {
             format!("({lhs} {} {rhs})", binary(op))
         }
         Node::Cast { value, to } => {
-            let have = w.types.nodes[value as usize];
             let text = expr(w, value);
-            let text = match packed_load(w, value) {
-                true => unpack_packed(have, &text),
-                false => text,
-            };
-            format!("{}({text})", name(to, false))
+            format!("{}({text})", name(to))
         }
         Node::Construct { ty, args } => {
             let element = match ty {
-                Ty::Vec(p, _) => Ty::Scalar(p),
+                Ty::Vec(p, _) | Ty::PackedVec(p, _) => Ty::Scalar(p),
                 Ty::Array(element, _) => *element,
                 other => other,
             };
             let args: Vec<String> = args.iter().map(|&a| coerced(w, a, element)).collect();
             match ty {
                 Ty::Array(..) => format!("{{ {} }}", args.join(", ")),
-                _ => format!("{}({})", name(ty, false), args.join(", ")),
+                _ => format!("{}({})", name(ty), args.join(", ")),
             }
         }
         Node::StructLit { ty, fields } => {
@@ -709,6 +655,10 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         .collect();
     let call = |name: &str| format!("{name}({})", a.join(", "));
     match op {
+        Intrinsic::Unpack => {
+            let p = w.types.nodes[args[0] as usize].prim();
+            format!("{}3({}.x, {}.y, {}.z)", prim(p), a[0], a[0], a[0])
+        }
         Intrinsic::Sqrt => call("sqrt"),
         Intrinsic::InverseSqrt => call("rsqrt"),
         Intrinsic::Abs => call("abs"),

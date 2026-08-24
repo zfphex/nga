@@ -102,6 +102,7 @@ fn named_ty(name: &str) -> String {
         // `usize` reaches the IR only as an array index, which is a `uint` on both targets. It
         // exists here because `[T; N]` indexes with one and nothing else would compile.
         "usize" => prim("U32"),
+        "packed_f32x3" => "::nga::ir::Ty::PackedVec(::nga::ir::Prim::F32, 3)".into(),
         "f32x3x3" => "::nga::ir::Ty::Mat(3, 3)".into(),
         "f32x4x4" => "::nga::ir::Ty::Mat(4, 4)".into(),
         // An atomic is a `uint` the shader only ever touches through an atomic intrinsic. It
@@ -151,6 +152,7 @@ fn vector_spelling(name: &str) -> Option<(&'static str, u8)> {
 
 fn intrinsic(name: &str) -> Option<&'static str> {
     Some(match name {
+        "unpack" => "Unpack",
         "sqrt" => "Sqrt",
         "inverse_sqrt" | "rsqrt" => "InverseSqrt",
         "abs" => "Abs",

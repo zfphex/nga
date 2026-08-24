@@ -12,36 +12,45 @@
 use crate::{Sampler, Scalar};
 
 macro_rules! vector {
-    ($($name:ident: $element:ty as $scalar:ident, align $align:tt, $($field:ident),+;)*) => {
+    ($($name:ident: $element:ty as $scalar:ident, align $align:tt, $($field:ident),+ $([pad $pad:ident])?;)*) => {
         $(
             #[repr(C, align($align))]
             #[derive(Clone, Copy, Debug, Default, PartialEq)]
             #[allow(non_camel_case_types)]
-            pub struct $name { $(pub $field: $element),+ }
+            pub struct $name {
+                $(pub $field: $element),+,
+                $($pad: $element,)?
+            }
 
             /// The array form the host used before the fields existed, kept so a struct
             /// literal reads the same on both sides of the ABI.
             #[allow(non_snake_case)]
             pub const fn $name(components: [$element; count!($($field)+)]) -> $name {
                 let [$($field),+] = components;
-                $name { $($field),+ }
+                $name { $($field),+, $($pad: 0 as $element,)? }
             }
 
             impl $name {
                 pub const fn new($($field: $element),+) -> Self {
-                    Self { $($field),+ }
+                    Self { $($field),+, $($pad: 0 as $element,)? }
                 }
 
                 pub const fn splat(value: $element) -> Self {
-                    Self { $($field: value),+ }
+                    Self { $($field: value),+, $($pad: 0 as $element,)? }
                 }
 
                 pub fn min(self, other: Self) -> Self {
-                    Self { $($field: if other.$field < self.$field { other.$field } else { self.$field }),+ }
+                    Self {
+                        $($field: if other.$field < self.$field { other.$field } else { self.$field }),+,
+                        $($pad: 0 as $element,)?
+                    }
                 }
 
                 pub fn max(self, other: Self) -> Self {
-                    Self { $($field: if other.$field > self.$field { other.$field } else { self.$field }),+ }
+                    Self {
+                        $($field: if other.$field > self.$field { other.$field } else { self.$field }),+,
+                        $($pad: 0 as $element,)?
+                    }
                 }
 
                 pub fn clamp(self, low: Self, high: Self) -> Self {
@@ -55,42 +64,58 @@ macro_rules! vector {
 
             impl core::ops::Add for $name {
                 type Output = Self;
-                fn add(self, other: Self) -> Self { Self { $($field: self.$field + other.$field),+ } }
+                fn add(self, other: Self) -> Self {
+                    Self { $($field: self.$field + other.$field),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Sub for $name {
                 type Output = Self;
-                fn sub(self, other: Self) -> Self { Self { $($field: self.$field - other.$field),+ } }
+                fn sub(self, other: Self) -> Self {
+                    Self { $($field: self.$field - other.$field),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Mul for $name {
                 type Output = Self;
-                fn mul(self, other: Self) -> Self { Self { $($field: self.$field * other.$field),+ } }
+                fn mul(self, other: Self) -> Self {
+                    Self { $($field: self.$field * other.$field),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Div for $name {
                 type Output = Self;
-                fn div(self, other: Self) -> Self { Self { $($field: self.$field / other.$field),+ } }
+                fn div(self, other: Self) -> Self {
+                    Self { $($field: self.$field / other.$field),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Mul<$element> for $name {
                 type Output = Self;
-                fn mul(self, other: $element) -> Self { Self { $($field: self.$field * other),+ } }
+                fn mul(self, other: $element) -> Self {
+                    Self { $($field: self.$field * other),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Div<$element> for $name {
                 type Output = Self;
-                fn div(self, other: $element) -> Self { Self { $($field: self.$field / other),+ } }
+                fn div(self, other: $element) -> Self {
+                    Self { $($field: self.$field / other),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Add<$element> for $name {
                 type Output = Self;
-                fn add(self, other: $element) -> Self { Self { $($field: self.$field + other),+ } }
+                fn add(self, other: $element) -> Self {
+                    Self { $($field: self.$field + other),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Sub<$element> for $name {
                 type Output = Self;
-                fn sub(self, other: $element) -> Self { Self { $($field: self.$field - other),+ } }
+                fn sub(self, other: $element) -> Self {
+                    Self { $($field: self.$field - other),+, $($pad: 0 as $element,)? }
+                }
             }
 
             impl core::ops::Mul<$name> for $element {
@@ -123,18 +148,44 @@ macro_rules! count {
 }
 
 vector! {
-    // A three-vector is twelve bytes and four-byte aligned, not sixteen: that is what
-    // `packed_float3` is on Metal and what scalar block layout gives on SPIR-V. Rust's own
-    // `align(16)` would have made the host struct disagree with both.
     f32x2: f32 as F32x2, align 8, x, y;
-    f32x3: f32 as F32x3, align 4, x, y, z;
+    // Register vectors use the native ABI on both targets. The explicit fourth word also keeps
+    // host uploads from copying uninitialised tail padding.
+    f32x3: f32 as F32x3, align 16, x, y, z [pad _pad];
     f32x4: f32 as F32x4, align 16, x, y, z, w;
     u32x2: u32 as U32x2, align 8, x, y;
-    u32x3: u32 as U32x3, align 4, x, y, z;
+    u32x3: u32 as U32x3, align 16, x, y, z [pad _pad];
     u32x4: u32 as U32x4, align 16, x, y, z, w;
     i32x2: i32 as I32x2, align 8, x, y;
-    i32x3: i32 as I32x3, align 4, x, y, z;
+    i32x3: i32 as I32x3, align 16, x, y, z [pad _pad];
     i32x4: i32 as I32x4, align 16, x, y, z, w;
+}
+
+/// A twelve-byte float vector for bandwidth-sensitive device memory. Shader arithmetic uses
+/// [`f32x3`]; call [`packed_f32x3::unpack`] once after loading this type.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(non_camel_case_types)]
+pub struct packed_f32x3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[allow(non_snake_case)]
+pub const fn packed_f32x3(components: [f32; 3]) -> packed_f32x3 {
+    let [x, y, z] = components;
+    packed_f32x3 { x, y, z }
+}
+
+impl packed_f32x3 {
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    pub const fn unpack(self) -> f32x3 {
+        f32x3::new(self.x, self.y, self.z)
+    }
 }
 
 /// The float-only half of the vocabulary. Written out per width because the component count is
@@ -159,20 +210,20 @@ macro_rules! float_vector {
                     self / self.length()
                 }
 
-                pub fn abs(self) -> Self { Self { $($field: self.$field.abs()),+ } }
-                pub fn floor(self) -> Self { Self { $($field: self.$field.floor()),+ } }
-                pub fn ceil(self) -> Self { Self { $($field: self.$field.ceil()),+ } }
-                pub fn round(self) -> Self { Self { $($field: self.$field.round()),+ } }
-                pub fn fract(self) -> Self { Self { $($field: self.$field.fract()),+ } }
-                pub fn sqrt(self) -> Self { Self { $($field: self.$field.sqrt()),+ } }
-                pub fn sign(self) -> Self { Self { $($field: self.$field.signum()),+ } }
-                pub fn exp(self) -> Self { Self { $($field: self.$field.exp()),+ } }
-                pub fn log(self) -> Self { Self { $($field: self.$field.ln()),+ } }
-                pub fn sin(self) -> Self { Self { $($field: self.$field.sin()),+ } }
-                pub fn cos(self) -> Self { Self { $($field: self.$field.cos()),+ } }
+                pub fn abs(self) -> Self { Self::new($(self.$field.abs()),+) }
+                pub fn floor(self) -> Self { Self::new($(self.$field.floor()),+) }
+                pub fn ceil(self) -> Self { Self::new($(self.$field.ceil()),+) }
+                pub fn round(self) -> Self { Self::new($(self.$field.round()),+) }
+                pub fn fract(self) -> Self { Self::new($(self.$field.fract()),+) }
+                pub fn sqrt(self) -> Self { Self::new($(self.$field.sqrt()),+) }
+                pub fn sign(self) -> Self { Self::new($(self.$field.signum()),+) }
+                pub fn exp(self) -> Self { Self::new($(self.$field.exp()),+) }
+                pub fn log(self) -> Self { Self::new($(self.$field.ln()),+) }
+                pub fn sin(self) -> Self { Self::new($(self.$field.sin()),+) }
+                pub fn cos(self) -> Self { Self::new($(self.$field.cos()),+) }
 
                 pub fn pow(self, other: Self) -> Self {
-                    Self { $($field: self.$field.powf(other.$field)),+ }
+                    Self::new($(self.$field.powf(other.$field)),+)
                 }
 
                 pub fn mix(self, other: Self, t: f32) -> Self {
@@ -180,7 +231,7 @@ macro_rules! float_vector {
                 }
 
                 pub fn step(self, edge: Self) -> Self {
-                    Self { $($field: (self.$field >= edge.$field) as u32 as f32),+ }
+                    Self::new($((self.$field >= edge.$field) as u32 as f32),+)
                 }
 
                 pub fn smoothstep(self, low: Self, high: Self) -> Self {
@@ -195,7 +246,7 @@ macro_rules! float_vector {
 
             impl core::ops::Neg for $name {
                 type Output = Self;
-                fn neg(self) -> Self { Self { $($field: -self.$field),+ } }
+                fn neg(self) -> Self { Self::new($(-self.$field),+) }
             }
         )*
     };

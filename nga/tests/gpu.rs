@@ -4,7 +4,7 @@
 use nga::ir::{self, Stage, Ty};
 use nga::*;
 use shader::*;
-use std::mem::offset_of;
+use std::mem::{align_of, offset_of, size_of};
 
 /// One tag for the whole module: every struct in it is shared with the GPU and every function
 /// is a shader, so nothing inside carries a tag of its own except the stage of an entry point.
@@ -227,14 +227,14 @@ mod packed {
     use nga::*;
 
     pub struct Mesh {
-        pub normal: f32x3,
+        pub normal: packed_f32x3,
         pub count: u32,
         pub transform: f32x3x3,
     }
 
     #[compute(64)]
     fn packed_math(root: Gpu<'static, Mesh>, #[thread_id] id: u32x3) {
-        let n = root.transform.mul(root.normal);
+        let n = root.transform.mul(root.normal.unpack());
         let scale = n.length().max(1e-4);
         let mut acc = n.x * id.x as f32;
         for i in 0..root.count {
@@ -245,7 +245,18 @@ mod packed {
 }
 
 #[test]
-fn packed_vec3_and_scientific_literals_are_msl() {
+fn explicit_packed_vec3_and_native_matrix_are_msl() {
+    assert_eq!(
+        (
+            size_of::<packed_f32x3>(),
+            align_of::<packed_f32x3>(),
+            size_of::<f32x3>(),
+            align_of::<f32x3>(),
+            size_of::<f32x3x3>(),
+            align_of::<f32x3x3>(),
+        ),
+        (12, 4, 16, 16, 48, 16),
+    );
     let types = ir::infer(&packed::PACKED_MATH);
     assert!(
         types.locals.iter().any(|ty| *ty == Ty::U32),
@@ -255,22 +266,20 @@ fn packed_vec3_and_scientific_literals_are_msl() {
 
     let source = nga::msl::module(&[&packed::PACKED_MATH]);
     assert!(
-        source.contains("packed_float3 transform[3]"),
-        "a memory f32x3x3 must be packed columns, not float3x3:\n{source}"
+        source.contains("packed_float3 normal"),
+        "an explicit packed vector must stay twelve bytes:\n{source}"
+    );
+    assert!(
+        source.contains("float3x3 transform"),
+        "f32x3x3 must use Metal's native matrix ABI:\n{source}"
     );
     assert!(
         source.contains("static_assert(sizeof(Mesh) == "),
         "Mesh must assert its Rust size:\n{source}"
     );
-    let mesh = source.split_once("struct Mesh {").expect("no Mesh").1;
-    let mesh = &mesh[..mesh.find("};").unwrap()];
-    assert!(
-        mesh.contains("packed_float3 transform[3]") && mesh.contains("_nga_pad"),
-        "align(16) on f32x3x3 must pad the 36-byte packed array to 48:\n{mesh}"
-    );
     assert!(
         source.contains("float3(root->normal.x, root->normal.y, root->normal.z)"),
-        "packed_float3 must unpack all three components:\n{source}"
+        "packed_float3 must unpack explicitly before arithmetic:\n{source}"
     );
     assert!(
         source.contains("0.0001f"),
