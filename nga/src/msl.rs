@@ -5,8 +5,10 @@
 //! array fills every gap. Rust's layout is authoritative and MSL is made to match, and nothing
 //! is inferred on the way: the offsets are stated outright, not arranged for.
 
-use crate::ir::{self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp};
 use crate::TypeAbi;
+use crate::ir::{
+    self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp,
+};
 
 pub const PRELUDE: &str = include_str!("prelude.metal");
 
@@ -16,14 +18,67 @@ pub const PRELUDE: &str = include_str!("prelude.metal");
 /// which is why this is public: the two spellings have to agree.
 pub fn escape(name: &str) -> String {
     const RESERVED: &[&str] = &[
-        "vertex", "fragment", "kernel", "constant", "device", "threadgroup", "thread",
-        "threadgroup_imageblock", "ray_data", "object_data", "half", "float", "int", "uint",
-        "short", "ushort", "char", "uchar", "long", "ulong", "bool", "void", "sampler",
-        "texture", "packed_float3", "auto", "class", "template", "typename", "namespace",
-        "using", "public", "private", "protected", "operator", "new", "delete", "this",
-        "inline", "extern", "static", "register", "volatile", "union", "signed", "unsigned",
-        "sizeof", "typedef", "goto", "switch", "case", "default", "do", "try", "catch",
-        "throw", "friend", "virtual", "explicit", "export", "asm",
+        "vertex",
+        "fragment",
+        "kernel",
+        "constant",
+        "device",
+        "threadgroup",
+        "thread",
+        "threadgroup_imageblock",
+        "ray_data",
+        "object_data",
+        "half",
+        "float",
+        "int",
+        "uint",
+        "short",
+        "ushort",
+        "char",
+        "uchar",
+        "long",
+        "ulong",
+        "bool",
+        "void",
+        "sampler",
+        "texture",
+        "packed_float3",
+        "auto",
+        "class",
+        "template",
+        "typename",
+        "namespace",
+        "using",
+        "public",
+        "private",
+        "protected",
+        "operator",
+        "new",
+        "delete",
+        "this",
+        "inline",
+        "extern",
+        "static",
+        "register",
+        "volatile",
+        "union",
+        "signed",
+        "unsigned",
+        "sizeof",
+        "typedef",
+        "goto",
+        "switch",
+        "case",
+        "default",
+        "do",
+        "try",
+        "catch",
+        "throw",
+        "friend",
+        "virtual",
+        "explicit",
+        "export",
+        "asm",
     ];
     match RESERVED.contains(&name) {
         true => format!("{name}_"),
@@ -46,7 +101,9 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
     // stage returns or a fragment stage takes is an interface and gets attributes instead.
     let mut io: Vec<&'static TypeAbi> = Vec::new();
     for f in &functions {
-        if f.stage == Stage::Vertex && let Ty::Struct(abi) = f.ret {
+        if f.stage == Stage::Vertex
+            && let Ty::Struct(abi) = f.ret
+        {
             io.push(abi);
         }
         if f.stage == Stage::Fragment {
@@ -69,7 +126,11 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
             .iter()
             .filter(|p| p.binding != ir::Binding::Constants)
             .map(|p| p.ty);
-        for ty in params.chain([f.ret]).chain(t.locals.iter().copied()).chain(t.nodes.iter().copied()) {
+        for ty in params
+            .chain([f.ret])
+            .chain(t.locals.iter().copied())
+            .chain(t.nodes.iter().copied())
+        {
             collect(ty, &mut structs);
         }
         types.push(t);
@@ -182,7 +243,23 @@ fn name(ty: Ty, packed: bool) -> String {
 fn decl(ty: Ty, binding: &str, packed: bool) -> String {
     match ty {
         Ty::Array(element, count) => format!("{} {binding}[{count}]", name(*element, packed)),
+        // Native `float3x3` columns are sixteen bytes. Rust's `f32x3x3` is three packed
+        // three-vectors, so a memory member has to be that array or the columns land on the
+        // wrong bytes.
+        Ty::Mat(columns, 3) if packed => format!("packed_float3 {binding}[{columns}]"),
         other => format!("{} {binding}", name(other, packed)),
+    }
+}
+
+/// How many bytes the MSL spelling of a packed member actually occupies. `f32x3x3` is 48
+/// bytes in Rust because of `align(16)`, but `packed_float3[3]` is 36, so the emitter has to
+/// write the other 12 or every later field — and the array stride — slides.
+fn emitted_size(ty: Ty, packed: bool) -> usize {
+    match ty {
+        Ty::Mat(columns, 3) if packed => 12 * columns as usize,
+        Ty::Array(element, count) => emitted_size(*element, packed) * count as usize,
+        Ty::Struct(abi) => abi.size,
+        other => other.size(),
     }
 }
 
@@ -211,12 +288,22 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
             out += &padding(field.offset - cursor, &mut pad);
         }
         out += &format!("    {};\n", decl(field.ty, field.name, true));
+        let occupied = emitted_size(field.ty, true);
+        if field.size > occupied {
+            out += &padding(field.size - occupied, &mut pad);
+        }
         cursor = field.offset + field.size;
     }
     if !interface && abi.size > cursor {
         out += &padding(abi.size - cursor, &mut pad);
     }
     out += "};\n";
+    if !interface {
+        out += &format!(
+            "static_assert(sizeof({}) == {}, \"{}\");\n",
+            abi.name, abi.size, abi.name
+        );
+    }
     out
 }
 
@@ -262,7 +349,9 @@ struct W<'a> {
 fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> String {
     let mut names: Vec<String> = Vec::new();
     for (index, local) in f.locals.iter().enumerate() {
-        let shadowed = f.locals[..index].iter().any(|other| other.name == local.name);
+        let shadowed = f.locals[..index]
+            .iter()
+            .any(|other| other.name == local.name);
         names.push(match shadowed {
             true => format!("{}_{index}", local.name),
             false => escape(local.name),
@@ -284,12 +373,19 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
                 String::new()
             }
             ir::Binding::Builtin(b) => {
-                format!("{} {}", decl(param.ty, &escape(param.name), false), builtin(b))
+                format!(
+                    "{} {}",
+                    decl(param.ty, &escape(param.name), false),
+                    builtin(b)
+                )
             }
             ir::Binding::Constants => String::new(),
             // A stage-in struct carries no binding of its own; the fragment stage takes one.
             _ if f.stage == Stage::Fragment => {
-                format!("{} [[stage_in]]", decl(param.ty, &escape(param.name), false))
+                format!(
+                    "{} [[stage_in]]",
+                    decl(param.ty, &escape(param.name), false)
+                )
             }
             _ => decl(param.ty, &escape(param.name), false),
         });
@@ -436,13 +532,37 @@ fn binary(op: BinOp) -> &'static str {
     }
 }
 
-/// A three-vector in memory is `packed_float3`. Arithmetic and `operator*` want the unpacked
-/// `float3`, so an rvalue is constructed rather than used packed. A store still writes the
-/// field directly; wrapping there would not be an lvalue.
-fn unpack(ty: Ty, value: String) -> String {
+/// A packed three-vector or 3-row matrix as a register value. `float3(packed)` is the single-
+/// float constructor after an implicit conversion to `.x`, which is why a debug normal view
+/// showed magenta and cyan: Y and Z were zero. Columns are named the same way so a packed
+/// `float3x3` is not read with Metal's 16-byte stride.
+fn unpack_packed(ty: Ty, value: &str) -> String {
     match ty {
-        Ty::Vec(p, 3) => format!("{}3({value})", prim(p)),
-        _ => value,
+        Ty::Vec(p, 3) => format!("{}3({value}.x, {value}.y, {value}.z)", prim(p)),
+        Ty::Mat(columns, 3) => {
+            let cols: Vec<String> = (0..columns)
+                .map(|i| format!("float3({value}[{i}].x, {value}[{i}].y, {value}[{i}].z)"))
+                .collect();
+            format!("float{columns}x3({})", cols.join(", "))
+        }
+        other => panic!("unpack_packed({other:?})"),
+    }
+}
+
+/// Memory three-vectors are packed; stage interfaces and locals already use `float3`.
+fn packed_load(w: &W, node: u32) -> bool {
+    match w.f.nodes[node as usize] {
+        Node::Field { base, name } => match w.types.nodes[base as usize].deref() {
+            Ty::Struct(abi) => {
+                if w.io.iter().any(|other| std::ptr::eq(*other, abi)) {
+                    return false;
+                }
+                matches!(ir::field(abi, name).ty, Ty::Vec(_, 3) | Ty::Mat(_, 3))
+            }
+            _ => false,
+        },
+        Node::Index { .. } => matches!(w.types.nodes[node as usize], Ty::Vec(_, 3) | Ty::Mat(_, 3)),
+        _ => false,
     }
 }
 
@@ -452,8 +572,13 @@ fn unpack(ty: Ty, value: String) -> String {
 /// warns, and SPIR-V rejects it outright.
 fn coerced(w: &mut W, node: u32, want: Ty) -> String {
     let have = w.types.nodes[node as usize];
-    let convertible = matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
-    let value = unpack(have, expr(w, node));
+    let convertible =
+        matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
+    let value = expr(w, node);
+    let value = match packed_load(w, node) {
+        true => unpack_packed(have, &value),
+        false => value,
+    };
     match have == want || !convertible {
         true => value,
         false => format!("{}({value})", name(want, false)),
@@ -505,7 +630,10 @@ fn expr(w: &mut W, node: u32) -> String {
         Node::Binary(op, lhs, rhs) => {
             // A shift's two sides are independent; everything else operates at one type, and a
             // comparison's is its operands' rather than the `bool` it produces.
-            let want = match (op.compare() || op.logical(), matches!(op, BinOp::Shl | BinOp::Shr)) {
+            let want = match (
+                op.compare() || op.logical(),
+                matches!(op, BinOp::Shl | BinOp::Shr),
+            ) {
                 (_, true) => Ty::Infer,
                 (true, _) => w.types.nodes[lhs as usize],
                 (false, _) => w.types.nodes[node as usize],
@@ -516,8 +644,12 @@ fn expr(w: &mut W, node: u32) -> String {
         }
         Node::Cast { value, to } => {
             let have = w.types.nodes[value as usize];
-            let value = unpack(have, expr(w, value));
-            format!("{}({value})", name(to, false))
+            let text = expr(w, value);
+            let text = match packed_load(w, value) {
+                true => unpack_packed(have, &text),
+                false => text,
+            };
+            format!("{}({text})", name(to, false))
         }
         Node::Construct { ty, args } => {
             let element = match ty {
