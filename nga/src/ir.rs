@@ -479,8 +479,24 @@ fn stmt(f: &GpuFn, types: &mut Types, node: u32) {
             end,
             body,
         } => {
-            let ty = concrete(expr(f, types, start));
-            expr(f, types, end);
+            // `for i in 0..count` should follow `count`, not the literal `0`. Typing from
+            // start alone made a `u32` bound compare against an `int` loop variable on Metal.
+            let start_ty = expr(f, types, start);
+            let end_ty = expr(f, types, end);
+            let ty = match (start_ty, end_ty) {
+                (Ty::IntLit | Ty::FloatLit, other)
+                    if !matches!(other, Ty::Infer | Ty::IntLit | Ty::FloatLit) =>
+                {
+                    other
+                }
+                (other, Ty::IntLit | Ty::FloatLit)
+                    if !matches!(other, Ty::Infer | Ty::IntLit | Ty::FloatLit) =>
+                {
+                    other
+                }
+                _ => concrete(start_ty),
+            };
+            coerce(f, types, start, ty);
             coerce(f, types, end, ty);
             if types.locals[local as usize] == Ty::Infer {
                 types.locals[local as usize] = ty;

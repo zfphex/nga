@@ -342,15 +342,16 @@ fn stmt(w: &mut W, node: u32, depth: usize) {
         }
         Node::Let { local, value } => {
             let ty = w.types.locals[local as usize];
-            let value = expr(w, value);
+            let value = coerced(w, value, ty);
             w.out += &format!(
                 "{pad}{} = {value};\n",
                 decl(ty, &w.names[local as usize].clone(), false)
             );
         }
         Node::Store { place, value } => {
+            let ty = w.types.nodes[place as usize];
             let place = expr(w, place);
-            let value = expr(w, value);
+            let value = coerced(w, value, ty);
             w.out += &format!("{pad}{place} = {value};\n");
         }
         Node::If { cond, then, els } => {
@@ -435,6 +436,16 @@ fn binary(op: BinOp) -> &'static str {
     }
 }
 
+/// A three-vector in memory is `packed_float3`. Arithmetic and `operator*` want the unpacked
+/// `float3`, so an rvalue is constructed rather than used packed. A store still writes the
+/// field directly; wrapping there would not be an lvalue.
+fn unpack(ty: Ty, value: String) -> String {
+    match ty {
+        Ty::Vec(p, 3) => format!("{}3({value})", prim(p)),
+        _ => value,
+    }
+}
+
 /// A value where the type around it is fixed. Rust inferred the shader's integer literals for
 /// itself and `infer` only approximates that, so wherever the recorded types disagree the
 /// conversion is written out rather than left to a language that may not do it silently — MSL
@@ -442,7 +453,7 @@ fn binary(op: BinOp) -> &'static str {
 fn coerced(w: &mut W, node: u32, want: Ty) -> String {
     let have = w.types.nodes[node as usize];
     let convertible = matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
-    let value = expr(w, node);
+    let value = unpack(have, expr(w, node));
     match have == want || !convertible {
         true => value,
         false => format!("{}({value})", name(want, false)),
@@ -484,7 +495,8 @@ fn expr(w: &mut W, node: u32) -> String {
             format!("{base}[{index}]")
         }
         Node::Unary(op, value) => {
-            let value = expr(w, value);
+            let have = w.types.nodes[value as usize];
+            let value = coerced(w, value, have);
             match op {
                 UnOp::Neg => format!("(-{value})"),
                 UnOp::Not => format!("(!{value})"),
@@ -503,7 +515,8 @@ fn expr(w: &mut W, node: u32) -> String {
             format!("({lhs} {} {rhs})", binary(op))
         }
         Node::Cast { value, to } => {
-            let value = expr(w, value);
+            let have = w.types.nodes[value as usize];
+            let value = unpack(have, expr(w, value));
             format!("{}({value})", name(to, false))
         }
         Node::Construct { ty, args } => {
@@ -558,7 +571,10 @@ fn expr(w: &mut W, node: u32) -> String {
 }
 
 fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
-    let a: Vec<String> = args.iter().map(|&arg| expr(w, arg)).collect();
+    let a: Vec<String> = args
+        .iter()
+        .map(|&arg| coerced(w, arg, w.types.nodes[arg as usize]))
+        .collect();
     let call = |name: &str| format!("{name}({})", a.join(", "));
     match op {
         Intrinsic::Sqrt => call("sqrt"),
@@ -624,4 +640,89 @@ fn atomic(a: &[String], op: &str) -> String {
         "atomic_fetch_{op}_explicit((device atomic_uint*){}, {}, memory_order_relaxed)",
         a[0], a[1]
     )
+}
+
+/// Metal's compiler log for a failed `newLibrary` is mostly rejected `operator*` candidates
+/// from the standard headers. Keep the shader's own errors and the line they name.
+pub fn format_compile_error(source: &str, compiler: &str) -> String {
+    let src_lines: Vec<&str> = source.lines().collect();
+    let mut out = String::from("Metal shader compile failed:\n");
+    let mut kept = 0usize;
+    let mut i = 0;
+    let log: Vec<&str> = compiler.lines().collect();
+    while i < log.len() {
+        let line = log[i];
+        let Some(diag) = diagnostic(line) else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        i += 1;
+        while i < log.len() && diagnostic(log[i]).is_none() {
+            i += 1;
+        }
+        if !keep_diagnostic(&diag, line) {
+            continue;
+        }
+        kept += 1;
+        out.push_str(line);
+        out.push('\n');
+        for extra in &log[start + 1..i] {
+            if extra.trim().is_empty() {
+                continue;
+            }
+            out.push_str(extra);
+            out.push('\n');
+        }
+        if diag.file == "program_source"
+            && let Some(src) = src_lines.get(diag.line.saturating_sub(1))
+        {
+            out.push_str(&format!("    {}\n", src.trim_end()));
+        }
+    }
+    if kept == 0 {
+        let stripped: String = compiler
+            .lines()
+            .filter(|line| !line.contains("candidate template ignored"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("Metal shader compile failed:\n{stripped}");
+    }
+    out
+}
+
+struct Diagnostic {
+    file: String,
+    line: usize,
+    severity: String,
+}
+
+fn diagnostic(line: &str) -> Option<Diagnostic> {
+    for severity in ["error", "warning", "note"] {
+        let marker = format!(": {severity}: ");
+        let Some(pos) = line.find(&marker) else {
+            continue;
+        };
+        let prefix = &line[..pos];
+        let mut parts = prefix.rsplitn(3, ':');
+        let _col = parts.next()?;
+        let line_no = parts.next()?.parse::<usize>().ok()?;
+        let file = parts.next()?.to_string();
+        return Some(Diagnostic {
+            file,
+            line: line_no,
+            severity: severity.into(),
+        });
+    }
+    None
+}
+
+fn keep_diagnostic(diag: &Diagnostic, line: &str) -> bool {
+    if line.contains("candidate template ignored") {
+        return false;
+    }
+    if diag.severity == "note" {
+        return diag.file == "program_source";
+    }
+    diag.file == "program_source" || diag.severity == "error"
 }

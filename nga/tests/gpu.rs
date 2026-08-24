@@ -222,6 +222,74 @@ fn metal() {
     assert!(source.contains("struct Scene {"));
 }
 
+#[gpu_mod]
+mod packed {
+    use nga::*;
+
+    pub struct Mesh {
+        pub normal: f32x3,
+        pub count: u32,
+        pub transform: f32x3x3,
+    }
+
+    #[compute(64)]
+    fn packed_math(root: Gpu<'static, Mesh>, #[thread_id] id: u32x3) {
+        let n = root.transform.mul(root.normal);
+        let scale = n.length().max(1e-4);
+        let mut acc = n.x * id.x as f32;
+        for i in 0..root.count {
+            acc += scale * i as f32;
+        }
+        let _keep = acc;
+    }
+}
+
+#[test]
+fn packed_vec3_and_scientific_literals_are_msl() {
+    let types = ir::infer(&packed::PACKED_MATH);
+    assert!(
+        types.locals.iter().any(|ty| *ty == Ty::U32),
+        "0..u32 must type the loop variable as u32, got {:?}",
+        types.locals
+    );
+
+    let source = nga::msl::module(&[&packed::PACKED_MATH]);
+    assert!(
+        source.contains("float3(root->normal)"),
+        "matrix mul must unpack packed_float3:\n{source}"
+    );
+    assert!(
+        source.contains("0.0001f"),
+        "1e-4 must emit as a float, not the integer 1:\n{source}"
+    );
+    assert!(
+        source.contains("for (uint "),
+        "a u32 range bound must emit an unsigned loop:\n{source}"
+    );
+}
+
+#[test]
+fn metal_compile_errors_drop_candidate_notes() {
+    let source = "void main() {\n    return VertexOut { (m * n) };\n}\n";
+    let log = "\
+program_source:2:12: error: cannot convert between vector and non-scalar values ('metal::float3x3' and 'packed_float3')
+    return VertexOut { (m * n) };
+           ^
+/System/Library/PrivateFrameworks/GPUCompiler.framework/include/metal/metal_matrix:2340:34: note: candidate template ignored: deduced conflicting types for parameter 'T'
+METAL_FUNC matrix<T, Cols, Rows> operator*(const thread  matrix<T, Cols, Rows> &a, T b)
+                                 ^
+program_source:2:5: warning: comparison of integers of different signs: 'int' and 'uint'
+ (domain: MTLLibraryErrorDomain, code: 3)";
+    let formatted = nga::msl::format_compile_error(source, log);
+    assert!(formatted.contains("cannot convert"));
+    assert!(formatted.contains("return VertexOut"));
+    assert!(formatted.contains("comparison of integers"));
+    assert!(
+        !formatted.contains("candidate template ignored"),
+        "system-header candidate notes should be dropped:\n{formatted}"
+    );
+}
+
 /// The ahead-of-time path: both targets written from one host, which is also how the Metal
 /// output gets checked from a machine that cannot build for Apple.
 #[test]

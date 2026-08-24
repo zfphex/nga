@@ -1175,8 +1175,11 @@ impl Shaders {
             .new_m4_compiler_with_descriptor(&M4CompilerDescriptor::new())?;
         let desc = M4LibraryDescriptor::new();
         desc.set_source(source);
+        let library = compiler
+            .new_library_with_descriptor(&desc)
+            .map_err(|error| Error::new(crate::msl::format_compile_error(source, &error.to_string())))?;
         Ok(Self {
-            library: compiler.new_library_with_descriptor(&desc)?,
+            library,
             compiler,
             render: Vec::new(),
             compute: Vec::new(),

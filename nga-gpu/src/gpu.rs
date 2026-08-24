@@ -784,11 +784,23 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
 }
 
 fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
-    let digits: String = text.chars().take_while(|c| !c.is_alphabetic()).collect();
-    let suffix = &text[digits.len()..];
-    let float = digits.contains('.') || matches!(suffix, "f32" | "f64" | "f16");
+    // Strip a type suffix, not the first letter: `1e-4` is a float, and cutting at `e`
+    // used to turn it into the integer 1.
+    const SUFFIXES: &[&str] = &[
+        "usize", "isize", "u128", "i128", "f32", "f64", "f16", "u64", "i64", "u32", "i32",
+        "u16", "i16", "u8", "i8",
+    ];
+    let (stem, suffix) = SUFFIXES
+        .iter()
+        .find_map(|s| text.strip_suffix(s).map(|stem| (stem, *s)))
+        .unwrap_or((text.as_str(), ""));
+    let stem: String = stem.chars().filter(|&c| c != '_').collect();
+    let float = stem.contains('.')
+        || stem.contains('e')
+        || stem.contains('E')
+        || matches!(suffix, "f32" | "f64" | "f16");
     if float {
-        let Ok(value) = digits.parse::<f64>() else {
+        let Ok(value) = stem.parse::<f64>() else {
             return Err((span, format!("`{text}` is not a shader literal")));
         };
         // `{:?}` on an `f64` always prints a decimal point, which a Rust float literal needs.
@@ -796,7 +808,7 @@ fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
             "::nga::ir::Node::Const(::nga::ir::Const::Float({value:?}))"
         )));
     }
-    let Ok(value) = digits.parse::<i64>() else {
+    let Ok(value) = stem.parse::<i64>() else {
         return Err((span, format!("`{text}` is not a shader literal")));
     };
     Ok(b.push(format!(
