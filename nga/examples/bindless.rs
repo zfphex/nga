@@ -256,8 +256,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let data_root = rec
                 .arena()
                 .alloc(Data {
-                    vertices: Gpu::new(vertex_buffer.address()),
-                    materials: Gpu::new(material_buffer.address()),
+                    vertices: vertex_buffer.gpu(),
+                    materials: material_buffer.gpu(),
                     mvp: f32x4x4([
                         [aspect.min(1.0), 0.0, 0.0, 0.0],
                         [0.0, (1.0 / aspect).min(1.0), 0.0, 0.0],
@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 compute.heap(&textures);
                 compute.pipeline(paint_pipeline);
                 compute.dispatch_2d(paint_root, TEX, TEX, 8);
-                compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::ALL);
+                compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::TEXTURES);
             }
 
             {

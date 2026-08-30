@@ -148,8 +148,8 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
         &TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE)
             .usage(Usage::COLOR | Usage::COPY_SRC),
     )?;
-    let mut draws = heap.alloc_buffer(size_of::<DrawData>() * DRAWS as usize)?;
-    let draw_block: GpuMut<'static, [DrawData]> = GpuMut::new(draws.gpu_mut::<DrawData>().0.get());
+    let draws = heap.alloc_buffer(size_of::<DrawData>() * DRAWS as usize)?;
+    let draw_block: GpuMut<'static, [DrawData]> = draws.gpu_mut();
 
     let white = [1.0, 1.0, 1.0];
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
@@ -169,7 +169,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     // The render and copy below initialise every byte before the host reads it.
@@ -178,7 +178,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
             .unwrap()
     };
-    let dest: GpuMut<'_, [u8]> = GpuMut::new(pixels.gpu.0.get());
+    let dest: GpuMut<'_, [u8]> = pixels.gpu.as_mut();
 
     let mut frame = ctx.begin_frame()?;
     let data = frame

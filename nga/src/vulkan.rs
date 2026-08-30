@@ -49,6 +49,7 @@ impl Pipeline {
 pub struct SamplerState(vk::Sampler, ash::Device);
 
 /// A depth-stencil description prepared before command recording.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepthStencilState(DepthState);
 
@@ -315,18 +316,163 @@ pub(crate) fn stage(stage: Stage) -> vk::PipelineStageFlags2 {
     flags
 }
 
-/// Metal's visibility flag is stage-agnostic: one bit means the same thing whatever stages the
-/// barrier joins. Vulkan access masks are not. Pairing `SHADER_WRITE` with `ALL_TRANSFER`, or
-/// `SHADER_READ` with `DRAW_INDIRECT`, is invalid. `MEMORY_READ`/`MEMORY_WRITE` are the only
-/// masks legal with every stage, so they are what keeps `barrier` portable.
-pub(crate) fn hazard(hazard: Hazard) -> (vk::AccessFlags2, vk::AccessFlags2) {
-    if hazard == Hazard::NONE {
-        return (vk::AccessFlags2::NONE, vk::AccessFlags2::NONE);
+/// One access class per stage group. A single `VkMemoryBarrier2` cannot mix
+/// `SHADER_WRITE` with `DRAW_INDIRECT` or `TRANSFER_WRITE` with `VERTEX_SHADER`, so
+/// `Compute::barrier` emits one barrier per (src group, dst group) pair.
+#[derive(Clone, Copy)]
+struct StageGroup {
+    bit: Stage,
+    stages: vk::PipelineStageFlags2,
+}
+
+fn stage_groups() -> [StageGroup; 7] {
+    [
+        StageGroup {
+            bit: Stage::TRANSFER,
+            stages: vk::PipelineStageFlags2::ALL_TRANSFER,
+        },
+        StageGroup {
+            bit: Stage::COMPUTE,
+            stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        },
+        StageGroup {
+            bit: Stage::VERTEX,
+            stages: vk::PipelineStageFlags2::VERTEX_SHADER,
+        },
+        StageGroup {
+            bit: Stage::PIXEL,
+            stages: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+        },
+        StageGroup {
+            bit: Stage::INDIRECT,
+            stages: vk::PipelineStageFlags2::DRAW_INDIRECT,
+        },
+        StageGroup {
+            bit: Stage::COLOR_OUT,
+            stages: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+        },
+        StageGroup {
+            bit: Stage::DEPTH_STENCIL,
+            stages: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        },
+    ]
+}
+
+fn access_in(group: Stage, hazard: Hazard, write: bool) -> vk::AccessFlags2 {
+    if group.has(Stage::TRANSFER) {
+        if hazard.has(Hazard::BUFFERS)
+            || hazard.has(Hazard::TEXTURES)
+            || hazard.has(Hazard::DRAW_ARGUMENTS)
+        {
+            return match write {
+                true => vk::AccessFlags2::TRANSFER_WRITE,
+                false => vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE,
+            };
+        }
+        return vk::AccessFlags2::NONE;
     }
-    (
-        vk::AccessFlags2::MEMORY_WRITE,
-        vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-    )
+    if group.has(Stage::COMPUTE) || group.has(Stage::VERTEX) || group.has(Stage::PIXEL) {
+        let mut flags = vk::AccessFlags2::NONE;
+        if hazard.has(Hazard::BUFFERS)
+            || hazard.has(Hazard::DESCRIPTORS)
+            || hazard.has(Hazard::DRAW_ARGUMENTS)
+        {
+            flags |= match write {
+                true => vk::AccessFlags2::SHADER_WRITE,
+                false => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+            };
+        }
+        if hazard.has(Hazard::TEXTURES) {
+            flags |= match write {
+                true => vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                false => vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
+            };
+        }
+        return flags;
+    }
+    if group.has(Stage::INDIRECT) && hazard.has(Hazard::DRAW_ARGUMENTS) {
+        return vk::AccessFlags2::INDIRECT_COMMAND_READ;
+    }
+    if group.has(Stage::COLOR_OUT) && hazard.has(Hazard::TEXTURES) {
+        return match write {
+            true => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            false => {
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            }
+        };
+    }
+    if group.has(Stage::DEPTH_STENCIL)
+        && (hazard.has(Hazard::DEPTH_STENCIL) || hazard.has(Hazard::TEXTURES))
+    {
+        return match write {
+            true => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            false => {
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+            }
+        };
+    }
+    vk::AccessFlags2::NONE
+}
+
+fn memory_barriers(
+    before: Stage,
+    after: Stage,
+    hazard: Hazard,
+) -> ([vk::MemoryBarrier2<'static>; 16], usize) {
+    if hazard == Hazard::NONE {
+        let mut barriers = [vk::MemoryBarrier2::default(); 16];
+        barriers[0] = vk::MemoryBarrier2::default()
+            .src_stage_mask(stage(before))
+            .dst_stage_mask(stage(after));
+        return (barriers, 1);
+    }
+    let mut barriers = [vk::MemoryBarrier2::default(); 16];
+    let mut count = 0;
+    for src in stage_groups() {
+        if !before.has(src.bit) {
+            continue;
+        }
+        let src_access = access_in(src.bit, hazard, true);
+        if src_access.is_empty() {
+            continue;
+        }
+        for dst in stage_groups() {
+            if !after.has(dst.bit) {
+                continue;
+            }
+            let dst_access = access_in(dst.bit, hazard, false);
+            if dst_access.is_empty() {
+                continue;
+            }
+            if count == 16 {
+                barriers[0] = vk::MemoryBarrier2::default()
+                    .src_stage_mask(stage(before))
+                    .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_stage_mask(stage(after))
+                    .dst_access_mask(
+                        vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                    );
+                return (barriers, 1);
+            }
+            barriers[count] = vk::MemoryBarrier2::default()
+                .src_stage_mask(src.stages)
+                .src_access_mask(src_access)
+                .dst_stage_mask(dst.stages)
+                .dst_access_mask(dst_access);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        barriers[0] = vk::MemoryBarrier2::default()
+            .src_stage_mask(stage(before))
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(stage(after))
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+        return (barriers, 1);
+    }
+    (barriers, count)
 }
 
 /// SPIR-V specialization payloads are a flat blob plus an entry table, and a `bool` occupies
@@ -817,6 +963,7 @@ impl Device {
     }
 
     /// Prepare a combined depth-stencil state before command recording.
+    #[doc(hidden)]
     pub fn depth_stencil_state(&self, state: &DepthState) -> Result<DepthStencilState, Error> {
         Ok(DepthStencilState(*state))
     }
@@ -1091,7 +1238,7 @@ impl Arena {
         unsafe { cpu.write(value) };
         Some(GpuBox {
             cpu: NonNull::new(cpu)?,
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -1101,7 +1248,7 @@ impl Arena {
         unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), cpu, values.len()) };
         Some(GpuBox {
             cpu: NonNull::new(std::ptr::slice_from_raw_parts_mut(cpu, values.len()))?,
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -1115,7 +1262,7 @@ impl Arena {
         let (cpu, gpu) = self.alloc_bytes(size_of::<T>() * len, align_of::<T>())?;
         Some(GpuBox {
             cpu: NonNull::new(std::ptr::slice_from_raw_parts_mut(cpu as *mut T, len))?,
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -1142,19 +1289,19 @@ pub struct HeapBuffer {
 }
 
 impl HeapBuffer {
-    /// The device address, for putting in a struct a shader dereferences.
-    pub fn gpu<T>(&self) -> Gpu<'_, T> {
-        Gpu::new(self.gpu)
+    /// The device address, for putting in a struct a shader dereferences. A heap allocation
+    /// outlives every frame, so the lifetime is `'static`.
+    pub fn gpu<T: ?Sized>(&self) -> Gpu<'static, T> {
+        crate::device_ptr(self.gpu)
     }
 
-    /// The raw address, for the cases where the borrow has to be discarded. A heap allocation
-    /// outlives every frame, so `Gpu<'static, T>` is the honest type and only the caller knows.
+    /// The raw address, for the cases where the borrow has to be discarded.
     pub fn address(&self) -> u64 {
         self.gpu
     }
 
-    pub fn gpu_mut<T>(&mut self) -> GpuMut<'_, T> {
-        GpuMut::new(self.gpu)
+    pub fn gpu_mut<T: ?Sized>(&self) -> GpuMut<'static, T> {
+        crate::device_ptr_mut(self.gpu)
     }
 
     pub fn len(&self) -> usize {
@@ -3452,6 +3599,7 @@ impl<'a> Raster<'a> {
         self.set_depth_state(state);
     }
 
+    #[doc(hidden)]
     pub fn depth_stencil(&self, state: &DepthStencilState) {
         self.set_depth_state(&state.0);
     }
@@ -3831,16 +3979,11 @@ impl<'a> Compute<'a> {
     /// exactly what `VkMemoryBarrier2` provides. Buffers need nothing else; only images drag
     /// per-resource layout state back in.
     pub fn barrier(&self, before: Stage, after: Stage, hazards: Hazard) {
-        let (src_access, dst_access) = hazard(hazards);
-        let barriers = [vk::MemoryBarrier2::default()
-            .src_stage_mask(stage(before))
-            .src_access_mask(src_access)
-            .dst_stage_mask(stage(after))
-            .dst_access_mask(dst_access)];
+        let (barriers, count) = memory_barriers(before, after, hazards);
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 self.command_buffer,
-                &vk::DependencyInfo::default().memory_barriers(&barriers),
+                &vk::DependencyInfo::default().memory_barriers(&barriers[..count]),
             )
         };
     }

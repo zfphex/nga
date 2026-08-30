@@ -90,6 +90,7 @@ unsafe impl Sync for Pipeline {}
 pub struct SamplerState(minmetal::SamplerState);
 
 /// A depth-stencil object created before command recording.
+#[doc(hidden)]
 pub struct DepthStencilState(MetalDepthStencilState);
 
 /// One run of a multi-draw. Layout matches `VkMultiDrawInfoEXT`, so on Vulkan a slice passes
@@ -574,6 +575,7 @@ impl Device {
     }
 
     /// Build a combined depth-stencil object before command recording.
+    #[doc(hidden)]
     pub fn depth_stencil_state(&self, state: &DepthState) -> Result<DepthStencilState, Error> {
         Ok(DepthStencilState(self.device.new_depth_stencil_state(
             &depth_stencil_descriptor(state),
@@ -664,7 +666,7 @@ impl Arena {
         unsafe { std::ptr::write(cpu as *mut T, value) };
         Some(GpuBox {
             cpu: unsafe { NonNull::new_unchecked(cpu as *mut T) },
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -676,7 +678,7 @@ impl Arena {
                 unsafe { NonNull::new_unchecked(cpu as *mut T) },
                 values.len(),
             ),
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -697,7 +699,7 @@ impl Arena {
                 unsafe { NonNull::new_unchecked(cpu as *mut T) },
                 len,
             ),
-            gpu: Gpu::new(gpu),
+            gpu: crate::device_ptr(gpu),
         })
     }
 
@@ -717,19 +719,19 @@ pub struct HeapBuffer {
 }
 
 impl HeapBuffer {
-    /// The device address, for putting in a struct a shader dereferences.
-    pub fn gpu<T>(&self) -> Gpu<'_, T> {
-        Gpu::new(self.gpu)
+    /// The device address, for putting in a struct a shader dereferences. A heap allocation
+    /// outlives every frame, so the lifetime is `'static`.
+    pub fn gpu<T: ?Sized>(&self) -> Gpu<'static, T> {
+        crate::device_ptr(self.gpu)
     }
 
-    /// The raw address, for the cases where the borrow has to be discarded. A heap allocation
-    /// outlives every frame, so `Gpu<'static, T>` is the honest type and only the caller knows.
+    /// The raw address, for the cases where the borrow has to be discarded.
     pub fn address(&self) -> u64 {
         self.gpu
     }
 
-    pub fn gpu_mut<T>(&mut self) -> GpuMut<'_, T> {
-        GpuMut::new(self.gpu)
+    pub fn gpu_mut<T: ?Sized>(&self) -> GpuMut<'static, T> {
+        crate::device_ptr_mut(self.gpu)
     }
 
     pub fn len(&self) -> usize {
@@ -1895,6 +1897,7 @@ impl<'a> Raster<'a> {
             .set_depth_stencil_state(&self.depth_states[depth_index(state)]);
     }
 
+    #[doc(hidden)]
     pub fn depth_stencil(&self, state: &DepthStencilState) {
         self.encoder.set_depth_stencil_state(&state.0);
     }
@@ -2187,10 +2190,17 @@ impl<'a> Compute<'a> {
         let (before, after, hazard) = (stage(before), stage(after), hazard(hazards));
         let (local_before, local_after) = (encoder_stages(before), encoder_stages(after));
         self.encoder.barrier(local_before, local_after, hazard);
-        self.encoder
-            .barrier_after_queue_stages(before, local_after, hazard);
-        self.encoder
-            .barrier_before_queue_stages(local_before, after, hazard);
+        // Queue halves are only needed when a named stage lives on another encoder.
+        // Compute→compute stays in this encoder; compute→vertex and color→transfer do not.
+        let compute = Stages::DISPATCH | Stages::BLIT | Stages::ACCELERATION_STRUCTURE;
+        if before.0 & !compute.0 != 0 {
+            self.encoder
+                .barrier_after_queue_stages(before, local_after, hazard);
+        }
+        if after.0 & !compute.0 != 0 {
+            self.encoder
+                .barrier_before_queue_stages(local_before, after, hazard);
+        }
     }
 
     pub fn copy_buffer(

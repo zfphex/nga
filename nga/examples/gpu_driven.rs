@@ -250,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sim_root = rec
                 .arena()
                 .alloc(SimData {
-                    instances: GpuMut::new(instances.address()),
+                    instances: instances.gpu_mut(),
                     time,
                     count: COUNT as u32,
                 })
@@ -259,9 +259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let encode_root = rec
                 .arena()
                 .alloc(EncodeData {
-                    instances: Gpu::new(instances.address()),
-                    draws: GpuMut::new(draws.address()),
-                    range: GpuMut::new(range.address()),
+                    instances: instances.gpu(),
+                    draws: draws.gpu_mut(),
+                    range: range.gpu_mut(),
                     commands: commands.handle(),
                     cull_radius,
                     total: COUNT as u32,
@@ -271,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let draw_root = rec
                 .arena()
                 .alloc(DrawData {
-                    instances: Gpu::new(instances.address()),
+                    instances: instances.gpu(),
                     mvp,
                 })
                 .unwrap()
@@ -291,15 +291,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Clear `{ location, length }`. Only compact slots below the new length execute,
                 // so neither backend needs the entire draw array cleared.
                 compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
-                compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::ALL);
+                compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::BUFFERS);
 
                 compute.pipeline(simulate);
                 compute.dispatch(sim_root, COUNT, GROUP);
-                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::ALL);
+                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
 
                 compute.pipeline(encode);
                 compute.dispatch(encode_root, COUNT, GROUP);
-                compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::ALL);
+                compute.barrier(
+                    Stage::COMPUTE,
+                    Stage::INDIRECT | Stage::VERTEX,
+                    Hazard::BUFFERS | Hazard::DRAW_ARGUMENTS,
+                );
             }
 
             {

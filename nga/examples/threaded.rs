@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let sim_root = rec
                             .arena()
                             .alloc(SimData {
-                                instances: GpuMut::new(instance_base),
+                                instances: unsafe { GpuMut::new(instance_base) },
                                 time: time + index as f32 * 0.35,
                                 count: SLICE as u32,
                             })
@@ -106,8 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let build_root = rec
                             .arena()
                             .alloc(BuildData {
-                                instances: Gpu::new(instance_base),
-                                vertices: GpuMut::new(vertex_base),
+                                instances: unsafe { Gpu::new(instance_base) },
+                                vertices: unsafe { GpuMut::new(vertex_base) },
                                 count: SLICE as u32,
                                 pad: 0,
                             })
@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let draw_root = rec
                             .arena()
                             .alloc(DrawData {
-                                vertices: Gpu::new(vertex_base),
+                                vertices: unsafe { Gpu::new(vertex_base) },
                                 mvp,
                             })
                             .unwrap()
@@ -126,10 +126,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let compute = rec.compute();
                             compute.pipeline(simulate);
                             compute.dispatch(sim_root, SLICE, GROUP);
-                            compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::ALL);
+                            compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
                             compute.pipeline(build);
                             compute.dispatch(build_root, SLICE, GROUP);
-                            compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::ALL);
+                            compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
                         }
 
                         // Only the first thread clears; the rest load. `Raster::new` turns that

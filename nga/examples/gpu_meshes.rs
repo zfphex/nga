@@ -306,9 +306,9 @@ mod commands {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = storage.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
+        let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
         let object_list = storage.alloc_slice(&objects).unwrap();
-        let object_list: Gpu<'static, [Object]> = Gpu::new(object_list.gpu.0.get());
+        let object_list: Gpu<'static, [Object]> = object_list.gpu.into_static();
 
         let mut heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
         let draws = heap.alloc_buffer(size_of::<DrawData>() * OBJECTS as usize)?;
@@ -381,7 +381,7 @@ mod commands {
                     .alloc(EncodeData {
                         objects: object_list,
                         vertices,
-                        draws: GpuMut::new(draws.address()),
+                        draws: draws.gpu_mut(),
                         commands: commands.handle(),
                         pipelines: [solid.handle(), wire.handle()],
                         viewproj,

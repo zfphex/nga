@@ -100,7 +100,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     let root = frame
         .arena(0)
         .alloc(Data {
-            palette: Gpu::new(palette.address()),
+            palette: palette.gpu(),
         })
         .ok_or(Error::new("frame arena is full"))?
         .gpu;
@@ -119,7 +119,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
         .ok_or(Error::new("readback arena is full"))?;
     recorder
         .compute()
-        .read_texture_at(&target, 1, 1, &readback, GpuMut::new(gpu));
+        .read_texture_at(&target, 1, 1, &readback, unsafe { GpuMut::new(gpu) });
     drop(recorder);
     frame.submit(None)?;
     device.wait_idle()?;

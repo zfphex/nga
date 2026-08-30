@@ -149,7 +149,7 @@ mod tiles {
 
         let geometry = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = geometry.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
+        let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
         let count = mesh.len() as u32;
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;

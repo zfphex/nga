@@ -45,10 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let vertices = heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
-    let instances_rw: GpuMut<'static, [Instance]> = GpuMut::new(instances.address());
-    let instances_ro: Gpu<'static, [Instance]> = Gpu::new(instances.address());
-    let vertices_rw: GpuMut<'static, [Vertex]> = GpuMut::new(vertices.address());
-    let vertices_ro: Gpu<'static, [Vertex]> = Gpu::new(vertices.address());
+    let instances_rw: GpuMut<'static, [Instance]> = instances.gpu_mut();
+    let instances_ro: Gpu<'static, [Instance]> = instances.gpu();
+    let vertices_rw: GpuMut<'static, [Vertex]> = vertices.gpu_mut();
+    let vertices_ro: Gpu<'static, [Vertex]> = vertices.gpu();
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
@@ -139,13 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let compute = rec.compute();
                 compute.pipeline(simulate);
                 compute.dispatch(sim_root, COUNT, GROUP);
-                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::ALL);
+                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
                 compute.pipeline(build);
                 compute.dispatch(build_root, COUNT, GROUP);
                 // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
                 // cross-encoder fence inside one command buffer: a barrier on the queue is the
                 // whole mechanism, so the compute -> vertex handoff is one more `barrier`.
-                compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::ALL);
+                compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
             }
 
             {

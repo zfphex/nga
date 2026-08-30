@@ -208,7 +208,7 @@ mod meshlets {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let meshlets = storage.alloc_slice(&list).unwrap();
-        let meshlets: Gpu<'static, [Meshlet]> = Gpu::new(meshlets.gpu.0.get());
+        let meshlets: Gpu<'static, [Meshlet]> = meshlets.gpu.into_static();
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
         // Two timestamps around the pass, to show what the culling is buying.

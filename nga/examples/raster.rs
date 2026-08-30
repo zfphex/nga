@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index_buffer = heap.alloc_buffer(size_of_val(&indices))?;
     heap.write(&index_buffer, 0, &indices);
     heap.flush()?;
-    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertex_buffer.address());
+    let vertices: Gpu<'static, [Vertex]> = vertex_buffer.gpu();
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

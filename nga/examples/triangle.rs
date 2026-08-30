@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
-    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
 
     let mut angle = 0.0f32;
     let mut resized = false;

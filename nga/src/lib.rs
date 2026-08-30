@@ -10,14 +10,20 @@ use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
 
+#[doc(hidden)]
 pub mod ir;
+#[doc(hidden)]
 pub mod msl;
+#[doc(hidden)]
 pub mod spirv;
+#[doc(hidden)]
 pub mod tlsf;
 pub mod vector;
 
 pub use nga_gpu::{Constants, gpu_mod};
-pub use tlsf::{Alloc, Tlsf};
+#[doc(hidden)]
+pub use tlsf::Alloc;
+pub(crate) use tlsf::Tlsf;
 pub use vector::*;
 
 #[cfg(not(target_vendor = "apple"))]
@@ -92,11 +98,38 @@ impl std::error::Error for Error {}
 /// reverse, storing a frame-arena pointer in a persistent structure, is a compile error.
 #[repr(transparent)]
 #[derive(Debug)]
-pub struct Gpu<'a, T: ?Sized>(pub NonZeroU64, pub PhantomData<&'a T>);
+pub struct Gpu<'a, T: ?Sized>(pub(crate) NonZeroU64, PhantomData<&'a T>);
 
-impl<T: ?Sized> Gpu<'_, T> {
-    pub fn new(address: u64) -> Self {
+pub(crate) fn device_ptr<'a, T: ?Sized>(address: u64) -> Gpu<'a, T> {
+    unsafe { Gpu::new(address) }
+}
+
+pub(crate) fn device_ptr_mut<'a, T: ?Sized>(address: u64) -> GpuMut<'a, T> {
+    unsafe { GpuMut::new(address) }
+}
+
+impl<'a, T: ?Sized> Gpu<'a, T> {
+    /// Wrap a device address.
+    ///
+    /// # Safety
+    ///
+    /// `address` must be a live device pointer of type `T`, or used only as an opaque token.
+    /// Host code must not dereference it: [`Deref`] panics rather than manufacture a reference.
+    pub unsafe fn new(address: u64) -> Self {
         Self(NonZeroU64::new(address).unwrap(), PhantomData)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    /// Drop the borrow. Honest for a heap allocation that outlives every frame.
+    pub fn into_static(self) -> Gpu<'static, T> {
+        Gpu(self.0, PhantomData)
+    }
+
+    pub fn as_mut(self) -> GpuMut<'a, T> {
+        GpuMut(self.0, PhantomData)
     }
 }
 
@@ -118,11 +151,25 @@ impl<T: ?Sized> Copy for Gpu<'_, T> {}
 /// a shader writing through this pointer must not be handed a longer-lived alias.
 #[repr(transparent)]
 #[derive(Debug)]
-pub struct GpuMut<'a, T: ?Sized>(pub NonZeroU64, pub PhantomData<&'a Cell<T>>);
+pub struct GpuMut<'a, T: ?Sized>(pub(crate) NonZeroU64, PhantomData<&'a Cell<T>>);
 
 impl<T: ?Sized> GpuMut<'_, T> {
-    pub fn new(address: u64) -> Self {
+    /// Wrap a device address for shader writes.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Gpu::new`]. [`DerefMut`] panics on the host, so a `Copy` `GpuMut`
+    /// cannot produce aliased `&mut T` values.
+    pub unsafe fn new(address: u64) -> Self {
         Self(NonZeroU64::new(address).unwrap(), PhantomData)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub fn into_static(self) -> GpuMut<'static, T> {
+        GpuMut(self.0, PhantomData)
     }
 }
 
@@ -717,8 +764,9 @@ pub enum CompareOp {
     Always,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlendFactor {
+pub(crate) enum BlendFactor {
     Zero,
     One,
     SrcColor,
@@ -1079,72 +1127,6 @@ impl DepthState {
     /// leaving it on with `ALWAYS` still costs a depth write when `write` is set.
     pub fn test(&self) -> bool {
         self.compare != CompareOp::Always || self.write
-    }
-}
-
-// -- pool --------------------------------------------------------------------------------
-
-/// A fixed-capacity slab inside an [`Arena`], with a free list threaded through the unused
-/// slots. Indices are stable, so a shader can hold one across frames; the arena is not reset
-/// while a pool lives in it.
-pub struct Pool<'a, T> {
-    slots: NonNull<T>,
-    base: u64,
-    cap: u32,
-    len: u32,
-    free: Vec<u32>,
-    marker: PhantomData<&'a mut [T]>,
-}
-
-impl<'a, T> Pool<'a, T> {
-    pub fn new(arena: &'a Arena, cap: u32) -> Option<Self> {
-        let (cpu, gpu) = arena.alloc_bytes(size_of::<T>() * cap as usize, align_of::<T>())?;
-        Some(Self {
-            slots: NonNull::new(cpu as *mut T)?,
-            base: gpu,
-            cap,
-            len: 0,
-            free: Vec::new(),
-            marker: PhantomData,
-        })
-    }
-
-    pub fn alloc(&mut self, value: T) -> Option<u32> {
-        let index = match self.free.pop() {
-            Some(index) => index,
-            None if self.len < self.cap => {
-                self.len += 1;
-                self.len - 1
-            }
-            None => return None,
-        };
-        unsafe { self.slots.add(index as usize).write(value) };
-        Some(index)
-    }
-
-    pub fn free(&mut self, index: u32) {
-        debug_assert!(index < self.len, "freeing a slot that was never allocated");
-        self.free.push(index);
-    }
-
-    pub fn gpu(&self, index: u32) -> Gpu<'a, T> {
-        debug_assert!(index < self.len, "slot {index} was never allocated");
-        Gpu::new(self.base + index as u64 * size_of::<T>() as u64)
-    }
-}
-
-impl<T> Index<u32> for Pool<'_, T> {
-    type Output = T;
-    fn index(&self, index: u32) -> &T {
-        debug_assert!(index < self.len, "slot {index} was never allocated");
-        unsafe { self.slots.add(index as usize).as_ref() }
-    }
-}
-
-impl<T> IndexMut<u32> for Pool<'_, T> {
-    fn index_mut(&mut self, index: u32) -> &mut T {
-        debug_assert!(index < self.len, "slot {index} was never allocated");
-        unsafe { self.slots.add(index as usize).as_mut() }
     }
 }
 

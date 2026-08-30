@@ -118,13 +118,13 @@ fn shape() {
 
 #[test]
 fn device_pointers_cannot_be_dereferenced_on_the_host() {
-    let pointer = Gpu::<u32>::new(1);
+    let pointer = unsafe { Gpu::<u32>::new(1) };
     assert!(std::panic::catch_unwind(|| {
         let _ = *pointer;
     })
     .is_err());
 
-    let mut pointer = GpuMut::<[u32]>::new(1);
+    let mut pointer = unsafe { GpuMut::<[u32]>::new(1) };
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pointer[0] = 7;
     }))
