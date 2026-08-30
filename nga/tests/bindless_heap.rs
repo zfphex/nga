@@ -23,6 +23,7 @@ mod table {
     pub struct VertexOut {
         pub position: f32x4,
         pub uv: f32x2,
+        pub render_target_array_index: u32,
     }
 
     #[vertex]
@@ -31,13 +32,14 @@ mod table {
         VertexOut {
             position: f32x4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0),
             uv: uv,
+            render_target_array_index: 1,
         }
     }
 
     #[fragment]
     fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
         let palette = root.palette;
-        palette.texture.sample(palette.samp, input.uv)
+        palette.texture.sample_level(palette.samp, input.uv, 1.0)
     }
 }
 
@@ -73,8 +75,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     let samp = resources.write_sampler(range, SLOTS - 2, &sampler);
 
     // Two levels, both filled by the caller, so the mip plumbing is under the validation layer
-    // rather than only under a build. The sampler is nearest and the draw is at lod 0, so the
-    // colour read back is still level 0's.
+    // rather than only under a build. The fragment shader explicitly reads level one.
     let source =
         heap.alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE).mips(2))?;
     heap.upload(&source, 0, &[0x20, 0x40, 0x60, 0xff].repeat((SIZE * SIZE) as usize))?;
@@ -88,6 +89,8 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
 
     let target = heap.alloc_texture(
         &TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE)
+            .mips(2)
+            .layers(2)
             .usage(Usage::COLOR | Usage::COPY_SRC),
     )?;
     let readback = Arena::new(&device, (SIZE * SIZE * 4) as usize, Memory::Readback)?;
@@ -103,8 +106,10 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
         .gpu;
     let mut recorder = frame.recorder();
     {
-        let pass = Pass::new().color_texture(0, &target, Some([1.0, 0.0, 1.0, 1.0]));
-        let raster = recorder.raster(&pass, SIZE, SIZE);
+        let pass = Pass::new()
+            .layers(2)
+            .color_texture_at(0, &target, 1, 0, Some([1.0, 0.0, 1.0, 1.0]));
+        let raster = recorder.raster(&pass, SIZE / 2, SIZE / 2);
         raster.heap(&resources);
         raster.pipeline(pipeline);
         raster.draw(root, 0, 3);
@@ -114,7 +119,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
         .ok_or(Error::new("readback arena is full"))?;
     recorder
         .compute()
-        .read_texture(&target, &readback, GpuMut::new(gpu));
+        .read_texture_at(&target, 1, 1, &readback, GpuMut::new(gpu));
     drop(recorder);
     frame.submit(None)?;
     device.wait_idle()?;
@@ -122,7 +127,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     let pixels = unsafe { std::slice::from_raw_parts(cpu, (SIZE * SIZE * 4) as usize) };
     assert_eq!(
         &pixels[..4],
-        &[0x20, 0x40, 0x60, 0xff],
+        &[0x80, 0x80, 0x80, 0xff],
         "the descriptor in the last heap slot did not reach the shader"
     );
 

@@ -328,6 +328,8 @@ pub enum Builtin {
     BaseInstance,
     /// `f32x4`. An output of a vertex stage and an input of a fragment one.
     Position,
+    /// `u32`. Selects the array layer written by a rasterized primitive.
+    RenderTargetArrayIndex,
     FrontFacing,
 }
 

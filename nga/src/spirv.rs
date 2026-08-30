@@ -629,6 +629,7 @@ fn builtin_number(b: Builtin, storage: u32) -> u32 {
         Builtin::VertexId => 42,
         Builtin::InstanceId => 43,
         Builtin::BaseInstance => 4425,
+        Builtin::RenderTargetArrayIndex => 9,
         Builtin::FrontFacing => 17,
         Builtin::ThreadIdInGroup => 27,
         Builtin::ThreadId => 28,
@@ -644,6 +645,7 @@ fn builtin_ty(b: Builtin) -> Ty {
         Builtin::VertexId
         | Builtin::InstanceId
         | Builtin::BaseInstance
+        | Builtin::RenderTargetArrayIndex
         | Builtin::ThreadIndexInGroup => Ty::U32,
         Builtin::FrontFacing => Ty::BOOL,
         _ => Ty::Vec(Prim::U32, 3),
@@ -663,6 +665,9 @@ fn builtin_variable(m: &mut M, b: Builtin, storage: u32) -> u32 {
     if b == Builtin::BaseInstance {
         m.capability(4427);
         m.extension("SPV_KHR_shader_draw_parameters");
+    }
+    if b == Builtin::RenderTargetArrayIndex {
+        m.capability(69);
     }
     let ty = m.ty(builtin_ty(b));
     let pointer = m.pointer(storage, ty);
@@ -902,11 +907,18 @@ fn entry_prologue(m: &mut M, w: &mut W) {
     }
 }
 
-/// One varying. A member called `position` is the clip-space builtin on both stages; everything
-/// else takes the next location.
+/// One varying. Interface members with reserved names become builtins; everything else takes
+/// the next location.
 fn stage_variable(m: &mut M, w: &mut W, ty: Ty, name: &str, location: &mut u32, storage: u32) -> u32 {
     let id = match name {
         "position" => builtin_variable(m, Builtin::Position, storage),
+        "render_target_array_index" => {
+            let id = builtin_variable(m, Builtin::RenderTargetArrayIndex, storage);
+            if storage == INPUT {
+                m.decorate(id, DEC_FLAT, &[]);
+            }
+            id
+        }
         _ => {
             let type_id = m.ty(ty);
             let pointer = m.pointer(storage, type_id);

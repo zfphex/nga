@@ -868,6 +868,7 @@ fn builtin(name: &str) -> Option<&'static str> {
         "instance_id" => "InstanceId",
         "base_instance" => "BaseInstance",
         "position" => "Position",
+        "render_target_array_index" => "RenderTargetArrayIndex",
         "front_facing" => "FrontFacing",
         _ => return None,
     })

@@ -268,6 +268,7 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
             };
             let attribute = match field.name {
                 "position" => " [[position]]".into(),
+                "render_target_array_index" => " [[render_target_array_index]]".into(),
                 _ => format!(" [[user(nga{index})]]{flat}"),
             };
             out += &format!("    {}{attribute};\n", decl(field.ty, field.name));
@@ -321,6 +322,7 @@ fn builtin(b: Builtin) -> &'static str {
         Builtin::InstanceId => "[[instance_id]]",
         Builtin::BaseInstance => "[[base_instance]]",
         Builtin::Position => "[[position]]",
+        Builtin::RenderTargetArrayIndex => "[[render_target_array_index]]",
         Builtin::FrontFacing => "[[front_facing]]",
     }
 }

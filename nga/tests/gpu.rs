@@ -83,6 +83,24 @@ mod shader {
     }
 }
 
+#[gpu_mod]
+mod layered {
+    use nga::*;
+
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub render_target_array_index: u32,
+    }
+
+    #[vertex]
+    fn vertex(#[vertex_id] vid: u32) -> VertexOut {
+        VertexOut {
+            position: f32x4::new(0.0, 0.0, 0.0, 1.0),
+            render_target_array_index: vid,
+        }
+    }
+}
+
 #[test]
 fn shape() {
     assert_eq!(CLEAR.name, "clear");
@@ -220,6 +238,30 @@ fn metal() {
     assert!(source.contains("float luma("));
     // `Scene` is memory, so its members land on the offsets Rust chose.
     assert!(source.contains("struct Scene {"));
+}
+
+#[test]
+fn layered_vertex_output_is_a_backend_builtin() {
+    let source = nga::msl::module(&[&layered::VERTEX]);
+    assert!(
+        source.contains("uint render_target_array_index [[render_target_array_index]]"),
+        "Metal output is missing render_target_array_index:\n{source}"
+    );
+
+    let words = nga::spirv::words(&[&layered::VERTEX]);
+    let mut capability = false;
+    let mut builtin = false;
+    let mut i = 5;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        let opcode = (words[i] & 0xffff) as u16;
+        let operands = &words[i + 1..i + count];
+        capability |= opcode == 17 && operands.first() == Some(&69);
+        builtin |= opcode == 71 && operands.len() >= 3 && operands[1..3] == [11, 9];
+        i += count;
+    }
+    assert!(capability, "SPIR-V is missing ShaderLayer");
+    assert!(builtin, "SPIR-V is missing BuiltIn Layer");
 }
 
 #[gpu_mod]

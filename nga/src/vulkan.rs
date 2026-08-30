@@ -259,7 +259,7 @@ pub(crate) fn image_barrier(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(vk::REMAINING_MIP_LEVELS)
-                .layer_count(1),
+                .layer_count(texture.layers),
         )
 }
 
@@ -618,6 +618,7 @@ impl Device {
             .timeline_semaphore(true)
             .host_query_reset(true)
             .draw_indirect_count(true)
+            .shader_output_layer(true)
             .scalar_block_layout(true)
             .runtime_descriptor_array(true)
             .descriptor_binding_partially_bound(true)
@@ -1162,10 +1163,12 @@ impl HeapBuffer {
 pub struct HeapTexture {
     pub(crate) image: vk::Image,
     pub(crate) view: vk::ImageView,
+    pub(crate) attachment_views: Vec<vk::ImageView>,
     pub(crate) format: vk::Format,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) mips: u32,
+    pub(crate) layers: u32,
     pub(crate) alloc: Alloc,
     pub(crate) layout: Cell<vk::ImageLayout>,
 }
@@ -1183,8 +1186,26 @@ impl HeapTexture {
         self.mips
     }
 
+    pub fn layers(&self) -> u32 {
+        self.layers
+    }
+
     pub fn format(&self) -> Format {
         from_vk_format(self.format).expect("texture format is outside nga::Format")
+    }
+
+    fn attachment_view(&self, level: u32, layer: u32) -> vk::ImageView {
+        assert!(
+            level < self.mips,
+            "mip level {level} is outside the {} this texture has",
+            self.mips
+        );
+        assert!(
+            layer < self.layers,
+            "array layer {layer} is outside the {} this texture has",
+            self.layers
+        );
+        self.attachment_views[(level * self.layers + layer) as usize]
     }
 }
 
@@ -1197,6 +1218,7 @@ pub struct TextureDesc {
     pub(crate) aspect: vk::ImageAspectFlags,
     pub(crate) samples: vk::SampleCountFlags,
     pub(crate) mips: u32,
+    pub(crate) layers: u32,
 }
 
 impl TextureDesc {
@@ -1209,6 +1231,7 @@ impl TextureDesc {
             aspect: vk::ImageAspectFlags::COLOR,
             samples: vk::SampleCountFlags::TYPE_1,
             mips: 1,
+            layers: 1,
         }
     }
 
@@ -1224,6 +1247,7 @@ impl TextureDesc {
             },
             samples: vk::SampleCountFlags::TYPE_1,
             mips: 1,
+            layers: 1,
         }
     }
 
@@ -1240,6 +1264,14 @@ impl TextureDesc {
             self.height
         );
         self.mips = mips;
+        self
+    }
+
+    /// Build a 2D array texture. A layered pass writes `Pass::layers` consecutive slices,
+    /// starting at the slice selected by its attachment.
+    pub fn layers(mut self, layers: u32) -> Self {
+        assert!(layers > 0, "a texture must have at least one array layer");
+        self.layers = layers;
         self
     }
 
@@ -1618,7 +1650,7 @@ impl GpuHeap {
                 depth: 1,
             })
             .mip_levels(desc.mips)
-            .array_layers(1)
+            .array_layers(desc.layers)
             .samples(desc.samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(desc.usage)
@@ -1644,28 +1676,56 @@ impl GpuHeap {
             self.device
                 .bind_image_memory(image, self.memory, alloc.offset)?
         };
+        let view_type = match desc.layers {
+            1 => vk::ImageViewType::TYPE_2D,
+            _ => vk::ImageViewType::TYPE_2D_ARRAY,
+        };
         let view = unsafe {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .view_type(view_type)
                     .format(desc.format)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(desc.aspect)
                             .level_count(desc.mips)
-                            .layer_count(1),
+                            .layer_count(desc.layers),
                     ),
                 None,
             )?
         };
+        let mut attachment_views = Vec::with_capacity((desc.mips * desc.layers) as usize);
+        for level in 0..desc.mips {
+            for layer in 0..desc.layers {
+                attachment_views.push(unsafe {
+                    self.device.create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(image)
+                            .view_type(view_type)
+                            .format(desc.format)
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default()
+                                    .aspect_mask(desc.aspect)
+                                    .base_mip_level(level)
+                                    .level_count(1)
+                                    .base_array_layer(layer)
+                                    .layer_count(desc.layers - layer),
+                            ),
+                        None,
+                    )?
+                });
+            }
+        }
         Ok(HeapTexture {
             image,
             view,
+            attachment_views,
             format: desc.format,
             width: desc.width,
             height: desc.height,
             mips: desc.mips,
+            layers: desc.layers,
             alloc,
             layout: Cell::new(vk::ImageLayout::UNDEFINED),
         })
@@ -1738,10 +1798,27 @@ impl GpuHeap {
     /// the extension is advertised and `R8G8B8A8_UNORM` claims `HOST_IMAGE_TRANSFER` support.
     /// See `examples/probe.rs`. So uploads stage through a buffer, exactly like `write`.
     pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+        self.upload_layer(texture, level, 0, bytes)
+    }
+
+    /// Upload one complete mip level of one array layer.
+    pub fn upload_layer(
+        &mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
         if level >= texture.mips {
             return Err(Error::new(format!(
                 "mip level {level} is outside the {} this texture has",
                 texture.mips
+            )));
+        }
+        if layer >= texture.layers {
+            return Err(Error::new(format!(
+                "array layer {layer} is outside the {} this texture has",
+                texture.layers
             )));
         }
         let width = (texture.width >> level).max(1);
@@ -1776,6 +1853,7 @@ impl GpuHeap {
                     image,
                     old,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    texture.layers,
                 )]),
             )
         };
@@ -1804,7 +1882,7 @@ impl GpuHeap {
                         image_subresource: vk::ImageSubresourceLayers {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             mip_level: level,
-                            base_array_layer: 0,
+                            base_array_layer: layer,
                             layer_count: 1,
                         },
                         image_offset: vk::Offset3D {
@@ -1846,6 +1924,7 @@ impl GpuHeap {
         image: vk::Image,
         old: vk::ImageLayout,
         new: vk::ImageLayout,
+        layers: u32,
     ) -> vk::ImageMemoryBarrier2<'static> {
         vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
@@ -1862,7 +1941,7 @@ impl GpuHeap {
                     // uploaded would leave the rest in whatever layout they were last in, and
                     // the sampler reads all of them.
                     .level_count(vk::REMAINING_MIP_LEVELS)
-                    .layer_count(1),
+                    .layer_count(layers),
             )
     }
 
@@ -1903,6 +1982,9 @@ impl GpuHeap {
     /// it does not know which device it came from.
     pub fn free_texture(&mut self, texture: HeapTexture) {
         unsafe {
+            for view in texture.attachment_views {
+                self.device.destroy_image_view(view, None);
+            }
             self.device.destroy_image_view(texture.view, None);
             self.device.destroy_image(texture.image, None);
         }
@@ -2710,6 +2792,10 @@ impl Drop for Shaders {
 pub(crate) struct Attachment {
     pub(crate) view: vk::ImageView,
     pub(crate) image: vk::Image,
+    pub(crate) old_layout: vk::ImageLayout,
+    pub(crate) mips: u32,
+    pub(crate) layers: u32,
+    pub(crate) available_layers: u32,
     pub(crate) clear: Option<vk::ClearValue>,
     pub(crate) store: bool,
     pub(crate) aspect: vk::ImageAspectFlags,
@@ -2721,6 +2807,10 @@ pub(crate) struct Attachment {
     /// the attachment is not multisampled. Metal spells the same thing as `resolveTexture`.
     pub(crate) resolve_view: vk::ImageView,
     pub(crate) resolve_image: vk::Image,
+    pub(crate) resolve_old_layout: vk::ImageLayout,
+    pub(crate) resolve_mips: u32,
+    pub(crate) resolve_layers: u32,
+    pub(crate) resolve_available_layers: u32,
     pub(crate) resolve_mode: vk::ResolveModeFlags,
 }
 
@@ -2742,10 +2832,40 @@ impl Pass {
         }
     }
 
+    /// Render each primitive into one of `layers` consecutive attachment slices. The vertex
+    /// shader selects the relative slice with `render_target_array_index`.
+    pub fn layers(mut self, layers: u32) -> Self {
+        assert!(layers > 0, "a pass must render at least one layer");
+        for attachment in self.colors.iter().chain(self.depth.iter()) {
+            assert!(
+                layers <= attachment.available_layers,
+                "the pass asks for {layers} layers but an attachment has only {} available",
+                attachment.available_layers
+            );
+            if attachment.resolve_view != vk::ImageView::null() {
+                assert!(
+                    layers <= attachment.resolve_available_layers,
+                    "the pass asks for {layers} layers but a resolve attachment has only {} available",
+                    attachment.resolve_available_layers
+                );
+            }
+        }
+        self.layers = layers;
+        self
+    }
+
     pub fn color(mut self, index: usize, drawable: &Drawable, clear: Option<[f32; 4]>) -> Self {
+        assert!(self.layers == 1, "a surface attachment has only one layer");
         let attachment = Attachment {
             view: drawable.view,
             image: drawable.image,
+            old_layout: match clear {
+                Some(_) => vk::ImageLayout::UNDEFINED,
+                None => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            },
+            mips: 1,
+            layers: 1,
+            available_layers: 1,
             clear: clear.map(|float32| vk::ClearValue {
                 color: vk::ClearColorValue { float32 },
             }),
@@ -2757,6 +2877,10 @@ impl Pass {
             stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
+            resolve_old_layout: vk::ImageLayout::UNDEFINED,
+            resolve_mips: 0,
+            resolve_layers: 0,
+            resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
         if self.colors.len() <= index {
@@ -2765,6 +2889,10 @@ impl Pass {
                 Attachment {
                     view: vk::ImageView::null(),
                     image: vk::Image::null(),
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    mips: 1,
+                    layers: 1,
+                    available_layers: 1,
                     clear: None,
                     store: false,
                     aspect: vk::ImageAspectFlags::COLOR,
@@ -2774,6 +2902,10 @@ impl Pass {
                     stencil_store: false,
                     resolve_view: vk::ImageView::null(),
                     resolve_image: vk::Image::null(),
+                    resolve_old_layout: vk::ImageLayout::UNDEFINED,
+                    resolve_mips: 0,
+                    resolve_layers: 0,
+                    resolve_available_layers: 0,
                     resolve_mode: vk::ResolveModeFlags::NONE,
                 },
             );
@@ -2789,17 +2921,40 @@ impl Pass {
     /// texture's tracked layout is updated here. Without this a later `read_texture` would
     /// transition it out of `UNDEFINED` and discard everything the pass just drew.
     pub fn color_texture(
-        mut self,
+        self,
         index: usize,
         texture: &HeapTexture,
         clear: Option<[f32; 4]>,
     ) -> Self {
-        texture
+        self.color_texture_at(index, texture, 0, 0, clear)
+    }
+
+    /// Render into one mip level, starting at `layer`. A layered pass uses consecutive slices
+    /// from that point.
+    pub fn color_texture_at(
+        mut self,
+        index: usize,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        clear: Option<[f32; 4]>,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        assert!(
+            self.layers <= texture.layers - layer,
+            "the pass layers exceed the texture"
+        );
+        let old_layout = texture
             .layout
-            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            .replace(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let attachment = Attachment {
-            view: texture.view,
+            view: texture.attachment_view(level, layer),
             image: texture.image,
+            old_layout,
+            mips: texture.mips,
+            layers: texture.layers,
+            available_layers: texture.layers - layer,
             clear: clear.map(|float32| vk::ClearValue {
                 color: vk::ClearColorValue { float32 },
             }),
@@ -2811,6 +2966,10 @@ impl Pass {
             stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
+            resolve_old_layout: vk::ImageLayout::UNDEFINED,
+            resolve_mips: 0,
+            resolve_layers: 0,
+            resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
         if self.colors.len() <= index {
@@ -2819,6 +2978,10 @@ impl Pass {
                 Attachment {
                     view: vk::ImageView::null(),
                     image: vk::Image::null(),
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    mips: 1,
+                    layers: 1,
+                    available_layers: 1,
                     clear: None,
                     store: false,
                     aspect: vk::ImageAspectFlags::COLOR,
@@ -2828,6 +2991,10 @@ impl Pass {
                     stencil_store: false,
                     resolve_view: vk::ImageView::null(),
                     resolve_image: vk::Image::null(),
+                    resolve_old_layout: vk::ImageLayout::UNDEFINED,
+                    resolve_mips: 0,
+                    resolve_layers: 0,
+                    resolve_available_layers: 0,
                     resolve_mode: vk::ResolveModeFlags::NONE,
                 },
             );
@@ -2836,7 +3003,24 @@ impl Pass {
         self
     }
 
-    pub fn depth(mut self, texture: &HeapTexture, clear: Option<f32>, store: bool) -> Self {
+    pub fn depth(self, texture: &HeapTexture, clear: Option<f32>, store: bool) -> Self {
+        self.depth_at(texture, 0, 0, clear, store)
+    }
+
+    pub fn depth_at(
+        mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        clear: Option<f32>,
+        store: bool,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        assert!(
+            self.layers <= texture.layers - layer,
+            "the pass layers exceed the texture"
+        );
         let has_stencil = texture.format().has_stencil();
         let layout = match has_stencil {
             true => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -2846,10 +3030,14 @@ impl Pass {
             true => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
             false => vk::ImageAspectFlags::DEPTH,
         };
-        texture.layout.set(layout);
+        let old_layout = texture.layout.replace(layout);
         self.depth = Some(Attachment {
-            view: texture.view,
+            view: texture.attachment_view(level, layer),
             image: texture.image,
+            old_layout,
+            mips: texture.mips,
+            layers: texture.layers,
+            available_layers: texture.layers - layer,
             clear: clear.map(|depth| vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
             }),
@@ -2861,14 +3049,30 @@ impl Pass {
             stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
+            resolve_old_layout: vk::ImageLayout::UNDEFINED,
+            resolve_mips: 0,
+            resolve_layers: 0,
+            resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         });
         self
     }
 
     pub fn depth_stencil(
+        self,
+        texture: &HeapTexture,
+        depth_clear: Option<f32>,
+        stencil_clear: Option<u32>,
+        store: bool,
+    ) -> Self {
+        self.depth_stencil_at(texture, 0, 0, depth_clear, stencil_clear, store)
+    }
+
+    pub fn depth_stencil_at(
         mut self,
         texture: &HeapTexture,
+        level: u32,
+        layer: u32,
         depth_clear: Option<f32>,
         stencil_clear: Option<u32>,
         store: bool,
@@ -2877,7 +3081,7 @@ impl Pass {
             texture.format().has_stencil(),
             "Pass::depth_stencil needs a stencil format"
         );
-        self = self.depth(texture, depth_clear, store);
+        self = self.depth_at(texture, level, layer, depth_clear, store);
         let attachment = self.depth.as_mut().unwrap();
         attachment.stencil = true;
         attachment.stencil_clear = stencil_clear;
@@ -2889,46 +3093,91 @@ impl Pass {
     /// still needs the multisample texture bound with [`Pass::color_texture`]; this only names
     /// where it lands.
     pub fn resolve(mut self, index: usize, drawable: &Drawable) -> Self {
+        assert!(self.layers == 1, "a surface resolve has only one layer");
         let target = self
             .colors
             .get_mut(index)
             .expect("Pass::resolve before Pass::color");
         target.resolve_view = drawable.view;
         target.resolve_image = drawable.image;
+        target.resolve_old_layout = vk::ImageLayout::UNDEFINED;
+        target.resolve_mips = 1;
+        target.resolve_layers = 1;
+        target.resolve_available_layers = 1;
         target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
         self
     }
 
     /// Resolve into a texture rather than the surface.
-    pub fn resolve_texture(mut self, index: usize, texture: &HeapTexture) -> Self {
-        texture
+    pub fn resolve_texture(self, index: usize, texture: &HeapTexture) -> Self {
+        self.resolve_texture_at(index, texture, 0, 0)
+    }
+
+    pub fn resolve_texture_at(
+        mut self,
+        index: usize,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        assert!(
+            self.layers <= texture.layers - layer,
+            "the pass layers exceed the resolve texture"
+        );
+        let old_layout = texture
             .layout
-            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            .replace(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let target = self
             .colors
             .get_mut(index)
             .expect("Pass::resolve_texture before Pass::color_texture");
-        target.resolve_view = texture.view;
+        target.resolve_view = texture.attachment_view(level, layer);
         target.resolve_image = texture.image;
+        target.resolve_old_layout = old_layout;
+        target.resolve_mips = texture.mips;
+        target.resolve_layers = texture.layers;
+        target.resolve_available_layers = texture.layers - layer;
         target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
         self
     }
 
     /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
     /// the mode is not implied. See [`ResolveMode`].
-    pub fn depth_resolve(mut self, texture: &HeapTexture, mode: ResolveMode) -> Self {
+    pub fn depth_resolve(self, texture: &HeapTexture, mode: ResolveMode) -> Self {
+        self.depth_resolve_at(texture, 0, 0, mode)
+    }
+
+    pub fn depth_resolve_at(
+        mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        mode: ResolveMode,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        assert!(
+            self.layers <= texture.layers - layer,
+            "the pass layers exceed the resolve texture"
+        );
         let layout = self
             .depth
             .as_ref()
             .expect("Pass::depth_resolve without Pass::depth")
             .layout;
-        texture.layout.set(layout);
+        let old_layout = texture.layout.replace(layout);
         let target = self
             .depth
             .as_mut()
             .expect("Pass::depth_resolve without Pass::depth");
-        target.resolve_view = texture.view;
+        target.resolve_view = texture.attachment_view(level, layer);
         target.resolve_image = texture.image;
+        target.resolve_old_layout = old_layout;
+        target.resolve_mips = texture.mips;
+        target.resolve_layers = texture.layers;
+        target.resolve_available_layers = texture.layers - layer;
         target.resolve_mode = match mode {
             ResolveMode::SampleZero => vk::ResolveModeFlags::SAMPLE_ZERO,
             ResolveMode::Min => vk::ResolveModeFlags::MIN,
@@ -2981,16 +3230,14 @@ impl<'a> Raster<'a> {
                 // A pass that clears may discard whatever was there; a pass that loads must
                 // keep it, and must additionally order its writes after the previous pass's.
                 // Metal's `Pass` needs neither distinction; this is the layout tax again.
-                let (old_layout, src_stage, src_access) = match attachment.clear {
-                    Some(_) => (
-                        vk::ImageLayout::UNDEFINED,
+                let (src_stage, src_access) = match attachment.old_layout {
+                    vk::ImageLayout::UNDEFINED => (
                         vk::PipelineStageFlags2::TOP_OF_PIPE,
                         vk::AccessFlags2::empty(),
                     ),
-                    None => (
-                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                        vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    _ => (
+                        vk::PipelineStageFlags2::ALL_COMMANDS,
+                        vk::AccessFlags2::MEMORY_WRITE,
                     ),
                 };
                 vk::ImageMemoryBarrier2::default()
@@ -3001,24 +3248,25 @@ impl<'a> Raster<'a> {
                         vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
                             | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
                     )
-                    .old_layout(old_layout)
+                    .old_layout(attachment.old_layout)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .image(attachment.image)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .level_count(1)
-                            .layer_count(1),
+                            .level_count(attachment.mips)
+                            .layer_count(attachment.layers),
                     )
             })
             .collect();
         if let Some(attachment) = pass.depth {
             let discards_all = attachment.clear.is_some()
                 && (!attachment.stencil || attachment.stencil_clear.is_some());
-            let old_layout = match discards_all {
-                true => vk::ImageLayout::UNDEFINED,
-                false => attachment.layout,
-            };
+            let old_layout =
+                match discards_all && attachment.mips == 1 && attachment.layers == pass.layers {
+                    true => vk::ImageLayout::UNDEFINED,
+                    false => attachment.old_layout,
+                };
             barriers.push(
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
@@ -3031,8 +3279,8 @@ impl<'a> Raster<'a> {
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(attachment.aspect)
-                            .level_count(1)
-                            .layer_count(1),
+                            .level_count(attachment.mips)
+                            .layer_count(attachment.layers),
                     ),
             );
         }
@@ -3058,7 +3306,7 @@ impl<'a> Raster<'a> {
                         true => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                         false => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                     })
-                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .old_layout(attachment.resolve_old_layout)
                     .new_layout(match depth {
                         true => attachment.layout,
                         false => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -3070,8 +3318,8 @@ impl<'a> Raster<'a> {
                                 true => attachment.aspect,
                                 false => vk::ImageAspectFlags::COLOR,
                             })
-                            .level_count(1)
-                            .layer_count(1),
+                            .level_count(attachment.resolve_mips)
+                            .layer_count(attachment.resolve_layers),
                     ),
             );
         }
@@ -3642,6 +3890,20 @@ impl<'a> Compute<'a> {
     /// more than once. The device address is resolved back to a buffer offset here rather than
     /// carried around, because that is the only thing Vulkan's copy needs that Metal's does not.
     pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuMut<'_, [u8]>) {
+        self.read_texture_at(texture, 0, 0, arena, dest)
+    }
+
+    /// Read one mip level of one array layer into tightly packed host-visible memory.
+    pub fn read_texture_at(
+        &self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        arena: &Arena,
+        dest: GpuMut<'_, [u8]>,
+    ) {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
         let offset = dest
             .0
             .get()
@@ -3652,11 +3914,13 @@ impl<'a> Compute<'a> {
             .image_subresource(
                 vk::ImageSubresourceLayers::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(level)
+                    .base_array_layer(layer)
                     .layer_count(1),
             )
             .image_extent(vk::Extent3D {
-                width: texture.width,
-                height: texture.height,
+                width: (texture.width >> level).max(1),
+                height: (texture.height >> level).max(1),
                 depth: 1,
             })
             .buffer_offset(offset);

@@ -4,14 +4,6 @@ The plan that built this is gone; the design it describes is in the code and in 
 contract comment at the top of `vulkan.rs` and `metal.rs`. What follows is only the list of
 things deliberately left out, and why, so none of it looks like an oversight later.
 
-## Render targets
-
-- **Layered rendering.** `vulkan.rs`'s `Pass` carries a `layers` field internally and nothing
-  sets it above 1. Needs `Pass::layers` publicly plus `SV_RenderTargetArrayIndex`.
-- **Mip levels.** `TextureDesc` builds single-level textures only, which is why there is no
-  `generate_mipmaps`. It would have nothing to generate. Mips first, then the blit chain on
-  Vulkan and `generateMipmapsForTexture:` on Metal.
-
 ## Backend gaps
 
 - **Vulkan mesh shaders.** `Feature::MeshShaders` answers `false` because `Device::new` does not

@@ -739,6 +739,7 @@ pub struct HeapTexture {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) mips: u32,
+    pub(crate) layers: u32,
     pub(crate) alloc: Alloc,
 }
 
@@ -749,6 +750,10 @@ impl HeapTexture {
 
     pub fn mips(&self) -> u32 {
         self.mips
+    }
+
+    pub fn layers(&self) -> u32 {
+        self.layers
     }
 
     pub fn height(&self) -> u32 {
@@ -768,6 +773,7 @@ pub struct TextureDesc {
     pub(crate) usage: Usage,
     pub(crate) samples: u32,
     pub(crate) mips: u32,
+    pub(crate) layers: u32,
 }
 
 impl TextureDesc {
@@ -779,6 +785,7 @@ impl TextureDesc {
             usage: Usage::SAMPLED | Usage::COPY_DST,
             samples: 1,
             mips: 1,
+            layers: 1,
         }
     }
 
@@ -790,6 +797,7 @@ impl TextureDesc {
             usage: Usage::DEPTH_STENCIL,
             samples: 1,
             mips: 1,
+            layers: 1,
         }
     }
 
@@ -806,6 +814,14 @@ impl TextureDesc {
             self.height
         );
         self.mips = mips;
+        self
+    }
+
+    /// Build a 2D array texture. A layered pass writes `Pass::layers` consecutive slices,
+    /// starting at the slice selected by its attachment.
+    pub fn layers(mut self, layers: u32) -> Self {
+        assert!(layers > 0, "a texture must have at least one array layer");
+        self.layers = layers;
         self
     }
 
@@ -842,13 +858,23 @@ impl TextureDesc {
         desc.set_pixel_format(format(self.format));
         desc.set_width(self.width as usize);
         desc.set_height(self.height as usize);
-        desc.set_usage(usage(self.usage));
+        let mut texture_usage = usage(self.usage);
+        if self.layers > 1 {
+            texture_usage = texture_usage | TextureUsage::PIXEL_FORMAT_VIEW;
+            desc.set_array_length(self.layers as usize);
+        }
+        desc.set_usage(texture_usage);
         if self.mips > 1 {
             desc.set_mipmap_level_count(self.mips as usize);
         }
-        if self.samples > 1 {
+        if self.samples > 1 && self.layers > 1 {
+            desc.set_texture_type(TextureType::D2MultisampleArray);
+            desc.set_sample_count(self.samples as usize);
+        } else if self.samples > 1 {
             desc.set_texture_type(TextureType::D2Multisample);
             desc.set_sample_count(self.samples as usize);
+        } else if self.layers > 1 {
+            desc.set_texture_type(TextureType::D2Array);
         }
         desc
     }
@@ -927,6 +953,7 @@ impl GpuHeap {
             width: desc.width,
             height: desc.height,
             mips: desc.mips,
+            layers: desc.layers,
             alloc,
         })
     }
@@ -959,10 +986,27 @@ impl GpuHeap {
     /// `replaceRegion` writes straight into the texture. No staging buffer, no command buffer.
     /// This is the call `VK_EXT_host_image_copy` was meant to be.
     pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+        self.upload_layer(texture, level, 0, bytes)
+    }
+
+    /// Upload one complete mip level of one array layer.
+    pub fn upload_layer(
+        &mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
         if level >= texture.mips {
             return Err(Error::new(format!(
                 "mip level {level} is outside the {} this texture has",
                 texture.mips
+            )));
+        }
+        if layer >= texture.layers {
+            return Err(Error::new(format!(
+                "array layer {layer} is outside the {} this texture has",
+                texture.layers
             )));
         }
         let width = (texture.width >> level).max(1);
@@ -978,9 +1022,25 @@ impl GpuHeap {
             )));
         }
         let row = bytes.len() / height as usize;
-        texture.texture.replace_region(
+        let view;
+        let target;
+        let target_level;
+        if texture.layers > 1 {
+            view = texture.texture.new_texture_view_with_type_and_ranges(
+                format(texture.format),
+                TextureType::D2,
+                minmetal::Range::new(level as usize, 1),
+                minmetal::Range::new(layer as usize, 1),
+            )?;
+            target = &view;
+            target_level = 0;
+        } else {
+            target = &texture.texture;
+            target_level = level as usize;
+        }
+        target.replace_region(
             Region::new_2d(0, 0, width as usize, height as usize),
-            level as usize,
+            target_level,
             bytes,
             row,
         );
@@ -1426,6 +1486,8 @@ fn color_targets(
 pub struct Pass {
     pub(crate) desc: M4RenderPassDescriptor,
     pub(crate) occlusion_base: u32,
+    pub(crate) layers: u32,
+    pub(crate) available_layers: u32,
 }
 
 impl Default for Pass {
@@ -1436,10 +1498,38 @@ impl Default for Pass {
 
 impl Pass {
     pub fn new() -> Self {
+        let desc = M4RenderPassDescriptor::new();
+        desc.set_render_target_array_length(1);
         Self {
-            desc: M4RenderPassDescriptor::new(),
+            desc,
             occlusion_base: 0,
+            layers: 1,
+            available_layers: u32::MAX,
         }
+    }
+
+    /// Render each primitive into one of `layers` consecutive attachment slices. The vertex
+    /// shader selects the relative slice with `render_target_array_index`.
+    pub fn layers(mut self, layers: u32) -> Self {
+        assert!(layers > 0, "a pass must render at least one layer");
+        assert!(
+            layers <= self.available_layers,
+            "the pass asks for {layers} layers but an attachment has only {} available",
+            self.available_layers
+        );
+        self.layers = layers;
+        self.desc.set_render_target_array_length(layers as usize);
+        self
+    }
+
+    fn use_attachment(mut self, available_layers: u32) -> Self {
+        assert!(
+            self.layers <= available_layers,
+            "the pass asks for {} layers but this attachment has only {available_layers} available",
+            self.layers
+        );
+        self.available_layers = self.available_layers.min(available_layers);
+        self
     }
 
     /// Size the tile and its imageblock for a tile pipeline. Apple-only; see [`TileDesc`].
@@ -1470,7 +1560,7 @@ impl Pass {
     }
 
     pub fn color(self, index: usize, drawable: &Drawable, clear: Option<[f32; 4]>) -> Self {
-        self.attach(index, &drawable.texture, clear)
+        self.attach(index, &drawable.texture, 0, 0, 1, clear)
     }
 
     /// Renders into a texture rather than the surface. The two differ only in where the texture
@@ -1482,15 +1572,48 @@ impl Pass {
         texture: &HeapTexture,
         clear: Option<[f32; 4]>,
     ) -> Self {
-        self.attach(index, &texture.texture, clear)
+        self.color_texture_at(index, texture, 0, 0, clear)
     }
 
-    fn attach(self, index: usize, texture: &Texture, clear: Option<[f32; 4]>) -> Self {
+    /// Render into one mip level, starting at `layer`. A layered pass uses consecutive slices
+    /// from that point.
+    pub fn color_texture_at(
+        self,
+        index: usize,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        clear: Option<[f32; 4]>,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        self.attach(
+            index,
+            &texture.texture,
+            level,
+            layer,
+            texture.layers - layer,
+            clear,
+        )
+    }
+
+    fn attach(
+        mut self,
+        index: usize,
+        texture: &Texture,
+        level: u32,
+        layer: u32,
+        available_layers: u32,
+        clear: Option<[f32; 4]>,
+    ) -> Self {
+        self = self.use_attachment(available_layers);
         let attachment = self
             .desc
             .color_attachments()
             .object_at_indexed_subscript(index);
         attachment.base().set_texture(Some(texture));
+        attachment.base().set_level(level as usize);
+        attachment.base().set_slice(layer as usize);
         attachment
             .base()
             .set_store_action(minmetal::StoreAction::Store);
@@ -1514,20 +1637,48 @@ impl Pass {
     /// still needs the multisample texture bound with [`Pass::color_texture`]; this only names
     /// where it lands.
     pub fn resolve(self, index: usize, drawable: &Drawable) -> Self {
-        self.attach_resolve(index, &drawable.texture)
+        self.attach_resolve(index, &drawable.texture, 0, 0, 1)
     }
 
     /// Resolve into a texture rather than the surface.
     pub fn resolve_texture(self, index: usize, texture: &HeapTexture) -> Self {
-        self.attach_resolve(index, &texture.texture)
+        self.resolve_texture_at(index, texture, 0, 0)
     }
 
-    fn attach_resolve(self, index: usize, texture: &Texture) -> Self {
+    pub fn resolve_texture_at(
+        self,
+        index: usize,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        self.attach_resolve(
+            index,
+            &texture.texture,
+            level,
+            layer,
+            texture.layers - layer,
+        )
+    }
+
+    fn attach_resolve(
+        mut self,
+        index: usize,
+        texture: &Texture,
+        level: u32,
+        layer: u32,
+        available_layers: u32,
+    ) -> Self {
+        self = self.use_attachment(available_layers);
         let attachment = self
             .desc
             .color_attachments()
             .object_at_indexed_subscript(index);
         attachment.base().set_resolve_texture(Some(texture));
+        attachment.base().set_resolve_level(level as usize);
+        attachment.base().set_resolve_slice(layer as usize);
         // The multisample texture itself is never read again, so it is resolved rather than
         // stored. Vulkan says the same thing by giving the resolve target its own store op.
         attachment
@@ -1539,10 +1690,25 @@ impl Pass {
     /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
     /// the mode is not implied. See [`ResolveMode`].
     pub fn depth_resolve(self, texture: &HeapTexture, mode: ResolveMode) -> Self {
+        self.depth_resolve_at(texture, 0, 0, mode)
+    }
+
+    pub fn depth_resolve_at(
+        mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        mode: ResolveMode,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        self = self.use_attachment(texture.layers - layer);
         let attachment = self.desc.depth_attachment();
         attachment
             .base()
             .set_resolve_texture(Some(&texture.texture));
+        attachment.base().set_resolve_level(level as usize);
+        attachment.base().set_resolve_slice(layer as usize);
         attachment
             .base()
             .set_store_action(minmetal::StoreAction::MultisampleResolve);
@@ -1557,8 +1723,24 @@ impl Pass {
     }
 
     pub fn depth(self, texture: &HeapTexture, clear: Option<f32>, store: bool) -> Self {
+        self.depth_at(texture, 0, 0, clear, store)
+    }
+
+    pub fn depth_at(
+        mut self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        clear: Option<f32>,
+        store: bool,
+    ) -> Self {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
+        self = self.use_attachment(texture.layers - layer);
         let attachment = self.desc.depth_attachment();
         attachment.base().set_texture(Some(&texture.texture));
+        attachment.base().set_level(level as usize);
+        attachment.base().set_slice(layer as usize);
         attachment.base().set_store_action(match store {
             true => minmetal::StoreAction::Store,
             false => minmetal::StoreAction::DontCare,
@@ -1584,13 +1766,27 @@ impl Pass {
         stencil_clear: Option<u32>,
         store: bool,
     ) -> Self {
+        self.depth_stencil_at(texture, 0, 0, depth_clear, stencil_clear, store)
+    }
+
+    pub fn depth_stencil_at(
+        self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        depth_clear: Option<f32>,
+        stencil_clear: Option<u32>,
+        store: bool,
+    ) -> Self {
         assert!(
             texture.format().has_stencil(),
             "Pass::depth_stencil needs a stencil format"
         );
-        let pass = self.depth(texture, depth_clear, store);
+        let pass = self.depth_at(texture, level, layer, depth_clear, store);
         let attachment = pass.desc.stencil_attachment();
         attachment.base().set_texture(Some(&texture.texture));
+        attachment.base().set_level(level as usize);
+        attachment.base().set_slice(layer as usize);
         attachment.base().set_store_action(match store {
             true => minmetal::StoreAction::Store,
             false => minmetal::StoreAction::DontCare,
@@ -2016,22 +2212,38 @@ impl<'a> Compute<'a> {
     /// Reads a whole texture back into host-visible memory, tightly packed. The counterpart of
     /// `GpuHeap::upload`, and what makes a headless render checkable without a screenshot.
     pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuMut<'_, [u8]>) {
+        self.read_texture_at(texture, 0, 0, arena, dest)
+    }
+
+    /// Read one mip level of one array layer into tightly packed host-visible memory.
+    pub fn read_texture_at(
+        &self,
+        texture: &HeapTexture,
+        level: u32,
+        layer: u32,
+        arena: &Arena,
+        dest: GpuMut<'_, [u8]>,
+    ) {
+        assert!(level < texture.mips, "mip level is outside the texture");
+        assert!(layer < texture.layers, "array layer is outside the texture");
         let offset = dest
             .0
             .get()
             .checked_sub(arena.base)
             .expect("the readback destination is not in this arena") as usize;
-        let row = texture.width as usize * texture.format.size();
+        let width = (texture.width >> level).max(1);
+        let height = (texture.height >> level).max(1);
+        let row = width as usize * texture.format.size();
         self.encoder.copy_texture_to_buffer(
             &texture.texture,
-            0,
-            0,
+            layer as usize,
+            level as usize,
             Origin::new(0, 0, 0),
-            Size::new(texture.width as usize, texture.height as usize, 1),
+            Size::new(width as usize, height as usize, 1),
             &arena.buffer,
             offset,
             row,
-            row * texture.height as usize,
+            row * height as usize,
             minmetal::BlitOption::NONE,
         );
     }
