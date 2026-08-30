@@ -13,8 +13,8 @@ use std::ptr::NonNull;
 pub mod ir;
 pub mod msl;
 pub mod spirv;
-pub mod vector;
 pub mod tlsf;
+pub mod vector;
 
 pub use nga_gpu::{Constants, gpu_mod};
 pub use tlsf::{Alloc, Tlsf};
@@ -491,6 +491,10 @@ impl Format {
             Format::D32Float | Format::D32FloatS8 | Format::D16Unorm
         )
     }
+
+    pub fn has_stencil(self) -> bool {
+        matches!(self, Format::D32FloatS8)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,8 +787,8 @@ impl ColorTarget {
     }
 }
 
-/// Everything a raster pipeline needs that is not the shader itself. The depth and cull state
-/// is deliberately absent: both backends set those dynamically per draw.
+/// Everything a raster pipeline needs that is not the shader itself. The depth, stencil and
+/// cull state is deliberately absent: both backends set those dynamically per draw.
 #[derive(Clone, Copy)]
 pub struct RasterDesc<'a> {
     pub vertex: &'a str,
@@ -923,15 +927,79 @@ impl<'a> TileDesc<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StencilOp {
+    Keep,
+    Zero,
+    Replace,
+    IncrementClamp,
+    DecrementClamp,
+    Invert,
+    IncrementWrap,
+    DecrementWrap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StencilFace {
+    pub compare: CompareOp,
+    pub fail: StencilOp,
+    pub depth_fail: StencilOp,
+    pub pass: StencilOp,
+    pub read_mask: u32,
+    pub write_mask: u32,
+}
+
+impl StencilFace {
+    pub fn new(compare: CompareOp) -> Self {
+        Self {
+            compare,
+            fail: StencilOp::Keep,
+            depth_fail: StencilOp::Keep,
+            pass: StencilOp::Keep,
+            read_mask: u32::MAX,
+            write_mask: u32::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StencilState {
+    pub front: StencilFace,
+    pub back: StencilFace,
+}
+
+impl StencilState {
+    pub fn new(front: StencilFace, back: StencilFace) -> Self {
+        Self { front, back }
+    }
+
+    pub fn symmetric(face: StencilFace) -> Self {
+        Self {
+            front: face,
+            back: face,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepthState {
     pub compare: CompareOp,
     pub write: bool,
+    pub stencil: Option<StencilState>,
 }
 
 impl DepthState {
     pub fn new(compare: CompareOp, write: bool) -> Self {
-        Self { compare, write }
+        Self {
+            compare,
+            write,
+            stencil: None,
+        }
+    }
+
+    pub fn stencil(mut self, stencil: StencilState) -> Self {
+        self.stencil = Some(stencil);
+        self
     }
 
     /// Metal folds "no test" into `CompareOp::Always`; Vulkan has a separate enable bit, and

@@ -6,10 +6,6 @@ things deliberately left out, and why, so none of it looks like an oversight lat
 
 ## Render targets
 
-- **Stencil.** No stencil attachment, no stencil state, no reference value. `Format::D32FloatS8`
-  exists and `DepthState` is depth-only. Metal wants a `MTLStencilDescriptor` pair on the
-  depth-stencil state, which is built once per (compare, write) pair in `Context::new`, so a
-  stencil face would multiply that table.
 - **Layered rendering.** `vulkan.rs`'s `Pass` carries a `layers` field internally and nothing
   sets it above 1. Needs `Pass::layers` publicly plus `SV_RenderTargetArrayIndex`.
 - **Mip levels.** `TextureDesc` builds single-level textures only, which is why there is no

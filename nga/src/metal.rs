@@ -30,28 +30,28 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
     Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    Gpu, GpuBox, GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
-    RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW,
-    TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
+    Gpu, GpuBox, GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
+    ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d,
+    Texture2dRW, TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
-    DepthStencilDescriptor, DepthStencilState, FunctionConstantValues, HazardTrackingMode, Heap,
-    HeapDescriptor, HeapType, IndexType, IndirectCommandBuffer, IndirectCommandBufferDescriptor,
-    IndirectCommandBufferOptions, IndirectCommandType, M4AlphaToCoverageState, M4ArgumentTable,
-    M4ArgumentTableDescriptor, M4BlendState, M4CommandAllocator, M4CommandBuffer, M4CommandQueue,
-    M4Compiler, M4CompilerDescriptor, M4ComputeCommandEncoder, M4ComputePipelineDescriptor,
-    M4CounterHeap, M4CounterHeapDescriptor, M4CounterHeapType, M4FunctionDescriptor,
-    M4IndirectCommandBufferSupportState, M4LibraryDescriptor, M4LibraryFunctionDescriptor,
-    M4MeshRenderPipelineDescriptor, M4RenderCommandEncoder, M4RenderPassDescriptor,
-    M4RenderPipelineColorAttachmentDescriptorArray, M4RenderPipelineDescriptor,
-    M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor, M4TimestampGranularity,
-    M4VisibilityOptions, MetalError, MetalLayer, MultisampleDepthResolveFilter, Origin,
-    PixelFormat, PrimitiveTopologyClass, PrimitiveType, Region, RenderStages, ResidencySet,
-    ResidencySetDescriptor, ResourceOptions, SamplerAddressMode, SamplerDescriptor,
-    SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages, StorageMode, Texture,
-    TextureDescriptor, TextureType, TextureUsage, VisibilityResultMode, VisibilityResultType, id,
-    retain,
+    DepthStencilDescriptor, DepthStencilState as MetalDepthStencilState, FunctionConstantValues,
+    HazardTrackingMode, Heap, HeapDescriptor, HeapType, IndexType, IndirectCommandBuffer,
+    IndirectCommandBufferDescriptor, IndirectCommandBufferOptions, IndirectCommandType,
+    M4AlphaToCoverageState, M4ArgumentTable, M4ArgumentTableDescriptor, M4BlendState,
+    M4CommandAllocator, M4CommandBuffer, M4CommandQueue, M4Compiler, M4CompilerDescriptor,
+    M4ComputeCommandEncoder, M4ComputePipelineDescriptor, M4CounterHeap, M4CounterHeapDescriptor,
+    M4CounterHeapType, M4FunctionDescriptor, M4IndirectCommandBufferSupportState,
+    M4LibraryDescriptor, M4LibraryFunctionDescriptor, M4MeshRenderPipelineDescriptor,
+    M4RenderCommandEncoder, M4RenderPassDescriptor, M4RenderPipelineColorAttachmentDescriptorArray,
+    M4RenderPipelineDescriptor, M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor,
+    M4TimestampGranularity, M4VisibilityOptions, MetalError, MetalLayer,
+    MultisampleDepthResolveFilter, Origin, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
+    Region, RenderStages, ResidencySet, ResidencySetDescriptor, ResourceOptions,
+    SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent,
+    Size, Stages, StencilDescriptor, StencilOperation, StorageMode, Texture, TextureDescriptor,
+    TextureType, TextureUsage, VisibilityResultMode, VisibilityResultType, id, retain,
 };
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -88,6 +88,9 @@ unsafe impl Sync for Pipeline {}
 /// A sampler *object*. `Sampler` in `lib.rs` is the bindless handle that points at one of
 /// these, which is why this needs a different name.
 pub struct SamplerState(minmetal::SamplerState);
+
+/// A depth-stencil object created before command recording.
+pub struct DepthStencilState(MetalDepthStencilState);
 
 /// One run of a multi-draw. Layout matches `VkMultiDrawInfoEXT`, so on Vulkan a slice passes
 /// straight into `vkCmdDrawMultiEXT`; here it is walked one draw at a time.
@@ -236,6 +239,19 @@ pub(crate) fn compare_op(op: CompareOp) -> CompareFunction {
     }
 }
 
+pub(crate) fn stencil_op(op: StencilOp) -> StencilOperation {
+    match op {
+        StencilOp::Keep => StencilOperation::Keep,
+        StencilOp::Zero => StencilOperation::Zero,
+        StencilOp::Replace => StencilOperation::Replace,
+        StencilOp::IncrementClamp => StencilOperation::IncrementClamp,
+        StencilOp::DecrementClamp => StencilOperation::DecrementClamp,
+        StencilOp::Invert => StencilOperation::Invert,
+        StencilOp::IncrementWrap => StencilOperation::IncrementWrap,
+        StencilOp::DecrementWrap => StencilOperation::DecrementWrap,
+    }
+}
+
 /// The index into `Context::depth_states`. Sixteen depth-stencil objects are built once and
 /// looked up by value, because Metal has no dynamic depth state and building one per call
 /// would allocate inside a render pass.
@@ -253,17 +269,35 @@ pub(crate) fn depth_index(state: &DepthState) -> usize {
     compare * 2 + state.write as usize
 }
 
-pub(crate) fn compare_at(index: usize) -> CompareFunction {
-    match index {
-        0 => CompareFunction::Never,
-        1 => CompareFunction::Less,
-        2 => CompareFunction::Equal,
-        3 => CompareFunction::LessEqual,
-        4 => CompareFunction::Greater,
-        5 => CompareFunction::NotEqual,
-        6 => CompareFunction::GreaterEqual,
-        _ => CompareFunction::Always,
+fn stencil_descriptor(face: StencilFace) -> StencilDescriptor {
+    let desc = StencilDescriptor::new();
+    desc.set_stencil_compare_function(compare_op(face.compare));
+    desc.set_stencil_failure_operation(stencil_op(face.fail));
+    desc.set_depth_failure_operation(stencil_op(face.depth_fail));
+    desc.set_depth_stencil_pass_operation(stencil_op(face.pass));
+    desc.set_read_mask(face.read_mask);
+    desc.set_write_mask(face.write_mask);
+    desc
+}
+
+fn depth_stencil_descriptor(state: &DepthState) -> DepthStencilDescriptor {
+    let desc = DepthStencilDescriptor::new();
+    desc.set_depth_compare_function(compare_op(state.compare));
+    desc.set_depth_write_enabled(state.write);
+    if let Some(stencil) = state.stencil {
+        desc.set_front_face_stencil(&stencil_descriptor(stencil.front));
+        desc.set_back_face_stencil(&stencil_descriptor(stencil.back));
     }
+    desc
+}
+
+fn metal_depth_state(
+    device: &minmetal::Device,
+    compare: CompareOp,
+    write: bool,
+) -> Result<MetalDepthStencilState, Error> {
+    let desc = depth_stencil_descriptor(&DepthState::new(compare, write));
+    Ok(device.new_depth_stencil_state(&desc)?)
 }
 
 pub(crate) fn filter(filter: Filter) -> SamplerMinMagFilter {
@@ -537,6 +571,13 @@ impl Device {
     /// There is no multi-draw call, so the longest accepted run is one.
     pub fn max_multi_draw(&self) -> u32 {
         1
+    }
+
+    /// Build a combined depth-stencil object before command recording.
+    pub fn depth_stencil_state(&self, state: &DepthState) -> Result<DepthStencilState, Error> {
+        Ok(DepthStencilState(self.device.new_depth_stencil_state(
+            &depth_stencil_descriptor(state),
+        )?))
     }
 
     /// A sampler object, to be written into a heap slot. `support_argument_buffers` is what
@@ -1177,7 +1218,9 @@ impl Shaders {
         desc.set_source(source);
         let library = compiler
             .new_library_with_descriptor(&desc)
-            .map_err(|error| Error::new(crate::msl::format_compile_error(source, &error.to_string())))?;
+            .map_err(|error| {
+                Error::new(crate::msl::format_compile_error(source, &error.to_string()))
+            })?;
         Ok(Self {
             library,
             compiler,
@@ -1533,6 +1576,38 @@ impl Pass {
         }
         self
     }
+
+    pub fn depth_stencil(
+        self,
+        texture: &HeapTexture,
+        depth_clear: Option<f32>,
+        stencil_clear: Option<u32>,
+        store: bool,
+    ) -> Self {
+        assert!(
+            texture.format().has_stencil(),
+            "Pass::depth_stencil needs a stencil format"
+        );
+        let pass = self.depth(texture, depth_clear, store);
+        let attachment = pass.desc.stencil_attachment();
+        attachment.base().set_texture(Some(&texture.texture));
+        attachment.base().set_store_action(match store {
+            true => minmetal::StoreAction::Store,
+            false => minmetal::StoreAction::DontCare,
+        });
+        match stencil_clear {
+            Some(stencil) => {
+                attachment
+                    .base()
+                    .set_load_action(minmetal::LoadAction::Clear);
+                attachment.set_clear_stencil(stencil);
+            }
+            None => attachment
+                .base()
+                .set_load_action(minmetal::LoadAction::Load),
+        }
+        pass
+    }
 }
 
 // -- recording ---------------------------------------------------------------------------
@@ -1541,7 +1616,7 @@ pub struct Raster<'a> {
     pub(crate) encoder: M4RenderCommandEncoder,
     pub(crate) table: &'a M4ArgumentTable,
     pub(crate) arena: &'a Arena,
-    pub(crate) depth_states: &'a [DepthStencilState],
+    pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) primitive: Cell<PrimitiveType>,
     pub(crate) occlusion_base: u32,
 }
@@ -1551,7 +1626,7 @@ impl<'a> Raster<'a> {
         command_buffer: &'a M4CommandBuffer,
         table: &'a M4ArgumentTable,
         arena: &'a Arena,
-        depth_states: &'a [DepthStencilState],
+        depth_states: &'a [MetalDepthStencilState; 16],
         pass: &Pass,
         width: u32,
         height: u32,
@@ -1586,6 +1661,7 @@ impl<'a> Raster<'a> {
         );
         raster.cull(Cull::None, Winding::CounterClockwise);
         raster.depth(&DepthState::new(CompareOp::Always, false));
+        raster.stencil_reference(0);
         raster
     }
 
@@ -1608,8 +1684,20 @@ impl<'a> Raster<'a> {
     pub fn heap(&self, _heap: &ResourceHeap) {}
 
     pub fn depth(&self, state: &DepthState) {
+        assert!(
+            state.stencil.is_none(),
+            "create stencil states with Device::depth_stencil_state"
+        );
         self.encoder
             .set_depth_stencil_state(&self.depth_states[depth_index(state)]);
+    }
+
+    pub fn depth_stencil(&self, state: &DepthStencilState) {
+        self.encoder.set_depth_stencil_state(&state.0);
+    }
+
+    pub fn stencil_reference(&self, reference: u32) {
+        self.encoder.set_stencil_reference_value(reference);
     }
 
     pub fn cull(&self, mode: Cull, front: Winding) {
@@ -2019,9 +2107,8 @@ pub struct Context {
     pub(crate) allocators: Vec<M4CommandAllocator>,
     pub(crate) tables: Vec<M4ArgumentTable>,
     pub(crate) arenas: Vec<Arena>,
-    /// Every (compare, write) pair, built once. Metal has no dynamic depth state, and a render
-    /// pass is the wrong place to be creating objects.
-    pub(crate) depth_states: Vec<DepthStencilState>,
+    /// Every depth-only (compare, write) pair, indexed without a lookup while recording.
+    pub(crate) depth_states: [MetalDepthStencilState; 16],
     pub(crate) threads: usize,
     pub(crate) frame: u64,
 }
@@ -2069,13 +2156,24 @@ impl Context {
             );
         }
 
-        let mut depth_states = Vec::with_capacity(16);
-        for index in 0..16 {
-            let desc = DepthStencilDescriptor::new();
-            desc.set_depth_compare_function(compare_at(index / 2));
-            desc.set_depth_write_enabled(index % 2 == 1);
-            depth_states.push(device.device.new_depth_stencil_state(&desc)?);
-        }
+        let depth_states = [
+            metal_depth_state(&device.device, CompareOp::Never, false)?,
+            metal_depth_state(&device.device, CompareOp::Never, true)?,
+            metal_depth_state(&device.device, CompareOp::Less, false)?,
+            metal_depth_state(&device.device, CompareOp::Less, true)?,
+            metal_depth_state(&device.device, CompareOp::Equal, false)?,
+            metal_depth_state(&device.device, CompareOp::Equal, true)?,
+            metal_depth_state(&device.device, CompareOp::LessEqual, false)?,
+            metal_depth_state(&device.device, CompareOp::LessEqual, true)?,
+            metal_depth_state(&device.device, CompareOp::Greater, false)?,
+            metal_depth_state(&device.device, CompareOp::Greater, true)?,
+            metal_depth_state(&device.device, CompareOp::NotEqual, false)?,
+            metal_depth_state(&device.device, CompareOp::NotEqual, true)?,
+            metal_depth_state(&device.device, CompareOp::GreaterEqual, false)?,
+            metal_depth_state(&device.device, CompareOp::GreaterEqual, true)?,
+            metal_depth_state(&device.device, CompareOp::Always, false)?,
+            metal_depth_state(&device.device, CompareOp::Always, true)?,
+        ];
 
         Ok(Self {
             queue: M4CommandQueue::from_raw(device.queue.raw),
@@ -2141,7 +2239,7 @@ pub struct Frame<'a> {
     pub(crate) allocators: &'a [M4CommandAllocator],
     pub(crate) command_buffers: &'a [M4CommandBuffer],
     pub(crate) tables: &'a [M4ArgumentTable],
-    pub(crate) depth_states: &'a [DepthStencilState],
+    pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) recording: usize,
     pub(crate) value: u64,
 }
@@ -2216,7 +2314,7 @@ pub struct Recorder<'a> {
     pub(crate) arena: &'a Arena,
     pub(crate) command_buffer: &'a M4CommandBuffer,
     pub(crate) table: &'a M4ArgumentTable,
-    pub(crate) depth_states: &'a [DepthStencilState],
+    pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) not_sync: PhantomData<Cell<()>>,
 }
 

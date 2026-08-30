@@ -18,10 +18,9 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
     Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    Gpu, GpuBox,
-    GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc, ResolveMode,
-    Sampler, SamplerDesc, Scalar, Scissor, Stage, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology,
-    Usage, Viewport, Winding,
+    Gpu, GpuBox, GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
+    ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d,
+    Texture2dRW, TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
@@ -48,6 +47,10 @@ impl Pipeline {
 /// A sampler *object* living in the heap. `Sampler` in `lib.rs` is the bindless handle that
 /// points at one of these, which is why this needs a different name.
 pub struct SamplerState(vk::Sampler, ash::Device);
+
+/// A depth-stencil description prepared before command recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DepthStencilState(DepthState);
 
 impl Drop for SamplerState {
     fn drop(&mut self) {
@@ -143,6 +146,19 @@ pub(crate) fn compare_op(op: CompareOp) -> vk::CompareOp {
         CompareOp::NotEqual => vk::CompareOp::NOT_EQUAL,
         CompareOp::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
         CompareOp::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+pub(crate) fn stencil_op(op: StencilOp) -> vk::StencilOp {
+    match op {
+        StencilOp::Keep => vk::StencilOp::KEEP,
+        StencilOp::Zero => vk::StencilOp::ZERO,
+        StencilOp::Replace => vk::StencilOp::REPLACE,
+        StencilOp::IncrementClamp => vk::StencilOp::INCREMENT_AND_CLAMP,
+        StencilOp::DecrementClamp => vk::StencilOp::DECREMENT_AND_CLAMP,
+        StencilOp::Invert => vk::StencilOp::INVERT,
+        StencilOp::IncrementWrap => vk::StencilOp::INCREMENT_AND_WRAP,
+        StencilOp::DecrementWrap => vk::StencilOp::DECREMENT_AND_WRAP,
     }
 }
 
@@ -799,6 +815,11 @@ impl Device {
         self.max_multi_draw_count
     }
 
+    /// Prepare a combined depth-stencil state before command recording.
+    pub fn depth_stencil_state(&self, state: &DepthState) -> Result<DepthStencilState, Error> {
+        Ok(DepthStencilState(*state))
+    }
+
     /// A sampler object, to be written into a heap slot. The returned value owns a
     /// `VkSampler`, so it must outlive every heap slot pointing at it.
     pub fn sampler(&self, desc: &SamplerDesc) -> Result<SamplerState, Error> {
@@ -1197,7 +1218,10 @@ impl TextureDesc {
             width,
             height,
             usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            aspect: vk::ImageAspectFlags::DEPTH,
+            aspect: match fmt.has_stencil() {
+                true => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                false => vk::ImageAspectFlags::DEPTH,
+            },
             samples: vk::SampleCountFlags::TYPE_1,
             mips: 1,
         }
@@ -1239,9 +1263,9 @@ impl TextureDesc {
                 | vk::ImageUsageFlags::STORAGE
                 | vk::ImageUsageFlags::TRANSFER_SRC
                 | vk::ImageUsageFlags::TRANSFER_DST);
-            self.usage |= match self.aspect {
-                vk::ImageAspectFlags::DEPTH => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                _ => vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            self.usage |= match self.aspect.contains(vk::ImageAspectFlags::DEPTH) {
+                true => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                false => vk::ImageUsageFlags::COLOR_ATTACHMENT,
             };
         }
         self
@@ -2580,14 +2604,22 @@ impl Shaders {
             vk::DynamicState::DEPTH_COMPARE_OP,
             vk::DynamicState::STENCIL_TEST_ENABLE,
             vk::DynamicState::STENCIL_OP,
+            vk::DynamicState::STENCIL_COMPARE_MASK,
+            vk::DynamicState::STENCIL_WRITE_MASK,
             vk::DynamicState::STENCIL_REFERENCE,
         ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let formats: Vec<vk::Format> = desc.colors.iter().map(|t| format(t.format)).collect();
+        let depth_format = desc.depth.map_or(vk::Format::UNDEFINED, format);
+        let stencil_format = desc
+            .depth
+            .filter(|format| format.has_stencil())
+            .map_or(vk::Format::UNDEFINED, format);
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats)
-            .depth_attachment_format(desc.depth.map_or(vk::Format::UNDEFINED, format));
+            .depth_attachment_format(depth_format)
+            .stencil_attachment_format(stencil_format);
 
         let create = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -2680,6 +2712,11 @@ pub(crate) struct Attachment {
     pub(crate) image: vk::Image,
     pub(crate) clear: Option<vk::ClearValue>,
     pub(crate) store: bool,
+    pub(crate) aspect: vk::ImageAspectFlags,
+    pub(crate) layout: vk::ImageLayout,
+    pub(crate) stencil: bool,
+    pub(crate) stencil_clear: Option<u32>,
+    pub(crate) stencil_store: bool,
     /// The single-sample image a multisample attachment collapses into at pass end. Null when
     /// the attachment is not multisampled. Metal spells the same thing as `resolveTexture`.
     pub(crate) resolve_view: vk::ImageView,
@@ -2713,6 +2750,11 @@ impl Pass {
                 color: vk::ClearColorValue { float32 },
             }),
             store: true,
+            aspect: vk::ImageAspectFlags::COLOR,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            stencil: false,
+            stencil_clear: None,
+            stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
             resolve_mode: vk::ResolveModeFlags::NONE,
@@ -2725,6 +2767,11 @@ impl Pass {
                     image: vk::Image::null(),
                     clear: None,
                     store: false,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                    layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    stencil: false,
+                    stencil_clear: None,
+                    stencil_store: false,
                     resolve_view: vk::ImageView::null(),
                     resolve_image: vk::Image::null(),
                     resolve_mode: vk::ResolveModeFlags::NONE,
@@ -2757,6 +2804,11 @@ impl Pass {
                 color: vk::ClearColorValue { float32 },
             }),
             store: true,
+            aspect: vk::ImageAspectFlags::COLOR,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            stencil: false,
+            stencil_clear: None,
+            stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
             resolve_mode: vk::ResolveModeFlags::NONE,
@@ -2769,6 +2821,11 @@ impl Pass {
                     image: vk::Image::null(),
                     clear: None,
                     store: false,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                    layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    stencil: false,
+                    stencil_clear: None,
+                    stencil_store: false,
                     resolve_view: vk::ImageView::null(),
                     resolve_image: vk::Image::null(),
                     resolve_mode: vk::ResolveModeFlags::NONE,
@@ -2780,9 +2837,16 @@ impl Pass {
     }
 
     pub fn depth(mut self, texture: &HeapTexture, clear: Option<f32>, store: bool) -> Self {
-        texture
-            .layout
-            .set(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+        let has_stencil = texture.format().has_stencil();
+        let layout = match has_stencil {
+            true => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            false => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        };
+        let aspect = match has_stencil {
+            true => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            false => vk::ImageAspectFlags::DEPTH,
+        };
+        texture.layout.set(layout);
         self.depth = Some(Attachment {
             view: texture.view,
             image: texture.image,
@@ -2790,10 +2854,34 @@ impl Pass {
                 depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
             }),
             store,
+            aspect,
+            layout,
+            stencil: false,
+            stencil_clear: None,
+            stencil_store: false,
             resolve_view: vk::ImageView::null(),
             resolve_image: vk::Image::null(),
             resolve_mode: vk::ResolveModeFlags::NONE,
         });
+        self
+    }
+
+    pub fn depth_stencil(
+        mut self,
+        texture: &HeapTexture,
+        depth_clear: Option<f32>,
+        stencil_clear: Option<u32>,
+        store: bool,
+    ) -> Self {
+        assert!(
+            texture.format().has_stencil(),
+            "Pass::depth_stencil needs a stencil format"
+        );
+        self = self.depth(texture, depth_clear, store);
+        let attachment = self.depth.as_mut().unwrap();
+        attachment.stencil = true;
+        attachment.stencil_clear = stencil_clear;
+        attachment.stencil_store = store;
         self
     }
 
@@ -2829,9 +2917,12 @@ impl Pass {
     /// Collapse the multisample depth attachment into a single-sample texture. Unlike colour
     /// the mode is not implied. See [`ResolveMode`].
     pub fn depth_resolve(mut self, texture: &HeapTexture, mode: ResolveMode) -> Self {
-        texture
-            .layout
-            .set(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+        let layout = self
+            .depth
+            .as_ref()
+            .expect("Pass::depth_resolve without Pass::depth")
+            .layout;
+        texture.layout.set(layout);
         let target = self
             .depth
             .as_mut()
@@ -2922,9 +3013,11 @@ impl<'a> Raster<'a> {
             })
             .collect();
         if let Some(attachment) = pass.depth {
-            let old_layout = match attachment.clear {
-                Some(_) => vk::ImageLayout::UNDEFINED,
-                None => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            let discards_all = attachment.clear.is_some()
+                && (!attachment.stencil || attachment.stencil_clear.is_some());
+            let old_layout = match discards_all {
+                true => vk::ImageLayout::UNDEFINED,
+                false => attachment.layout,
             };
             barriers.push(
                 vk::ImageMemoryBarrier2::default()
@@ -2933,11 +3026,11 @@ impl<'a> Raster<'a> {
                     .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
                     .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
                     .old_layout(old_layout)
-                    .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                    .new_layout(attachment.layout)
                     .image(attachment.image)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .aspect_mask(attachment.aspect)
                             .level_count(1)
                             .layer_count(1),
                     ),
@@ -2967,14 +3060,14 @@ impl<'a> Raster<'a> {
                     })
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(match depth {
-                        true => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        true => attachment.layout,
                         false => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                     })
                     .image(attachment.resolve_image)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(match depth {
-                                true => vk::ImageAspectFlags::DEPTH,
+                                true => attachment.aspect,
                                 false => vk::ImageAspectFlags::COLOR,
                             })
                             .level_count(1)
@@ -3020,10 +3113,11 @@ impl<'a> Raster<'a> {
             .layer_count(pass.layers)
             .color_attachments(&colors);
         let mut depth;
+        let stencil;
         if let Some(attachment) = pass.depth {
             depth = vk::RenderingAttachmentInfo::default()
                 .image_view(attachment.view)
-                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .image_layout(attachment.layout)
                 .load_op(match attachment.clear {
                     Some(_) => vk::AttachmentLoadOp::CLEAR,
                     None => vk::AttachmentLoadOp::LOAD,
@@ -3037,9 +3131,29 @@ impl<'a> Raster<'a> {
                 depth = depth
                     .resolve_mode(attachment.resolve_mode)
                     .resolve_image_view(attachment.resolve_view)
-                    .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+                    .resolve_image_layout(attachment.layout);
             }
             rendering = rendering.depth_attachment(&depth);
+            if attachment.stencil {
+                stencil = vk::RenderingAttachmentInfo::default()
+                    .image_view(attachment.view)
+                    .image_layout(attachment.layout)
+                    .load_op(match attachment.stencil_clear {
+                        Some(_) => vk::AttachmentLoadOp::CLEAR,
+                        None => vk::AttachmentLoadOp::LOAD,
+                    })
+                    .store_op(match attachment.stencil_store {
+                        true => vk::AttachmentStoreOp::STORE,
+                        false => vk::AttachmentStoreOp::DONT_CARE,
+                    })
+                    .clear_value(vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 0.0,
+                            stencil: attachment.stencil_clear.unwrap_or_default(),
+                        },
+                    });
+                rendering = rendering.stencil_attachment(&stencil);
+            }
         }
         unsafe { device.cmd_begin_rendering(command_buffer, &rendering) };
 
@@ -3063,22 +3177,7 @@ impl<'a> Raster<'a> {
         );
         raster.cull(Cull::None, Winding::CounterClockwise);
         raster.depth(&DepthState::new(CompareOp::Always, false));
-        unsafe {
-            device.cmd_set_stencil_test_enable(command_buffer, false);
-            device.cmd_set_stencil_reference(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                0,
-            );
-            device.cmd_set_stencil_op(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                vk::StencilOp::KEEP,
-                vk::StencilOp::KEEP,
-                vk::StencilOp::KEEP,
-                vk::CompareOp::ALWAYS,
-            );
-        }
+        raster.stencil_reference(0);
         raster
     }
 
@@ -3097,6 +3196,18 @@ impl<'a> Raster<'a> {
     }
 
     pub fn depth(&self, state: &DepthState) {
+        assert!(
+            state.stencil.is_none(),
+            "create stencil states with Device::depth_stencil_state"
+        );
+        self.set_depth_state(state);
+    }
+
+    pub fn depth_stencil(&self, state: &DepthStencilState) {
+        self.set_depth_state(&state.0);
+    }
+
+    fn set_depth_state(&self, state: &DepthState) {
         unsafe {
             self.device
                 .cmd_set_depth_test_enable(self.command_buffer, state.test());
@@ -3104,6 +3215,45 @@ impl<'a> Raster<'a> {
                 .cmd_set_depth_write_enable(self.command_buffer, state.write);
             self.device
                 .cmd_set_depth_compare_op(self.command_buffer, compare_op(state.compare));
+            self.device
+                .cmd_set_stencil_test_enable(self.command_buffer, state.stencil.is_some());
+            if let Some(stencil) = state.stencil {
+                self.stencil_face(vk::StencilFaceFlags::FRONT, stencil.front);
+                self.stencil_face(vk::StencilFaceFlags::BACK, stencil.back);
+            }
+        }
+    }
+
+    unsafe fn stencil_face(&self, face_flags: vk::StencilFaceFlags, face: StencilFace) {
+        unsafe {
+            self.device.cmd_set_stencil_op(
+                self.command_buffer,
+                face_flags,
+                stencil_op(face.fail),
+                stencil_op(face.pass),
+                stencil_op(face.depth_fail),
+                compare_op(face.compare),
+            );
+            self.device.cmd_set_stencil_compare_mask(
+                self.command_buffer,
+                face_flags,
+                face.read_mask,
+            );
+            self.device.cmd_set_stencil_write_mask(
+                self.command_buffer,
+                face_flags,
+                face.write_mask,
+            );
+        }
+    }
+
+    pub fn stencil_reference(&self, reference: u32) {
+        unsafe {
+            self.device.cmd_set_stencil_reference(
+                self.command_buffer,
+                vk::StencilFaceFlags::FRONT_AND_BACK,
+                reference,
+            );
         }
     }
 
