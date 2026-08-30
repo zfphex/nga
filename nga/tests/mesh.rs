@@ -2,30 +2,92 @@
 //! two can be compared pixel for pixel. Headless, and skipped where the backend has no mesh
 //! pipeline, which is what `Feature::MeshShaders` is for.
 
-// The shader is MSL, see `shaders/mesh.metal` for why, so there is nothing to include on a
-// backend that wants SPIR-V. The `Feature::MeshShaders` check below is the runtime half.
-#![cfg(target_vendor = "apple")]
-
+// Mesh execution remains feature-gated even though the shader now uses the shared Rust IR.
 use nga::*;
+#[cfg(target_vendor = "apple")]
+use shader::{Data, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+#[gpu_mod]
+mod shader {
+    use nga::*;
+
+    pub struct Vertex {
+        pub position: [f32; 3],
+        pub color: [f32; 3],
+    }
+
+    pub struct Data {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub mvp: f32x4x4,
+    }
+
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x3,
+    }
+
+    pub struct Payload {
+        pub mesh: u32,
+    }
+
+    #[object]
+    fn object_stage(#[payload] mut payload: Payload, #[thread_index_in_group] lane: u32) {
+        let mut count = ThreadgroupAtomicU32::new(0);
+        if lane == 0 {
+            count.atomic_exchange(0);
+        }
+        threadgroup_barrier();
+        if lane == 0 {
+            payload.mesh = 0;
+            mesh_set_threadgroups(u32x3::new(count.atomic_add(0) + 1, 1, 1));
+        }
+    }
+
+    #[mesh(VertexOut, 3, 1)]
+    fn mesh_main(root: Gpu<'static, Data>, #[thread_index_in_group] lane: u32) {
+        if lane == 0 {
+            mesh_set_primitive_count(1);
+            mesh_set_index(0, 0);
+            mesh_set_index(1, 1);
+            mesh_set_index(2, 2);
+        }
+        let source = root.vertices[lane];
+        let vertex = VertexOut {
+            position: root.mvp.mul(f32x4::new(
+                source.position[0],
+                source.position[1],
+                source.position[2],
+                1.0,
+            )),
+            color: f32x3::new(source.color[0], source.color[1], source.color[2]),
+        };
+        mesh_set_vertex(lane, vertex);
+    }
+
+    #[fragment]
+    fn mesh_fragment(input: VertexOut) -> f32x4 {
+        f32x4::new(input.color.x, input.color.y, input.color.z, 1.0)
+    }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
-
-const SHADERS: &[u8] = nga::shader!("mesh");
-
+#[cfg(target_vendor = "apple")]
 const SIZE: u32 = 128;
 
+#[test]
+fn mesh_shader_is_generated_from_rust() {
+    let source = msl::module(shader::ENTRIES);
+    assert!(source.contains("using NgaMeshOut_mesh_main = metal::mesh<VertexOut, void, 3, 1"));
+    assert!(source.contains("[[mesh]] void mesh_main("));
+    assert!(source.contains("nga_mesh_out.set_primitive_count("));
+    assert!(source.contains("[[object]] void object_stage("));
+    assert!(source.contains("object_data Payload& payload [[payload]]"));
+    assert!(source.contains("threadgroup atomic_uint count;"));
+    assert!(source.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"));
+    assert!(source.contains("atomic_fetch_add_explicit(&(count),"));
+    assert!(source.contains("nga_mesh_grid.set_threadgroups_per_grid("));
+}
+
+#[cfg(target_vendor = "apple")]
 #[test]
 fn a_mesh_pipeline_emits_a_triangle() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
@@ -37,7 +99,8 @@ fn a_mesh_pipeline_emits_a_triangle() -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let source = compile(shader::ENTRIES);
+    let mut shaders = Shaders::new(&device, &source)?;
     let pipeline = shaders.mesh(&MeshDesc::new(
         "",
         "mesh_main",
@@ -71,7 +134,7 @@ fn a_mesh_pipeline_emits_a_triangle() -> Result<(), Box<dyn std::error::Error>> 
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     let pixels = readback

@@ -2,31 +2,87 @@
 //! over the imageblock before it is ever stored. The centre pixel is white in `raster.rs` and
 //! half that here, which is the whole claim.
 
-#![cfg(target_vendor = "apple")]
-
 use nga::*;
+#[cfg(target_vendor = "apple")]
+use shader::{Data, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+#[gpu_mod]
+mod shader {
+    use nga::*;
+
+    pub struct Vertex {
+        pub position: [f32; 3],
+        pub color: [f32; 3],
+    }
+
+    pub struct Data {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub mvp: f32x4x4,
+    }
+
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x3,
+    }
+
+    #[derive(Default)]
+    pub struct TileColor {
+        pub color: f32x4,
+    }
+
+    #[vertex]
+    fn tile_vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+        let source = root.vertices[vid];
+        VertexOut {
+            position: root.mvp.mul(f32x4::new(
+                source.position[0],
+                source.position[1],
+                source.position[2],
+                1.0,
+            )),
+            color: f32x3::new(source.color[0], source.color[1], source.color[2]),
+        }
+    }
+
+    #[fragment]
+    fn tile_fragment(input: VertexOut) -> f32x4 {
+        f32x4::new(input.color.x, input.color.y, input.color.z, 1.0)
+    }
+
+    #[tile(TileColor)]
+    fn tile_halve(#[thread_id_in_group] tid: u32x3) {
+        let at = u32x2::new(tid.x, tid.y);
+        let mut texel: TileColor = tile_read(at);
+        texel.color = f32x4::new(
+            texel.color.x * 0.5,
+            texel.color.y * 0.5,
+            texel.color.z * 0.5,
+            texel.color.w,
+        );
+        tile_write(texel, at);
+    }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Data {
-    vertices: Gpu<'static, Vertex>,
-    mvp: f32x4x4,
-}
-
-const SHADERS: &[u8] = nga::shader!("tile");
-
+#[cfg(target_vendor = "apple")]
 const SIZE: u32 = 128;
-/// One `TileColor`: a `half4`.
-const IMAGEBLOCK_BYTES: usize = 8;
+/// One `TileColor`: a `float4`.
+#[cfg(target_vendor = "apple")]
+const IMAGEBLOCK_BYTES: usize = 16;
+#[cfg(target_vendor = "apple")]
 const TILE: u32 = 16;
 
+#[test]
+fn tile_shader_is_generated_from_rust() {
+    let source = msl::module(shader::ENTRIES);
+    assert!(source.contains("struct TileColor"));
+    assert!(source.contains("[[color(0)]]"));
+    assert!(source.contains("imageblock<TileColor, imageblock_layout_implicit>"));
+    assert!(source.contains("kernel void tile_halve("));
+    assert!(source.contains("nga_imageblock.read(ushort2("));
+    assert!(source.contains("nga_imageblock.write(texel, ushort2("));
+}
+
+#[cfg(target_vendor = "apple")]
 #[test]
 fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
@@ -38,7 +94,8 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let source = compile(shader::ENTRIES);
+    let mut shaders = Shaders::new(&device, &source)?;
     let draw = shaders.raster(&RasterDesc::new(
         "tile_vertex",
         "tile_fragment",
@@ -71,7 +128,7 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     let pixels = readback

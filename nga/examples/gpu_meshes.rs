@@ -26,7 +26,7 @@ mod commands {
     use nga::*;
 
     #[gpu_mod]
-    mod data {
+    mod shader {
         use nga::*;
 
         pub struct Vertex {
@@ -46,9 +46,9 @@ mod commands {
 
         #[repr(C, align(16))]
         pub struct EncodeData {
-            pub objects: Gpu<'static, Object>,
-            pub vertices: Gpu<'static, Vertex>,
-            pub draws: GpuMut<'static, u8>,
+            pub objects: Gpu<'static, [Object]>,
+            pub vertices: Gpu<'static, [Vertex]>,
+            pub draws: GpuMut<'static, [DrawData]>,
             pub commands: Commands,
             pub pipelines: [PipelineHandle; 2],
             pub viewproj: f32x4x4,
@@ -60,18 +60,120 @@ mod commands {
             pub line_start: u32,
             pub line_count: u32,
         }
+
+        #[repr(C, align(16))]
+        pub struct DrawData {
+            pub vertices: Gpu<'static, [Vertex]>,
+            pub mvp: f32x4x4,
+            pub model: f32x4x4,
+            pub color: f32x4,
+        }
+
+        pub struct VertexOut {
+            pub position: f32x4,
+            pub world: f32x3,
+            pub color: f32x4,
+        }
+
+        #[compute(64)]
+        fn encode(root: Gpu<'static, EncodeData>, #[thread_id] tid: u32x3) {
+            let i = tid.x;
+            if i >= root.count {
+                return;
+            }
+            let object = root.objects[i];
+            let t = root.time * object.orbit + object.phase;
+            let centre = f32x3::new(object.cell[0], object.cell[1], object.cell[2])
+                + f32x3::new(t.cos(), (t * 1.3).sin(), t.sin()) * 0.12;
+            if centre.length() > root.cull_radius {
+                return;
+            }
+
+            let c = (t * 1.7).cos();
+            let s = (t * 1.7).sin();
+            let k = object.scale;
+            let model = f32x4x4::new(
+                f32x4::new(c * k, 0.0, -s * k, 0.0),
+                f32x4::new(0.0, k, 0.0, 0.0),
+                f32x4::new(s * k, 0.0, c * k, 0.0),
+                f32x4::new(centre.x, centre.y, centre.z, 1.0),
+            );
+
+            let mut draws = root.draws;
+            draws[i] = DrawData {
+                vertices: root.vertices,
+                mvp: root.viewproj.mul_mat(model),
+                model: model,
+                color: object.color,
+            };
+            let wire = object.style != 0;
+            let mut vertex_start = root.tri_start;
+            let mut vertex_count = root.tri_count;
+            if wire {
+                vertex_start = root.line_start;
+                vertex_count = root.line_count;
+            }
+            command_set_pipeline(root.commands, i, root.pipelines[object.style as usize]);
+            command_set_vertex_buffer(root.commands, i, draws[i], 1);
+            command_draw(root.commands, i, wire, vertex_start, vertex_count, 1, 0);
+        }
+
+        #[vertex]
+        fn solid_vertex(
+            #[buffer(1)] data: Gpu<'static, DrawData>,
+            #[vertex_id] vid: u32,
+        ) -> VertexOut {
+            let source = data.vertices[vid];
+            let p = f32x3::new(source.position[0], source.position[1], source.position[2]);
+            VertexOut {
+                position: data.mvp.mul(f32x4::new(p.x, p.y, p.z, 1.0)),
+                world: data.model.mul(f32x4::new(p.x, p.y, p.z, 1.0)).xyz(),
+                color: data.color,
+            }
+        }
+
+        #[fragment]
+        fn solid_fragment(input: VertexOut) -> f32x4 {
+            let n = dfdx(input.world).cross(dfdy(input.world)).normalize();
+            let light = 0.2 + 0.8 * n.dot(f32x3::new(0.4, 0.7, 0.55).normalize()).abs();
+            f32x4::new(
+                input.color.x * light,
+                input.color.y * light,
+                input.color.z * light,
+                1.0,
+            )
+        }
+
+        #[vertex]
+        fn wire_vertex(
+            #[buffer(1)] data: Gpu<'static, DrawData>,
+            #[vertex_id] vid: u32,
+        ) -> VertexOut {
+            let source = data.vertices[vid];
+            let p = f32x3::new(source.position[0], source.position[1], source.position[2]) * 1.08;
+            VertexOut {
+                position: data.mvp.mul(f32x4::new(p.x, p.y, p.z, 1.0)),
+                world: p,
+                color: data.color,
+            }
+        }
+
+        #[fragment]
+        fn wire_fragment(input: VertexOut) -> f32x4 {
+            f32x4::new(
+                input.color.x * 1.4,
+                input.color.y * 1.4,
+                input.color.z * 1.4,
+                1.0,
+            )
+        }
     }
 
-    use data::*;
-
-    const SHADERS: &[u8] = nga::shader!("gpu_meshes");
+    use shader::*;
 
     const SIDE: usize = 6;
     const OBJECTS: u32 = (SIDE * SIDE * SIDE) as u32;
     const GROUP: usize = 64;
-    /// `DrawData` in the shader: a pointer, two `float4x4` and a `float4`, all 16-aligned.
-    const DRAW_DATA: usize = 16 + 64 + 64 + 16;
-
     /// The eight corners of a unit cube, as triangles then as lines. One vertex array serves
     /// both pipelines; the encoded command picks the range and the primitive.
     fn cube() -> Vec<Vertex> {
@@ -148,7 +250,8 @@ mod commands {
         let handle = window.ns_view as isize;
         let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, SHADERS)?;
+        let source = compile(shader::ENTRIES);
+        let mut shaders = Shaders::new(&device, &source)?;
         // `indirect` is what gives each pipeline a resource ID for the shader to name. Without
         // it the handle is zero and the encoded command replays nothing.
         let solid = shaders.raster(
@@ -203,12 +306,12 @@ mod commands {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = storage.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+        let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
         let object_list = storage.alloc_slice(&objects).unwrap();
-        let object_list: Gpu<'static, Object> = Gpu::new(object_list.gpu.0.get());
+        let object_list: Gpu<'static, [Object]> = Gpu::new(object_list.gpu.0.get());
 
         let mut heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
-        let draws = heap.alloc_buffer(DRAW_DATA * OBJECTS as usize)?;
+        let draws = heap.alloc_buffer(size_of::<DrawData>() * OBJECTS as usize)?;
         let mut depth = heap.alloc_texture(&TextureDesc::depth(
             Format::D32Float,
             surface.width(),

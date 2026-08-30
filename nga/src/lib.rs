@@ -49,10 +49,9 @@ pub fn compile(entries: &[&'static ir::GpuFn]) -> Vec<u8> {
 /// Writes both targets to `dir` as `name.spv` and `name.metal`, and answers with the paths.
 ///
 /// This is what an ahead-of-time build runs: a bin target in the workspace links the crate its
-/// shaders live in, calls this, and the `build.rs` next door compiles the `.metal` to a
-/// `.metallib` exactly as it does for a hand-written one. Both files are produced on every
-/// host — neither emitter needs a toolchain — which is also what makes the Metal output
-/// checkable from a machine that cannot build for Apple at all.
+/// shaders live in, calls this, and an Apple build can compile the generated `.metal` to a
+/// `.metallib`. Both files are produced on every host, which also makes the Metal output
+/// checkable from a machine that cannot build for Apple.
 pub fn dump(
     dir: impl AsRef<std::path::Path>,
     name: &str,
@@ -210,6 +209,64 @@ impl AtomicU32 {
     }
 }
 
+impl ThreadgroupAtomicU32 {
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn atomic_add(&mut self, value: u32) -> u32 {
+        let previous = self.0;
+        self.0 = previous.wrapping_add(value);
+        previous
+    }
+
+    pub fn atomic_exchange(&mut self, value: u32) -> u32 {
+        std::mem::replace(&mut self.0, value)
+    }
+}
+
+// Stage-specific shader operations. Their host bodies only make shader functions type-check;
+// `msl` replaces every call with the corresponding Metal operation.
+pub fn dfdx<T: Copy>(value: T) -> T {
+    value
+}
+
+pub fn dfdy<T: Copy>(value: T) -> T {
+    value
+}
+
+pub fn mesh_set_threadgroups(_groups: u32x3) {}
+
+pub fn mesh_set_primitive_count(_count: u32) {}
+
+pub fn mesh_set_vertex<T: Copy>(_index: u32, _vertex: T) {}
+
+pub fn mesh_set_index(_index: u32, _vertex: u32) {}
+
+pub fn threadgroup_barrier() {}
+
+pub fn tile_read<T: Copy + Default>(_at: u32x2) -> T {
+    T::default()
+}
+
+pub fn tile_write<T: Copy>(_value: T, _at: u32x2) {}
+
+pub fn command_set_pipeline(_commands: Commands, _slot: u32, _pipeline: PipelineHandle) {}
+
+pub fn command_set_vertex_buffer<T: Copy>(_commands: Commands, _slot: u32, _value: T, _index: u32) {
+}
+
+pub fn command_draw(
+    _commands: Commands,
+    _slot: u32,
+    _lines: bool,
+    _vertex_start: u32,
+    _vertex_count: u32,
+    _instance_count: u32,
+    _base_instance: u32,
+) {
+}
+
 /// A host-mapped allocation and its device address. Deref writes go straight into mapped
 /// memory; there is no staging step and no flush on either backend.
 pub struct GpuBox<'a, T: ?Sized> {
@@ -275,6 +332,15 @@ handle! {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AtomicU32(pub u32);
+
+/// An atomic local shared by the invocations in one shader threadgroup.
+///
+/// This type is valid only for a local variable in a `#[gpu_mod]` function. The MSL emitter
+/// declares it in the `threadgroup` address space and ignores its Rust initializer; initialize
+/// it from one lane and call [`threadgroup_barrier`] before other lanes use it.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadgroupAtomicU32(pub u32);
 
 // -- indirect argument structs -----------------------------------------------------------
 
@@ -859,7 +925,6 @@ pub enum ResolveMode {
 /// stage. There are no vertices and no index buffer; the mesh stage emits primitives directly.
 ///
 /// Metal-only today; ask [`Device::supports`] with [`Feature::MeshShaders`] before building one.
-/// The shader side is hand-written MSL, since `#[gpu_mod]` has no mesh stage; see `GPU-PLAN.md`.
 #[derive(Clone, Copy)]
 pub struct MeshDesc<'a> {
     /// The object stage, or `""` for a mesh pipeline with no amplification.
@@ -906,8 +971,7 @@ impl<'a> MeshDesc<'a> {
 /// imageblock the pass is rendering into without a round trip to memory.
 ///
 /// This one is Apple-only for good. It is the tile-based deferred hardware showing through,
-/// and there is no Vulkan equivalent to grow into. `#[gpu_mod]` has no tile stage either, so the
-/// function has to come from an MSL source; see `shaders/tbdr.metal`.
+/// and there is no Vulkan equivalent to grow into.
 #[derive(Clone, Copy)]
 pub struct TileDesc<'a> {
     pub function: &'a str,
@@ -1073,17 +1137,6 @@ impl<T> IndexMut<u32> for Pool<'_, T> {
         debug_assert!(index < self.len, "slot {index} was never allocated");
         unsafe { self.slots.add(index as usize).as_mut() }
     }
-}
-
-/// The MSL source `build.rs` copied out of `shaders/`, as bytes.
-///
-/// Only the shaders `#[gpu_mod]` is not asked to reach are still hand-written, and all of them are
-/// Metal-only, so there is no Vulkan arm to write. Everything else goes through [`compile`].
-#[macro_export]
-macro_rules! shader {
-    ($name:literal) => {
-        include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".metal")) as &[u8]
-    };
 }
 
 pub const FRAMES_IN_FLIGHT: u64 = 2;

@@ -108,6 +108,7 @@ fn named_ty(name: &str) -> String {
         // An atomic is a `uint` the shader only ever touches through an atomic intrinsic. It
         // is not a handle: the pointer to it has to point at something four bytes wide.
         "AtomicU32" => prim("U32"),
+        "ThreadgroupAtomicU32" => "::nga::ir::Ty::ThreadgroupAtomicU32".into(),
         "Texture2d" => handle("Texture2d"),
         "Texture2dW" | "Texture2dRW" => handle("Texture2dRW"),
         "Texture3d" => handle("Texture3d"),
@@ -116,8 +117,9 @@ fn named_ty(name: &str) -> String {
         "TextureCube" => handle("TextureCube"),
         "Depth2d" => handle("Depth2d"),
         "Sampler" => handle("Sampler"),
-        "Commands" | "PipelineHandle" | "Draw" | "DrawIndexed" | "Dispatch"
-        | "DispatchThreads" => handle("Opaque"),
+        "Commands" => handle("Commands"),
+        "PipelineHandle" => handle("Pipeline"),
+        "Draw" | "DrawIndexed" | "Dispatch" | "DispatchThreads" => handle("Opaque"),
         _ => match vector_spelling(name) {
             Some((p, n)) => vector(p, n),
             // Anything left is a struct from the same module, and saying so is Rust's job,
@@ -188,9 +190,10 @@ fn intrinsic(name: &str) -> Option<&'static str> {
         "select" => "Select",
         "any" => "Any",
         "all" => "All",
-        "mul" => "Mul",
+        "mul" | "mul_mat" => "Mul",
         "transpose" => "Transpose",
         "barrier" => "Barrier",
+        "threadgroup_barrier" => "ThreadgroupBarrier",
         "atomic_add" => "AtomicAdd",
         "atomic_min" => "AtomicMin",
         "atomic_max" => "AtomicMax",
@@ -200,6 +203,17 @@ fn intrinsic(name: &str) -> Option<&'static str> {
         "load" => "Load",
         "store" => "Store",
         "dimensions" => "Dimensions",
+        "dfdx" => "Dfdx",
+        "dfdy" => "Dfdy",
+        "mesh_set_threadgroups" => "MeshSetThreadgroups",
+        "mesh_set_primitive_count" => "MeshSetPrimitiveCount",
+        "mesh_set_vertex" => "MeshSetVertex",
+        "mesh_set_index" => "MeshSetIndex",
+        "tile_read" => "TileRead",
+        "tile_write" => "TileWrite",
+        "command_set_pipeline" => "CommandSetPipeline",
+        "command_set_vertex_buffer" => "CommandSetVertexBuffer",
+        "command_draw" => "CommandDraw",
         _ => return None,
     })
 }
@@ -421,7 +435,10 @@ fn stmt(b: &mut B, t: &[TokenTree], i: &mut usize, tail_returns: bool) -> Result
             b.no_struct = true;
             let start = expr(b, t, i, 0, None)?;
             if !punct(t.get(*i), '.') || !punct(t.get(*i + 1), '.') {
-                return Err((span, "a shader `for` iterates `a..b` and nothing else".into()));
+                return Err((
+                    span,
+                    "a shader `for` iterates `a..b` and nothing else".into(),
+                ));
             }
             *i += 2;
             let end = expr(b, t, i, 0, None)?;
@@ -658,7 +675,10 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
     if let Some(inner) = group_at(t, *i, Delimiter::Bracket) {
         *i += 1;
         let Some(ty) = want else {
-            return Err((span, "an array literal needs a `let` type annotation".into()));
+            return Err((
+                span,
+                "an array literal needs a `let` type annotation".into(),
+            ));
         };
         let mut list = Vec::new();
         for element in commas(&inner, false) {
@@ -789,8 +809,8 @@ fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
     // Strip a type suffix, not the first letter: `1e-4` is a float, and cutting at `e`
     // used to turn it into the integer 1.
     const SUFFIXES: &[&str] = &[
-        "usize", "isize", "u128", "i128", "f32", "f64", "f16", "u64", "i64", "u32", "i32",
-        "u16", "i16", "u8", "i8",
+        "usize", "isize", "u128", "i128", "f32", "f64", "f16", "u64", "i64", "u32", "i32", "u16",
+        "i16", "u8", "i8",
     ];
     let (stem, suffix) = SUFFIXES
         .iter()
@@ -826,6 +846,7 @@ fn stage(attr: &[TokenTree]) -> Result<String, Fail> {
         [TokenTree::Ident(id)] => match id.to_string().as_str() {
             "vertex" => Ok("::nga::ir::Stage::Vertex".into()),
             "fragment" => Ok("::nga::ir::Stage::Fragment".into()),
+            "object" => Ok("::nga::ir::Stage::Object".into()),
             other => Err((id.span(), format!("`{other}` is not a shader stage"))),
         },
         [TokenTree::Ident(id), TokenTree::Group(g)]
@@ -851,9 +872,38 @@ fn stage(attr: &[TokenTree]) -> Result<String, Fail> {
                 _ => Err((g.span(), "`compute` takes one to three group sizes".into())),
             }
         }
+        [TokenTree::Ident(id), TokenTree::Group(g)]
+            if id.to_string() == "mesh" && g.delimiter() == Delimiter::Parenthesis =>
+        {
+            let args = commas(&g.stream().into_iter().collect::<Vec<_>>(), false);
+            if args.len() != 3 {
+                return Err((
+                    g.span(),
+                    "`mesh` takes `(VertexOutput, max_vertices, max_primitives)`".into(),
+                ));
+            }
+            let vertex = ir_ty(&args[0])?;
+            let vertices = args[1].iter().map(|t| t.to_string()).collect::<String>();
+            let primitives = args[2].iter().map(|t| t.to_string()).collect::<String>();
+            Ok(format!(
+                "::nga::ir::Stage::Mesh {{ vertex: {vertex}, max_vertices: {vertices}, max_primitives: {primitives} }}"
+            ))
+        }
+        [TokenTree::Ident(id), TokenTree::Group(g)]
+            if id.to_string() == "tile" && g.delimiter() == Delimiter::Parenthesis =>
+        {
+            let args = commas(&g.stream().into_iter().collect::<Vec<_>>(), false);
+            if args.len() != 1 {
+                return Err((g.span(), "`tile` takes one imageblock struct type".into()));
+            }
+            Ok(format!(
+                "::nga::ir::Stage::Tile {{ imageblock: {} }}",
+                ir_ty(&args[0])?
+            ))
+        }
         _ => Err((
             attr[0].span(),
-            "a shader fn takes nothing, `#[vertex]`, `#[fragment]` or `#[compute(x, y, z)]`".into(),
+            "a shader fn takes nothing, `#[vertex]`, `#[fragment]`, `#[compute(x, y, z)]`, `#[object]`, `#[mesh(Vertex, vertices, primitives)]`, or `#[tile(Imageblock)]`".into(),
         )),
     }
 }
@@ -878,9 +928,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
     let t: Vec<TokenTree> = item.into_iter().collect();
     let stage = stage(&attr.into_iter().collect::<Vec<_>>())?;
 
-    let Some(keyword) = t.iter().position(
-        |token| matches!(token, TokenTree::Ident(id) if id.to_string() == "fn"),
-    ) else {
+    let Some(keyword) = t
+        .iter()
+        .position(|token| matches!(token, TokenTree::Ident(id) if id.to_string() == "fn"))
+    else {
         return Err((Span::call_site(), "expected a function".into()));
     };
     let Some(TokenTree::Ident(name)) = t.get(keyword + 1) else {
@@ -931,6 +982,15 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
                 (Some(b), _) => format!("::nga::ir::Binding::Builtin(::nga::ir::Builtin::{b})"),
                 (None, "root") => "::nga::ir::Binding::Root".into(),
                 (None, "constants") => "::nga::ir::Binding::Constants".into(),
+                (None, "payload") => "::nga::ir::Binding::Payload".into(),
+                (None, "buffer") => {
+                    let index = group_at(&inner, 1, Delimiter::Parenthesis)
+                        .map(|g| g.iter().map(|t| t.to_string()).collect::<String>())
+                        .ok_or_else(|| {
+                            (span_at(&arg, j), "`buffer` needs a binding index".into())
+                        })?;
+                    format!("::nga::ir::Binding::Buffer({index})")
+                }
                 (None, "location") => {
                     let index = group_at(&inner, 1, Delimiter::Parenthesis)
                         .map(|g| g.iter().map(|t| t.to_string()).collect::<String>())
@@ -1004,9 +1064,12 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
     // The function itself, with parameter attributes gone. It is never called on the host, so
     // everything in it is dead by construction.
     let signature = format!(
-        "#[allow(dead_code, unused_variables, unused_mut, unused_parens, non_snake_case)]
+        "#[allow(dead_code, unused_variables, unused_mut, unused_parens, unused_assignments, non_snake_case)]
          {prefix} fn {name}({args}){arrow}",
-        prefix = t[..keyword].iter().map(|t| t.to_string()).collect::<String>(),
+        prefix = t[..keyword]
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<String>(),
         name = name.to_string(),
         args = stripped.join(", "),
         arrow = if punct(tail.first(), '-') {

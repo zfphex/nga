@@ -22,8 +22,11 @@ mod meshlets {
     use nga::*;
 
     #[gpu_mod]
-    mod data {
+    mod shader {
         use nga::*;
+
+        const PER_GROUP: u32 = 32;
+        const RING: u32 = 8;
 
         pub struct Meshlet {
             /// xyz is the centre, w the radius, so this is the sphere the object stage culls against.
@@ -33,17 +36,115 @@ mod meshlets {
 
         #[repr(C, align(16))]
         pub struct Scene {
-            pub meshlets: Gpu<'static, Meshlet>,
+            pub meshlets: Gpu<'static, [Meshlet]>,
             pub mvp: f32x4x4,
             pub cull_radius: f32,
             pub time: f32,
             pub meshlet_count: u32,
         }
+
+        #[repr(C, align(16))]
+        pub struct Payload {
+            pub meshlets: [u32; 32],
+            pub mvp: f32x4x4,
+            pub time: f32,
+        }
+
+        pub struct VertexOut {
+            pub position: f32x4,
+            pub world: f32x3,
+            pub color: f32x4,
+        }
+
+        #[object]
+        fn meshlet_object(
+            root: Gpu<'static, Scene>,
+            #[payload] mut payload: Payload,
+            #[group_id] group: u32x3,
+            #[thread_index_in_group] lane: u32,
+        ) {
+            let mut visible = ThreadgroupAtomicU32::new(0);
+            if lane == 0 {
+                visible.atomic_exchange(0);
+            }
+            threadgroup_barrier();
+
+            let index = group.x * PER_GROUP + lane;
+            if index < root.meshlet_count {
+                let bounds = root.meshlets[index].bounds;
+                if bounds.xyz().length() - bounds.w <= root.cull_radius {
+                    let slot = visible.atomic_add(1);
+                    payload.meshlets[slot as usize] = index;
+                }
+            }
+            threadgroup_barrier();
+
+            if lane == 0 {
+                payload.mvp = root.mvp;
+                payload.time = root.time;
+                mesh_set_threadgroups(u32x3::new(visible.atomic_add(0), 1, 1));
+            }
+        }
+
+        #[mesh(VertexOut, 9, 8)]
+        fn meshlet_mesh(
+            root: Gpu<'static, Scene>,
+            #[payload] payload: Payload,
+            #[group_id] group: u32x3,
+            #[thread_index_in_group] lane: u32,
+        ) {
+            let index = payload.meshlets[group.x as usize];
+            let meshlet = root.meshlets[index];
+            let centre = meshlet.bounds.xyz();
+            let radius = meshlet.bounds.w;
+            if lane == 0 {
+                mesh_set_primitive_count(RING);
+            }
+            if lane <= RING {
+                let mut position = centre;
+                if lane > 0 {
+                    let angle = (lane - 1) as f32 / RING as f32 * 6.2831853 + payload.time * 0.5;
+                    position += f32x3::new(angle.cos(), angle.sin(), 0.0) * radius;
+                }
+                let hash = index * 2654435761u32;
+                let tint = f32x3::new(
+                    ((hash >> 16) & 255) as f32,
+                    ((hash >> 8) & 255) as f32,
+                    (hash & 255) as f32,
+                ) / 255.0;
+                let base = f32x3::new(meshlet.color[0], meshlet.color[1], meshlet.color[2]);
+                let color = base.mix(tint, 0.35);
+                mesh_set_vertex(
+                    lane,
+                    VertexOut {
+                        position: payload
+                            .mvp
+                            .mul(f32x4::new(position.x, position.y, position.z, 1.0)),
+                        world: position,
+                        color: f32x4::new(color.x, color.y, color.z, 1.0),
+                    },
+                );
+            }
+            if lane < RING {
+                mesh_set_index(lane * 3, 0);
+                mesh_set_index(lane * 3 + 1, 1 + lane);
+                mesh_set_index(lane * 3 + 2, 1 + (lane + 1) % RING);
+            }
+        }
+
+        #[fragment]
+        fn meshlet_fragment(input: VertexOut) -> f32x4 {
+            let shade = 0.55 + 0.45 * (input.world.length() * 6.0).cos();
+            f32x4::new(
+                input.color.x * shade,
+                input.color.y * shade,
+                input.color.z * shade,
+                1.0,
+            )
+        }
     }
 
-    use data::*;
-
-    const SHADERS: &[u8] = nga::shader!("meshlets");
+    use shader::*;
 
     /// Must match `MESHLETS_PER_GROUP` in the shader: one object thread per candidate meshlet,
     /// and the payload is sized for a whole group surviving.
@@ -72,7 +173,8 @@ mod meshlets {
         let handle = window.ns_view as isize;
         let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, SHADERS)?;
+        let source = compile(shader::ENTRIES);
+        let mut shaders = Shaders::new(&device, &source)?;
         let pipeline = shaders.mesh(&MeshDesc::new(
             "meshlet_object",
             "meshlet_mesh",
@@ -106,7 +208,7 @@ mod meshlets {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let meshlets = storage.alloc_slice(&list).unwrap();
-        let meshlets: Gpu<'static, Meshlet> = Gpu::new(meshlets.gpu.0.get());
+        let meshlets: Gpu<'static, [Meshlet]> = Gpu::new(meshlets.gpu.0.get());
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
         // Two timestamps around the pass, to show what the culling is buying.

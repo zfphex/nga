@@ -309,6 +309,15 @@ impl u32x4 {
 pub struct f32x4x4(pub [[f32; 4]; 4]);
 
 impl f32x4x4 {
+    pub const fn new(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4) -> Self {
+        Self([
+            [c0.x, c0.y, c0.z, c0.w],
+            [c1.x, c1.y, c1.z, c1.w],
+            [c2.x, c2.y, c2.z, c2.w],
+            [c3.x, c3.y, c3.z, c3.w],
+        ])
+    }
+
     pub fn mul(self, other: f32x4) -> f32x4 {
         let mut out = [0.0f32; 4];
         for row in 0..4 {
@@ -317,6 +326,15 @@ impl f32x4x4 {
             }
         }
         f32x4(out)
+    }
+
+    pub fn mul_mat(self, other: f32x4x4) -> f32x4x4 {
+        let mut out = [[0.0f32; 4]; 4];
+        for column in 0..4 {
+            let value = self.mul(f32x4(other.0[column]));
+            out[column] = [value.x, value.y, value.z, value.w];
+        }
+        f32x4x4(out)
     }
 
     pub fn transpose(self) -> f32x4x4 {

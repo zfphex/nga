@@ -97,9 +97,11 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
         }
     }
 
-    // A struct reached through a pointer or a local is memory and gets padded; one a vertex
-    // stage returns or a fragment stage takes is an interface and gets attributes instead.
+    // A struct reached through a pointer or a local is memory and gets padded; stage interfaces
+    // carry attributes instead.
     let mut io: Vec<&'static TypeAbi> = Vec::new();
+    let mut mesh_io: Vec<&'static TypeAbi> = Vec::new();
+    let mut tile_io: Vec<&'static TypeAbi> = Vec::new();
     for f in &functions {
         if f.stage == Stage::Vertex
             && let Ty::Struct(abi) = f.ret
@@ -112,6 +114,19 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
                     io.push(abi);
                 }
             }
+        }
+        match f.stage {
+            Stage::Mesh {
+                vertex: Ty::Struct(abi),
+                ..
+            } => {
+                io.push(abi);
+                mesh_io.push(abi);
+            }
+            Stage::Tile {
+                imageblock: Ty::Struct(abi),
+            } => tile_io.push(abi),
+            _ => {}
         }
     }
 
@@ -133,10 +148,47 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
         {
             collect(ty, &mut structs);
         }
+        match f.stage {
+            Stage::Mesh { vertex, .. } => collect(vertex, &mut structs),
+            Stage::Tile { imageblock } => collect(imageblock, &mut structs),
+            _ => {}
+        }
         types.push(t);
     }
 
     let mut out = String::from(PRELUDE);
+    if functions
+        .iter()
+        .any(|f| matches!(f.stage, Stage::Object | Stage::Mesh { .. }))
+        || structs.iter().any(|abi| {
+            abi.fields.iter().any(|field| {
+                matches!(
+                    field.ty,
+                    Ty::Handle(HandleKind::Commands | HandleKind::Pipeline)
+                        | Ty::Array(&Ty::Handle(HandleKind::Commands | HandleKind::Pipeline), _)
+                )
+            })
+        })
+    {
+        out += "\n#include <metal_mesh>\n\
+struct nga_commands { command_buffer cb; };\n\
+struct nga_pipeline { render_pipeline_state p; };\n\
+static_assert(sizeof(nga_commands) == 8, \"nga_commands is not one resource id\");\n\
+static_assert(sizeof(nga_pipeline) == 8, \"nga_pipeline is not one resource id\");\n\
+static inline void nga_command_set_pipeline(nga_commands commands, uint slot, nga_pipeline pipeline) {\n\
+    render_command command(commands.cb, slot);\n\
+    command.set_render_pipeline_state(pipeline.p);\n\
+}\n\
+template<typename T>\n\
+static inline void nga_command_set_vertex_buffer(nga_commands commands, uint slot, device T* value, uint index) {\n\
+    render_command command(commands.cb, slot);\n\
+    command.set_vertex_buffer(value, index);\n\
+}\n\
+static inline void nga_command_draw(nga_commands commands, uint slot, bool lines, uint start, uint count, uint instances, uint base_instance) {\n\
+    render_command command(commands.cb, slot);\n\
+    command.draw_primitives(lines ? primitive_type::line : primitive_type::triangle, start, count, instances, base_instance);\n\
+}\n";
+    }
     // Function constants are module scope in MSL, and their index is the field's own, which is
     // the number `Constants::values` pushes on the host side.
     let mut declared: Vec<&'static TypeAbi> = Vec::new();
@@ -159,8 +211,14 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
         }
     }
     for abi in &structs {
-        let interface = io.iter().any(|other| std::ptr::eq(*other, *abi));
-        out += &declare(abi, interface);
+        if tile_io.iter().any(|other| std::ptr::eq(*other, *abi)) {
+            out += &declare_tile(abi);
+        } else if mesh_io.iter().any(|other| std::ptr::eq(*other, *abi)) {
+            out += &declare_mesh(abi);
+        } else {
+            let interface = io.iter().any(|other| std::ptr::eq(*other, *abi));
+            out += &declare(abi, interface);
+        }
     }
     for (f, types) in functions.iter().zip(&types) {
         out += &function(f, types, &io);
@@ -213,6 +271,8 @@ fn handle(kind: HandleKind) -> &'static str {
         HandleKind::TextureCube => "nga_texturecube",
         HandleKind::Depth2d => "nga_depth2d",
         HandleKind::Sampler => "nga_sampler",
+        HandleKind::Commands => "nga_commands",
+        HandleKind::Pipeline => "nga_pipeline",
         HandleKind::Opaque => "nga_opaque",
     }
 }
@@ -226,6 +286,7 @@ fn name(ty: Ty) -> String {
         Ty::Mat(c, r) => format!("float{c}x{r}"),
         Ty::Struct(abi) => abi.name.into(),
         Ty::Handle(kind) => handle(kind).into(),
+        Ty::ThreadgroupAtomicU32 => "atomic_uint".into(),
         Ty::Ptr { mutable, pointee } => match mutable {
             true => format!("device {}*", name(*pointee)),
             false => format!("device const {}*", name(*pointee)),
@@ -297,6 +358,29 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
     out
 }
 
+fn declare_tile(abi: &TypeAbi) -> String {
+    let mut out = format!("\nstruct {} {{\n", abi.name);
+    for (index, field) in abi.fields.iter().enumerate() {
+        out += &format!("    {} [[color({index})]];\n", decl(field.ty, field.name));
+    }
+    out += "};\n";
+    out
+}
+
+fn declare_mesh(abi: &TypeAbi) -> String {
+    let mut out = format!("\nstruct {} {{\n", abi.name);
+    for field in abi.fields {
+        let attribute = match field.name {
+            "position" => " [[position]]",
+            "render_target_array_index" => " [[render_target_array_index]]",
+            _ => "",
+        };
+        out += &format!("    {}{attribute};\n", decl(field.ty, field.name));
+    }
+    out += "};\n";
+    out
+}
+
 fn constant_name(abi: &TypeAbi, field: &str) -> String {
     format!("nga_{}_{field}", abi.name)
 }
@@ -364,19 +448,31 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
                 String::new()
             }
             ir::Binding::Builtin(b) => {
-                format!(
-                    "{} {}",
-                    decl(param.ty, &escape(param.name)),
-                    builtin(b)
-                )
+                format!("{} {}", decl(param.ty, &escape(param.name)), builtin(b))
             }
             ir::Binding::Constants => String::new(),
-            // A stage-in struct carries no binding of its own; the fragment stage takes one.
-            _ if f.stage == Stage::Fragment => {
+            ir::Binding::Payload => match f.stage {
+                Stage::Object => format!(
+                    "object_data {}& {} [[payload]]",
+                    name(param.ty),
+                    escape(param.name)
+                ),
+                Stage::Mesh { .. } => format!(
+                    "const object_data {}& {} [[payload]]",
+                    name(param.ty),
+                    escape(param.name)
+                ),
+                _ => panic!("payload binding outside object or mesh stage"),
+            },
+            ir::Binding::Buffer(index) => {
                 format!(
-                    "{} [[stage_in]]",
+                    "{} [[buffer({index})]]",
                     decl(param.ty, &escape(param.name))
                 )
+            }
+            // A stage-in struct carries no binding of its own; the fragment stage takes one.
+            _ if f.stage == Stage::Fragment => {
+                format!("{} [[stage_in]]", decl(param.ty, &escape(param.name)))
             }
             _ => decl(param.ty, &escape(param.name)),
         });
@@ -385,12 +481,33 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
     if f.stage != Stage::Helper {
         arguments.insert(0, "constant nga_push* nga_push_data [[buffer(0)]]".into());
     }
+    match f.stage {
+        Stage::Object => arguments.insert(0, "mesh_grid_properties nga_mesh_grid".into()),
+        Stage::Mesh {
+            vertex,
+            max_vertices,
+            max_primitives,
+        } => {
+            arguments.insert(0, format!("NgaMeshOut_{} nga_mesh_out", escape(f.name)));
+            let _ = (vertex, max_vertices, max_primitives);
+        }
+        Stage::Tile { imageblock } => arguments.insert(
+            0,
+            format!(
+                "imageblock<{}, imageblock_layout_implicit> nga_imageblock",
+                name(imageblock)
+            ),
+        ),
+        _ => {}
+    }
 
     let qualifier = match f.stage {
         Stage::Helper => "",
         Stage::Vertex => "vertex ",
         Stage::Fragment => "fragment ",
-        Stage::Compute(_) => "kernel ",
+        Stage::Compute(_) | Stage::Tile { .. } => "kernel ",
+        Stage::Object => "[[object]] ",
+        Stage::Mesh { .. } => "[[mesh]] ",
     };
     let mut w = W {
         f,
@@ -401,9 +518,27 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
     };
     // Metal takes the threadgroup size at dispatch, so `Stage::Compute`'s sizes are the host's
     // business and appear nowhere in the source.
+    if let Stage::Mesh {
+        vertex,
+        max_vertices,
+        max_primitives,
+    } = f.stage
+    {
+        w.out += &format!(
+            "\nusing NgaMeshOut_{} = metal::mesh<{}, void, {}, {}, metal::topology::triangle>;\n",
+            escape(f.name),
+            name(vertex),
+            max_vertices,
+            max_primitives
+        );
+    }
+    let ret = match f.stage {
+        Stage::Object | Stage::Mesh { .. } | Stage::Tile { .. } => Ty::Void,
+        _ => f.ret,
+    };
     w.out += &format!(
         "\n{qualifier}{} {}({}) {{\n{root}",
-        name(f.ret),
+        name(ret),
         escape(f.name),
         arguments.join(", ")
     );
@@ -429,6 +564,13 @@ fn stmt(w: &mut W, node: u32, depth: usize) {
         }
         Node::Let { local, value } => {
             let ty = w.types.locals[local as usize];
+            if ty == Ty::ThreadgroupAtomicU32 {
+                w.out += &format!(
+                    "{pad}threadgroup atomic_uint {};\n",
+                    w.names[local as usize]
+                );
+                return;
+            }
             let value = coerced(w, value, ty);
             w.out += &format!(
                 "{pad}{} = {value};\n",
@@ -700,6 +842,7 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         Intrinsic::Select => format!("select({}, {}, {})", a[2], a[0], a[1]),
         Intrinsic::Mul => format!("({} * {})", a[0], a[1]),
         Intrinsic::Barrier => "threadgroup_barrier(mem_flags::mem_device)".into(),
+        Intrinsic::ThreadgroupBarrier => "threadgroup_barrier(mem_flags::mem_threadgroup)".into(),
         Intrinsic::Sample => format!("{}.t.sample({}.s, {})", a[0], a[1], a[2]),
         Intrinsic::SampleLevel => {
             format!("{}.t.sample({}.s, {}, level({}))", a[0], a[1], a[2], a[3])
@@ -709,21 +852,59 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         Intrinsic::Dimensions => {
             format!("uint2({}.t.get_width(), {}.t.get_height())", a[0], a[0])
         }
-        Intrinsic::AtomicAdd => atomic(&a, "add"),
-        Intrinsic::AtomicMin => atomic(&a, "min"),
-        Intrinsic::AtomicMax => atomic(&a, "max"),
+        Intrinsic::Dfdx => call("dfdx"),
+        Intrinsic::Dfdy => call("dfdy"),
+        Intrinsic::MeshSetThreadgroups => {
+            format!("nga_mesh_grid.set_threadgroups_per_grid({})", a[0])
+        }
+        Intrinsic::MeshSetPrimitiveCount => {
+            format!("nga_mesh_out.set_primitive_count({})", a[0])
+        }
+        Intrinsic::MeshSetVertex => {
+            format!("nga_mesh_out.set_vertex({}, {})", a[0], a[1])
+        }
+        Intrinsic::MeshSetIndex => {
+            format!("nga_mesh_out.set_index({}, uchar({}))", a[0], a[1])
+        }
+        Intrinsic::TileRead => format!("nga_imageblock.read(ushort2({}))", a[0]),
+        Intrinsic::TileWrite => {
+            format!("nga_imageblock.write({}, ushort2({}))", a[0], a[1])
+        }
+        Intrinsic::CommandSetPipeline => {
+            format!("nga_command_set_pipeline({}, {}, {})", a[0], a[1], a[2])
+        }
+        Intrinsic::CommandSetVertexBuffer => format!(
+            "nga_command_set_vertex_buffer({}, {}, &({}), {})",
+            a[0], a[1], a[2], a[3]
+        ),
+        Intrinsic::CommandDraw => format!(
+            "nga_command_draw({}, {}, {}, {}, {}, {}, {})",
+            a[0], a[1], a[2], a[3], a[4], a[5], a[6]
+        ),
+        Intrinsic::AtomicAdd => atomic(w, args, &a, "add"),
+        Intrinsic::AtomicMin => atomic(w, args, &a, "min"),
+        Intrinsic::AtomicMax => atomic(w, args, &a, "max"),
         Intrinsic::AtomicExchange => format!(
-            "atomic_exchange_explicit((device atomic_uint*){}, {}, memory_order_relaxed)",
-            a[0], a[1]
+            "atomic_exchange_explicit({}, {}, memory_order_relaxed)",
+            atomic_target(w.types.nodes[args[0] as usize], &a[0]),
+            a[1]
         ),
     }
 }
 
-fn atomic(a: &[String], op: &str) -> String {
+fn atomic(w: &W, args: &[u32], a: &[String], op: &str) -> String {
     format!(
-        "atomic_fetch_{op}_explicit((device atomic_uint*){}, {}, memory_order_relaxed)",
-        a[0], a[1]
+        "atomic_fetch_{op}_explicit({}, {}, memory_order_relaxed)",
+        atomic_target(w.types.nodes[args[0] as usize], &a[0]),
+        a[1]
     )
+}
+
+fn atomic_target(ty: Ty, value: &str) -> String {
+    match ty {
+        Ty::ThreadgroupAtomicU32 => format!("&({value})"),
+        _ => format!("(device atomic_uint*){value}"),
+    }
 }
 
 /// Metal's compiler log for a failed `newLibrary` is mostly rejected `operator*` candidates

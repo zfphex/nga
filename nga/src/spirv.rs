@@ -12,8 +12,10 @@
 //! from Rust, and those numbers become `OpMemberDecorate Offset` unchanged. That is what
 //! `-fvk-use-scalar-layout` used to buy from slangc.
 
-use crate::ir::{self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp};
 use crate::TypeAbi;
+use crate::ir::{
+    self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp,
+};
 
 const MAGIC: u32 = 0x0723_0203;
 const VERSION: u32 = 0x0001_0500;
@@ -93,6 +95,8 @@ const OP_F_REM: u32 = 140;
 const OP_MATRIX_TIMES_VECTOR: u32 = 145;
 const OP_MATRIX_TIMES_MATRIX: u32 = 146;
 const OP_DOT: u32 = 148;
+const OP_DP_DX: u32 = 207;
+const OP_DP_DY: u32 = 208;
 const OP_LOGICAL_OR: u32 = 166;
 const OP_LOGICAL_AND: u32 = 167;
 const OP_LOGICAL_NOT: u32 = 168;
@@ -366,6 +370,9 @@ impl M {
             // A handle is eight bytes in a struct and an index into a descriptor array
             // everywhere else. The image types themselves are the descriptor arrays' business.
             Ty::Handle(_) => self.ty(Ty::Scalar(Prim::U64)),
+            // Object stages are filtered above, but keeping the scalar representation here
+            // makes IR inspection and diagnostics total.
+            Ty::ThreadgroupAtomicU32 => self.ty(Ty::U32),
             other => panic!("{other:?} has no SPIR-V type"),
         };
         self.types.push((ty, laid, id));
@@ -515,6 +522,36 @@ pub fn module(entries: &[&'static GpuFn]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
+fn supported(f: &GpuFn) -> bool {
+    if matches!(
+        f.stage,
+        Stage::Object | Stage::Mesh { .. } | Stage::Tile { .. }
+    ) || f
+        .params
+        .iter()
+        .any(|param| matches!(param.binding, ir::Binding::Payload | ir::Binding::Buffer(_)))
+    {
+        return false;
+    }
+    !f.nodes.iter().any(|node| {
+        matches!(
+            node,
+            Node::Intrinsic {
+                op: Intrinsic::MeshSetThreadgroups
+                    | Intrinsic::MeshSetPrimitiveCount
+                    | Intrinsic::MeshSetVertex
+                    | Intrinsic::MeshSetIndex
+                    | Intrinsic::TileRead
+                    | Intrinsic::TileWrite
+                    | Intrinsic::CommandSetPipeline
+                    | Intrinsic::CommandSetVertexBuffer
+                    | Intrinsic::CommandDraw,
+                ..
+            }
+        )
+    })
+}
+
 pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
     let mut m = M {
         next: 1,
@@ -551,7 +588,11 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
 
     let mut functions: Vec<&'static GpuFn> = Vec::new();
     for entry in entries {
-        for f in entry.reachable() {
+        let reachable = entry.reachable();
+        if reachable.iter().any(|f| !supported(f)) {
+            continue;
+        }
+        for f in reachable {
             if !functions.iter().any(|g| std::ptr::eq(*g, f)) {
                 functions.push(f);
             }
@@ -687,7 +728,11 @@ fn push_block(m: &mut M) -> u32 {
     let u64_id = m.ty(Ty::Scalar(Prim::U64));
     let u32_id = m.ty(Ty::U32);
     let id = m.id();
-    inst(&mut m.globals, OP_TYPE_STRUCT, &[id, u64_id, u32_id, u32_id]);
+    inst(
+        &mut m.globals,
+        OP_TYPE_STRUCT,
+        &[id, u64_id, u32_id, u32_id],
+    );
     m.decorate(id, DEC_BLOCK, &[]);
     for (index, offset) in [(0u32, 0u32), (1, 8), (2, 12)] {
         inst(
@@ -699,7 +744,11 @@ fn push_block(m: &mut M) -> u32 {
     m.name(id, "nga_push");
     let pointer = m.pointer(PUSH_CONSTANT, id);
     let variable = m.id();
-    inst(&mut m.globals, OP_VARIABLE, &[pointer, variable, PUSH_CONSTANT]);
+    inst(
+        &mut m.globals,
+        OP_VARIABLE,
+        &[pointer, variable, PUSH_CONSTANT],
+    );
     m.push = variable;
     variable
 }
@@ -721,7 +770,11 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
     let function_type = {
         let mut signature = vec![ret_id];
         signature.extend(&parameter_types);
-        match m.function_types.iter().find(|(other, _)| *other == signature) {
+        match m
+            .function_types
+            .iter()
+            .find(|(other, _)| *other == signature)
+        {
             Some((_, id)) => *id,
             None => {
                 let id = m.id();
@@ -791,9 +844,11 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
         inst(&mut m.entry_points, OP_ENTRY_POINT, &operands);
         match f.stage {
             Stage::Fragment => inst(&mut m.execution_modes, OP_EXECUTION_MODE, &[id, 7]),
-            Stage::Compute([x, y, z]) => {
-                inst(&mut m.execution_modes, OP_EXECUTION_MODE, &[id, 17, x, y, z])
-            }
+            Stage::Compute([x, y, z]) => inst(
+                &mut m.execution_modes,
+                OP_EXECUTION_MODE,
+                &[id, 17, x, y, z],
+            ),
             _ => {}
         }
     }
@@ -860,7 +915,8 @@ fn entry_prologue(m: &mut M, w: &mut W) {
                 Ty::Struct(abi) => {
                     let mut members = Vec::new();
                     for field in abi.fields {
-                        let variable = stage_variable(m, w, field.ty, field.name, &mut location, INPUT);
+                        let variable =
+                            stage_variable(m, w, field.ty, field.name, &mut location, INPUT);
                         let ty = m.ty(field.ty);
                         let loaded = m.id();
                         inst(&mut w.body, OP_LOAD, &[ty, loaded, variable]);
@@ -909,7 +965,14 @@ fn entry_prologue(m: &mut M, w: &mut W) {
 
 /// One varying. Interface members with reserved names become builtins; everything else takes
 /// the next location.
-fn stage_variable(m: &mut M, w: &mut W, ty: Ty, name: &str, location: &mut u32, storage: u32) -> u32 {
+fn stage_variable(
+    m: &mut M,
+    w: &mut W,
+    ty: Ty,
+    name: &str,
+    location: &mut u32,
+    storage: u32,
+) -> u32 {
     let id = match name {
         "position" => builtin_variable(m, Builtin::Position, storage),
         "render_target_array_index" => {
@@ -993,7 +1056,11 @@ fn stmt(m: &mut M, w: &mut W, node: u32) {
             inst(
                 &mut w.body,
                 OP_BRANCH_CONDITIONAL,
-                &[cond, then_label, if els == NONE { merge } else { else_label }],
+                &[
+                    cond,
+                    then_label,
+                    if els == NONE { merge } else { else_label },
+                ],
             );
             w.terminated = true;
             label(w, then_label);
@@ -1312,10 +1379,7 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
 // -- expressions --------------------------------------------------------------------------
 
 fn signed(ty: Ty) -> bool {
-    matches!(
-        ty.prim(),
-        Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64
-    )
+    matches!(ty.prim(), Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64)
 }
 
 fn floating(ty: Ty) -> bool {
@@ -1335,7 +1399,8 @@ fn convert(m: &mut M, w: &mut W, id: u32, have: Ty, want: Ty) -> u32 {
     if have == want || want == Ty::Void || want == Ty::Infer {
         return id;
     }
-    let convertible = matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
+    let convertible =
+        matches!(have, Ty::Scalar(_) | Ty::Vec(..)) && matches!(want, Ty::Scalar(_) | Ty::Vec(..));
     if !convertible {
         return id;
     }
@@ -1432,7 +1497,11 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
                     let id = m.id();
                     if name.len() == 1 {
                         let index = component(name.as_bytes()[0]);
-                        inst(&mut w.body, OP_COMPOSITE_EXTRACT, &[type_id, id, source, index]);
+                        inst(
+                            &mut w.body,
+                            OP_COMPOSITE_EXTRACT,
+                            &[type_id, id, source, index],
+                        );
                     } else {
                         let mut operands = vec![type_id, id, source, source];
                         operands.extend(name.bytes().map(component));
@@ -1445,7 +1514,11 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
                     let source = value(m, w, base);
                     let type_id = m.ty(ty);
                     let id = m.id();
-                    inst(&mut w.body, OP_COMPOSITE_EXTRACT, &[type_id, id, source, index]);
+                    inst(
+                        &mut w.body,
+                        OP_COMPOSITE_EXTRACT,
+                        &[type_id, id, source, index],
+                    );
                     id
                 }
                 _ => {
@@ -1476,7 +1549,8 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
                 Ty::Array(element, _) => *element,
                 other => other,
             };
-            let mut components: Vec<u32> = args.iter().map(|&a| coerced(m, w, a, element)).collect();
+            let mut components: Vec<u32> =
+                args.iter().map(|&a| coerced(m, w, a, element)).collect();
             // `f32x4::splat(x)` is one component standing for all of them.
             if let Ty::Vec(_, n) | Ty::PackedVec(_, n) = ty {
                 while components.len() < n as usize {
@@ -1543,7 +1617,10 @@ fn component(letter: u8) -> u32 {
 }
 
 fn binary(m: &mut M, w: &mut W, node: u32, op: BinOp, lhs: u32, rhs: u32) -> u32 {
-    let want = match (op.compare() || op.logical(), matches!(op, BinOp::Shl | BinOp::Shr)) {
+    let want = match (
+        op.compare() || op.logical(),
+        matches!(op, BinOp::Shl | BinOp::Shr),
+    ) {
         (_, true) => Ty::Infer,
         (true, _) => w.types.nodes[lhs as usize],
         (false, _) => w.types.nodes[node as usize],
@@ -1618,11 +1695,16 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
         _ => {}
     }
 
-    if op == Intrinsic::Barrier {
-        // Workgroup scope, with both memory classes made visible: the same guarantee
-        // `threadgroup_barrier(mem_device)` gives on Metal.
+    if matches!(op, Intrinsic::Barrier | Intrinsic::ThreadgroupBarrier) {
+        // Workgroup scope. The general barrier also publishes device memory; the specialized
+        // form only synchronizes workgroup memory.
         let scope = m.constant(Ty::U32, 2);
-        let semantics = m.constant(Ty::U32, 0x2 | 0x40 | 0x100);
+        let memory = match op {
+            Intrinsic::Barrier => 0x40 | 0x100,
+            Intrinsic::ThreadgroupBarrier => 0x100,
+            _ => unreachable!(),
+        };
+        let semantics = m.constant(Ty::U32, 0x2 | memory);
         inst(&mut w.body, OP_CONTROL_BARRIER, &[scope, scope, semantics]);
         return 0;
     }
@@ -1645,14 +1727,18 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
 
     // Everything else takes its arguments at the result's type, which is what `infer` recorded.
     let element = match ty {
-        Ty::Vec(p, _) if matches!(op, Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance) => Ty::Scalar(p),
+        Ty::Vec(p, _) if matches!(op, Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance) => {
+            Ty::Scalar(p)
+        }
         other => other,
     };
     let _ = element;
     let a: Vec<u32> = match op {
-        Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance | Intrinsic::Cross | Intrinsic::Normalize => {
-            args.iter().map(|&arg| value(m, w, arg)).collect()
-        }
+        Intrinsic::Dot
+        | Intrinsic::Length
+        | Intrinsic::Distance
+        | Intrinsic::Cross
+        | Intrinsic::Normalize => args.iter().map(|&arg| value(m, w, arg)).collect(),
         Intrinsic::Mix => {
             let mut out = vec![coerced(m, w, args[0], ty), coerced(m, w, args[1], ty)];
             out.push(coerced(m, w, args[2], ty));
@@ -1710,6 +1796,16 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
             let type_id = m.ty(ty);
             let id = m.id();
             inst(&mut w.body, OP_DOT, &[type_id, id, a[0], a[1]]);
+            id
+        }
+        Intrinsic::Dfdx | Intrinsic::Dfdy => {
+            let type_id = m.ty(ty);
+            let id = m.id();
+            let opcode = match op {
+                Intrinsic::Dfdx => OP_DP_DX,
+                _ => OP_DP_DY,
+            };
+            inst(&mut w.body, opcode, &[type_id, id, a[0]]);
             id
         }
         Intrinsic::Any | Intrinsic::All => {
@@ -1781,7 +1877,6 @@ fn atomic(m: &mut M, w: &mut W, op: Intrinsic, args: &[u32]) -> u32 {
     id
 }
 
-
 /// The three descriptor arrays the device binds, matching the Vulkan half of the old prelude:
 /// sampled images at set 0, storage images at set 1, samplers at set 2, each at binding 0. A
 /// handle's low word is the index into one of them.
@@ -1818,7 +1913,11 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
                 1 => 2,
                 _ => 1,
             };
-            inst(&mut m.globals, OP_TYPE_IMAGE, &[id, float, 1, 0, 0, 0, sampled, 0]);
+            inst(
+                &mut m.globals,
+                OP_TYPE_IMAGE,
+                &[id, float, 1, 0, 0, 0, sampled, 0],
+            );
             if set == 1 {
                 m.capability(55);
                 m.capability(56);
@@ -1830,7 +1929,11 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
     inst(&mut m.globals, OP_TYPE_RUNTIME_ARRAY, &[array, element]);
     let pointer = m.pointer(UNIFORM_CONSTANT, array);
     let variable = m.id();
-    inst(&mut m.globals, OP_VARIABLE, &[pointer, variable, UNIFORM_CONSTANT]);
+    inst(
+        &mut m.globals,
+        OP_VARIABLE,
+        &[pointer, variable, UNIFORM_CONSTANT],
+    );
     m.decorate(variable, DEC_DESCRIPTOR_SET, &[set]);
     m.decorate(variable, DEC_BINDING, &[0]);
     m.name(
@@ -1869,7 +1972,11 @@ fn descriptor(m: &mut M, w: &mut W, kind: HandleKind, handle: u32) -> u32 {
     inst(&mut w.body, OP_U_CONVERT, &[u32_id, index, handle]);
     let pointer = m.pointer(UNIFORM_CONSTANT, element);
     let chain = m.id();
-    inst(&mut w.body, OP_ACCESS_CHAIN, &[pointer, chain, array, index]);
+    inst(
+        &mut w.body,
+        OP_ACCESS_CHAIN,
+        &[pointer, chain, array, index],
+    );
     let loaded = m.id();
     inst(&mut w.body, OP_LOAD, &[element, loaded, chain]);
     loaded

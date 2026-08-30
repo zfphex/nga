@@ -1,44 +1,91 @@
 //! An indirect command buffer, headless. A compute shader encodes three draws, picking the
 //! pipeline and the per-draw root pointer itself, and a render pass replays them.
-//!
-//! `shaders/icb.metal` is MSL for the same reason `shaders/mesh.metal` is; see its header.
-
-#![cfg(target_vendor = "apple")]
 
 use nga::*;
+#[cfg(target_vendor = "apple")]
+use shader::{DrawData, EncodeData, Vertex};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+#[gpu_mod]
+mod shader {
+    use nga::*;
+
+    pub struct Vertex {
+        pub position: [f32; 3],
+        pub color: [f32; 3],
+    }
+
+    /// Written by the encoding shader, one per command. The host only sizes the buffer.
+    pub struct DrawData {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub offset: f32x2,
+        pub color: f32x4,
+    }
+
+    pub struct EncodeData {
+        pub vertices: Gpu<'static, [Vertex]>,
+        pub draws: GpuMut<'static, [DrawData]>,
+        pub commands: Commands,
+        pub pipeline: PipelineHandle,
+        pub count: u32,
+    }
+
+    pub struct VertexOut {
+        pub position: f32x4,
+        pub color: f32x4,
+    }
+
+    #[compute(64)]
+    fn encode(root: Gpu<'static, EncodeData>, #[thread_id] i: u32x3) {
+        if i.x >= root.count {
+            return;
+        }
+        let mut draws = root.draws;
+        draws[i.x] = DrawData {
+            vertices: root.vertices,
+            offset: f32x2::new(-0.6 + 0.4 * i.x as f32, 0.0),
+            color: f32x4::new(1.0, 1.0, 1.0, 1.0),
+        };
+        command_set_pipeline(root.commands, i.x, root.pipeline);
+        command_set_vertex_buffer(root.commands, i.x, draws[i.x], 1);
+        command_draw(root.commands, i.x, false, 0, 3, 1, 0);
+    }
+
+    #[vertex]
+    fn icb_vertex(#[buffer(1)] data: Gpu<'static, DrawData>, #[vertex_id] vid: u32) -> VertexOut {
+        let source = data.vertices[vid];
+        VertexOut {
+            position: f32x4::new(
+                source.position[0] * 0.25 + data.offset.x,
+                source.position[1] * 0.25 + data.offset.y,
+                source.position[2],
+                1.0,
+            ),
+            color: data.color,
+        }
+    }
+
+    #[fragment]
+    fn icb_fragment(input: VertexOut) -> f32x4 {
+        input.color
+    }
 }
 
-/// Written by the encoding shader, one per command. The host only sizes the buffer.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct DrawData {
-    vertices: u64,
-    offset: [f32; 2],
-    _pad: [u32; 2],
-    color: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct EncodeData {
-    vertices: Gpu<'static, Vertex>,
-    draws: GpuMut<'static, DrawData>,
-    commands: Commands,
-    pipeline: PipelineHandle,
-    count: u32,
-}
-
-const SHADERS: &[u8] = nga::shader!("icb");
-
+#[cfg(target_vendor = "apple")]
 const SIZE: u32 = 128;
+#[cfg(target_vendor = "apple")]
 const DRAWS: u32 = 3;
 
+#[test]
+fn icb_shader_is_generated_from_rust() {
+    let source = msl::module(shader::ENTRIES);
+    assert!(source.contains("struct nga_commands { command_buffer cb; };"));
+    assert!(source.contains("nga_command_set_pipeline("));
+    assert!(source.contains("nga_command_set_vertex_buffer("));
+    assert!(source.contains("nga_command_draw("));
+    assert!(source.contains("device const DrawData* data [[buffer(1)]]"));
+}
+
+#[cfg(target_vendor = "apple")]
 #[test]
 fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(device) = Device::new(cfg!(debug_assertions)) else {
@@ -53,7 +100,8 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    let mut shaders = Shaders::new(&device, SHADERS)?;
+    let source = compile(shader::ENTRIES);
+    let mut shaders = Shaders::new(&device, &source)?;
     // `indirect` is what gives the pipeline a resource ID for the shader to name.
     let drawn = shaders.raster(
         &RasterDesc::new(
@@ -74,7 +122,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             .usage(Usage::COLOR | Usage::COPY_SRC),
     )?;
     let mut draws = heap.alloc_buffer(size_of::<DrawData>() * DRAWS as usize)?;
-    let draw_block: GpuMut<'static, DrawData> = GpuMut::new(draws.gpu_mut::<DrawData>().0.get());
+    let draw_block: GpuMut<'static, [DrawData]> = GpuMut::new(draws.gpu_mut::<DrawData>().0.get());
 
     let white = [1.0, 1.0, 1.0];
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
@@ -94,7 +142,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+    let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     let pixels = readback

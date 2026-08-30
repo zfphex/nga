@@ -34,8 +34,7 @@ fn scalar(name: &str) -> bool {
             | "Texture2d" | "Texture2dW" | "Texture2dRW" | "Texture2dArray"
             | "Texture3d" | "Texture3dW" | "Texture3dRW" | "TextureCube"
             | "Depth2d" | "Sampler"
-            // Metal-only. Indirect command buffers have no Rust spelling, so the shaders
-            // that encode through these are the hand-written `.metal` ones.
+            // Metal-only handles used by Rust shaders that encode indirect command buffers.
             | "Commands" | "PipelineHandle"
             | "Draw" | "DrawIndexed" | "Dispatch" | "DispatchThreads"
     )
@@ -71,7 +70,10 @@ fn parse_struct(tokens: &[TokenTree]) -> Result<(Ident, Vec<Field>), Fail> {
             Some(TokenTree::Ident(id)) => match id.to_string().as_str() {
                 "struct" => break,
                 "enum" | "union" => {
-                    return Err((id.span(), "#[gpu_mod] shares structs, not enums or unions".into()));
+                    return Err((
+                        id.span(),
+                        "#[gpu_mod] shares structs, not enums or unions".into(),
+                    ));
                 }
                 _ => i += 1,
             },
@@ -250,7 +252,8 @@ fn users(ty: &Ty, out: &mut Vec<String>) {
 /// }
 /// ```
 ///
-/// A `fn` carries `#[vertex]`, `#[fragment]` or `#[compute(x, y, z)]` when it is an entry point
+/// A `fn` carries `#[vertex]`, `#[fragment]`, `#[compute(x, y, z)]`, `#[object]`,
+/// `#[mesh(Vertex, vertices, primitives)]` or `#[tile(Imageblock)]` when it is an entry point
 /// and nothing when it is a helper. A `struct` that wants an alignment writes the `#[repr]` Rust
 /// already has, and the macro leaves it alone. `#[host]` on any item passes it through
 /// untouched, which is where a host-side type or helper goes.
@@ -311,10 +314,14 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         return Err((first.span(), "#[gpu_mod] takes no arguments".into()));
     }
     let tokens: Vec<TokenTree> = item.into_iter().collect();
-    let Some(keyword) = tokens.iter().position(
-        |token| matches!(token, TokenTree::Ident(id) if id.to_string() == "mod"),
-    ) else {
-        return Err((Span::call_site(), "#[gpu_mod] only applies to modules".into()));
+    let Some(keyword) = tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Ident(id) if id.to_string() == "mod"))
+    else {
+        return Err((
+            Span::call_site(),
+            "#[gpu_mod] only applies to modules".into(),
+        ));
     };
     let Some(TokenTree::Ident(name)) = tokens.get(keyword + 1) else {
         return Err((tokens[keyword].span(), "expected a module name".into()));
@@ -357,7 +364,9 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
             match inner.first() {
                 Some(TokenTree::Ident(id)) => match id.to_string().as_str() {
                     "host" => host = true,
-                    "vertex" | "fragment" | "compute" => stage = Some(g.stream()),
+                    "vertex" | "fragment" | "compute" | "object" | "mesh" | "tile" => {
+                        stage = Some(g.stream())
+                    }
                     // A struct spelling its own `#[repr]` keeps it, but it has to be a `C` one:
                     // the offsets both backends write out are the ones Rust chose, and Rust's
                     // own layout is free to reorder fields.
@@ -440,10 +449,12 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
             .collect::<Vec<_>>()
             .join(", ")
     );
-    out.extend(
-        list.parse::<TokenStream>()
-            .map_err(|_| (name.span(), format!("could not emit the entry list:\n{list}")))?,
-    );
+    out.extend(list.parse::<TokenStream>().map_err(|_| {
+        (
+            name.span(),
+            format!("could not emit the entry list:\n{list}"),
+        )
+    })?);
 
     let prefix: TokenStream = tokens[..keyword + 2].iter().cloned().collect();
     Ok(prefix

@@ -39,8 +39,9 @@ pub enum HandleKind {
     TextureCube,
     Depth2d,
     Sampler,
-    /// A prelude typedef with no IR meaning: an indirect command buffer, a pipeline handle.
-    /// Eight bytes in a struct and nothing a shader function can do with it.
+    Commands,
+    Pipeline,
+    /// A prelude typedef with no IR meaning. Eight bytes in a struct.
     Opaque,
 }
 
@@ -60,6 +61,9 @@ pub enum Ty {
         pointee: &'static Ty,
     },
     Handle(HandleKind),
+    /// A local atomic shared by every invocation in one threadgroup. It cannot cross the
+    /// host/device ABI or appear in a device pointer.
+    ThreadgroupAtomicU32,
     /// An unannotated `let`, before `infer` fills it in.
     Infer,
     /// An unsuffixed literal. Takes the type of whatever it meets, and `I32`/`F32` if it never
@@ -95,6 +99,7 @@ impl Ty {
             Ty::Array(e, n) => e.size() * n as usize,
             Ty::Struct(abi) => abi.size,
             Ty::Ptr { .. } | Ty::Handle(_) => 8,
+            Ty::ThreadgroupAtomicU32 => 4,
             Ty::Infer | Ty::IntLit | Ty::FloatLit => panic!("{self:?} has no size"),
         }
     }
@@ -110,6 +115,7 @@ impl Ty {
             Ty::Array(e, _) => e.align(),
             Ty::Struct(abi) => abi.align,
             Ty::Ptr { .. } | Ty::Handle(_) => 8,
+            Ty::ThreadgroupAtomicU32 => 4,
             _ => panic!("{self:?} has no alignment"),
         }
     }
@@ -174,8 +180,8 @@ impl BinOp {
     }
 }
 
-/// Everything with a spelling on both backends. The name here is the Rust one; each backend
-/// maps it to its own.
+/// Shader operations recorded from Rust. Portable operations have two lowerings; optional
+/// stage operations are omitted with their entry point on a backend that cannot execute them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intrinsic {
     Unpack,
@@ -217,6 +223,7 @@ pub enum Intrinsic {
     Mul,
     Transpose,
     Barrier,
+    ThreadgroupBarrier,
     AtomicAdd,
     AtomicMin,
     AtomicMax,
@@ -226,6 +233,17 @@ pub enum Intrinsic {
     Load,
     Store,
     Dimensions,
+    Dfdx,
+    Dfdy,
+    MeshSetThreadgroups,
+    MeshSetPrimitiveCount,
+    MeshSetVertex,
+    MeshSetIndex,
+    TileRead,
+    TileWrite,
+    CommandSetPipeline,
+    CommandSetVertexBuffer,
+    CommandDraw,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -347,15 +365,28 @@ pub enum Binding {
     /// memory. The field's index is its id, which is the same number `Constants::values`
     /// pushes, so the host and the module cannot disagree about which is which.
     Constants,
+    /// Object-stage payload output, or the matching mesh-stage payload input.
+    Payload,
+    /// A directly bound stage buffer. Indirect commands use slot one for per-draw data.
+    Buffer(u32),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Stage {
     /// Called by other shader functions and no entry point of its own.
     Helper,
     Vertex,
     Fragment,
     Compute([u32; 3]),
+    Object,
+    Mesh {
+        vertex: Ty,
+        max_vertices: u32,
+        max_primitives: u32,
+    },
+    Tile {
+        imageblock: Ty,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -671,7 +702,21 @@ fn intrinsic(op: Intrinsic, first: Ty, f: &GpuFn, types: &Types, args: &[u32]) -
         },
         Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance => Ty::Scalar(first.prim()),
         Intrinsic::Any | Intrinsic::All => Ty::BOOL,
-        Intrinsic::Barrier | Intrinsic::Store => Ty::Void,
+        Intrinsic::Barrier
+        | Intrinsic::ThreadgroupBarrier
+        | Intrinsic::Store
+        | Intrinsic::MeshSetThreadgroups
+        | Intrinsic::MeshSetPrimitiveCount
+        | Intrinsic::MeshSetVertex
+        | Intrinsic::MeshSetIndex
+        | Intrinsic::TileWrite
+        | Intrinsic::CommandSetPipeline
+        | Intrinsic::CommandSetVertexBuffer
+        | Intrinsic::CommandDraw => Ty::Void,
+        Intrinsic::TileRead => match f.stage {
+            Stage::Tile { imageblock } => imageblock,
+            _ => panic!("tile_read outside a tile stage"),
+        },
         // `mul` is matrix times vector, matrix times matrix, or the vector row form.
         Intrinsic::Mul => match (first, types.nodes[args[1] as usize]) {
             (Ty::Mat(_, r), Ty::Vec(..)) => Ty::Vec(Prim::F32, r),

@@ -163,10 +163,9 @@ mod mixed {
     }
 }
 
-/// What the three Metal-only examples do: a host module that shares a struct with a
-/// hand-written `.metal` shader nests the struct in a `#[gpu_mod]` of its own, so the host code
-/// around it is never asked to be shader code.
-mod hand_written {
+/// A host module can nest shared shader data so surrounding host helpers are not parsed as
+/// shader code.
+mod nested_shader_data {
     use nga::*;
 
     #[gpu_mod]
@@ -197,10 +196,10 @@ mod hand_written {
 }
 
 #[test]
-fn a_nested_gpu_mod_shares_structs_with_a_hand_written_shader() {
-    assert_eq!(hand_written::corner().position.len(), 3);
+fn a_nested_gpu_mod_shares_structs_with_host_code() {
+    assert_eq!(nested_shader_data::corner().position.len(), 3);
     // The pointer, eight bytes of hole, then the matrix.
-    assert_eq!(hand_written::camera_size(), 80);
+    assert_eq!(nested_shader_data::camera_size(), 80);
 }
 
 #[test]
@@ -401,7 +400,6 @@ fn reachable() {
     let order: Vec<&str> = GREY.reachable().iter().map(|f| f.name).collect();
     assert_eq!(order, ["luma", "grey"]);
 }
-
 
 // -- struct layout -------------------------------------------------------------------------
 //

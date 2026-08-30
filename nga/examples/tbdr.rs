@@ -20,7 +20,7 @@ mod tiles {
     use nga::*;
 
     #[gpu_mod]
-    mod data {
+    mod shader {
         use nga::*;
 
         pub struct Vertex {
@@ -30,7 +30,7 @@ mod tiles {
 
         #[repr(C, align(16))]
         pub struct Data {
-            pub vertices: Gpu<'static, Vertex>,
+            pub vertices: Gpu<'static, [Vertex]>,
             pub mvp: f32x4x4,
         }
 
@@ -40,14 +40,59 @@ mod tiles {
             pub strength: f32,
             pub levels: f32,
         }
+
+        pub struct VertexOut {
+            pub position: f32x4,
+            pub color: f32x3,
+        }
+
+        #[derive(Default)]
+        pub struct TileColor {
+            pub color: f32x4,
+        }
+
+        #[vertex]
+        fn tbdr_vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+            let source = root.vertices[vid];
+            VertexOut {
+                position: root.mvp.mul(f32x4::new(
+                    source.position[0],
+                    source.position[1],
+                    source.position[2],
+                    1.0,
+                )),
+                color: f32x3::new(source.color[0], source.color[1], source.color[2]),
+            }
+        }
+
+        #[fragment]
+        fn tbdr_fragment(input: VertexOut) -> f32x4 {
+            f32x4::new(input.color.x, input.color.y, input.color.z, 1.0)
+        }
+
+        #[tile(TileColor)]
+        fn tbdr_vignette(
+            root: Gpu<'static, Vignette>,
+            #[thread_id_in_group] tid: u32x3,
+            #[group_id] group: u32x3,
+        ) {
+            let at = u32x2::new(tid.x, tid.y);
+            let pixel = f32x2::new(group.x as f32, group.y as f32) * root.tile
+                + f32x2::new(tid.x as f32, tid.y as f32);
+            let offset = pixel / root.size - f32x2::splat(0.5);
+            let mut texel: TileColor = tile_read(at);
+            let mut color = texel.color.xyz();
+            color = (color * root.levels).floor() / root.levels;
+            color = color * (1.0 - root.strength * offset.dot(offset));
+            texel.color = f32x4::new(color.x, color.y, color.z, texel.color.w);
+            tile_write(texel, at);
+        }
     }
 
-    use data::*;
+    use shader::*;
 
-    const SHADERS: &[u8] = nga::shader!("tbdr");
-
-    /// One `TileColor` in the shader: a `half4`.
-    const IMAGEBLOCK_BYTES: usize = 8;
+    /// One `TileColor` in the shader: a `float4`.
+    const IMAGEBLOCK_BYTES: usize = 16;
     /// The tile the imageblock covers. 32x32 is the largest Apple silicon accepts for a
     /// four-byte-per-sample colour target.
     const TILE: u32 = 16;
@@ -70,7 +115,8 @@ mod tiles {
         let handle = window.ns_view as isize;
         let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
 
-        let mut shaders = Shaders::new(&device, SHADERS)?;
+        let source = compile(shader::ENTRIES);
+        let mut shaders = Shaders::new(&device, &source)?;
         let draw = shaders.raster(&RasterDesc::new(
             "tbdr_vertex",
             "tbdr_fragment",
@@ -103,7 +149,7 @@ mod tiles {
 
         let geometry = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = geometry.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, Vertex> = Gpu::new(vertices.gpu.0.get());
+        let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
         let count = mesh.len() as u32;
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
