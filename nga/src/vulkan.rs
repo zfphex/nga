@@ -785,7 +785,8 @@ impl Device {
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
             .fill_mode_non_solid(true)
-            .independent_blend(true);
+            .independent_blend(true)
+            .sampler_anisotropy(true);
 
         let priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -1286,6 +1287,15 @@ pub struct HeapBuffer {
     pub(crate) gpu: u64,
     pub(crate) len: usize,
     pub(crate) alloc: Alloc,
+    pub(crate) device: ash::Device,
+}
+
+impl Drop for HeapBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_buffer(self.buffer, None);
+        }
+    }
 }
 
 impl HeapBuffer {
@@ -1324,6 +1334,19 @@ pub struct HeapTexture {
     pub(crate) layers: u32,
     pub(crate) alloc: Alloc,
     pub(crate) layout: Cell<vk::ImageLayout>,
+    pub(crate) device: ash::Device,
+}
+
+impl Drop for HeapTexture {
+    fn drop(&mut self) {
+        unsafe {
+            for &view in &self.attachment_views {
+                self.device.destroy_image_view(view, None);
+            }
+            self.device.destroy_image_view(self.view, None);
+            self.device.destroy_image(self.image, None);
+        }
+    }
 }
 
 impl HeapTexture {
@@ -1790,6 +1813,7 @@ impl GpuHeap {
             gpu,
             len,
             alloc,
+            device: self.device.clone(),
         })
     }
 
@@ -1881,6 +1905,7 @@ impl GpuHeap {
             layers: desc.layers,
             alloc,
             layout: Cell::new(vk::ImageLayout::UNDEFINED),
+            device: self.device.clone(),
         })
     }
 
@@ -2126,21 +2151,11 @@ impl GpuHeap {
 
     /// The buffer counterpart of [`GpuHeap::free_texture`].
     pub fn free_buffer(&mut self, buffer: HeapBuffer) {
-        unsafe { self.device.destroy_buffer(buffer.buffer, None) };
         self.tlsf.free(buffer.alloc.block);
     }
 
-    /// Destroys the image and view as well as releasing the block. Validation reports a leaked
-    /// `VkImage` without this, because `HeapTexture` has no `Drop` of its own. It cannot, since
-    /// it does not know which device it came from.
+    /// Releases the TLSF block. The image and views are destroyed when `texture` drops.
     pub fn free_texture(&mut self, texture: HeapTexture) {
-        unsafe {
-            for view in texture.attachment_views {
-                self.device.destroy_image_view(view, None);
-            }
-            self.device.destroy_image_view(texture.view, None);
-            self.device.destroy_image(texture.image, None);
-        }
         self.tlsf.free(texture.alloc.block);
     }
 
