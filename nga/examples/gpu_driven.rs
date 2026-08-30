@@ -1,6 +1,8 @@
 use minwin::*;
 use nga::*;
-use gpu_driven::{BoundaryData, DrawArgs, DrawData, EncodeData, Instance, SimData};
+use gpu_driven::{
+    BoundaryData, DrawArgs, DrawData, EncodeData, ExecutionRange, Instance, SimData,
+};
 
 /// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
@@ -33,9 +35,16 @@ mod gpu_driven {
     pub struct EncodeData {
         pub instances: Gpu<'static, [Instance]>,
         pub draws: GpuMut<'static, [DrawArgs]>,
-        pub count: GpuMut<'static, AtomicU32>,
+        pub range: GpuMut<'static, ExecutionRange>,
+        pub commands: Commands,
         pub cull_radius: f32,
         pub total: u32,
+    }
+
+    /// Metal's indirect-command execution range. Vulkan reads `length` as its draw count.
+    pub struct ExecutionRange {
+        pub location: u32,
+        pub length: AtomicU32,
     }
 
     #[repr(C, align(16))]
@@ -87,8 +96,8 @@ mod gpu_driven {
         if inst.center.length() > root.cull_radius {
             return;
         }
-        let mut counter = root.count;
-        let slot = counter.atomic_add(1);
+        let mut range = root.range;
+        let slot = range.length.atomic_add(1);
         let mut draws = root.draws;
         draws[slot] = DrawArgs {
             vertex_count: 3,
@@ -96,6 +105,9 @@ mod gpu_driven {
             first_vertex: 0,
             first_instance: i,
         };
+        // Metal encodes this compact slot into an inherited-state ICB. Vulkan already has the
+        // DrawArgs record above, so its compiler lowers this call to no instructions.
+        command_draw(root.commands, slot, false, 0, 3, 1, i);
     }
 
     pub struct VertexOut {
@@ -169,11 +181,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shaders = Shaders::new(&device, &nga::compile(gpu_driven::ENTRIES))?;
     let simulate = shaders.compute(gpu_driven::SIMULATE.name, None)?;
     let encode = shaders.compute(gpu_driven::ENCODE.name, None)?;
-    let draw = shaders.raster(&RasterDesc::new(
-        gpu_driven::VERTEX.name,
-        gpu_driven::FRAGMENT.name,
-        &[ColorTarget::new(surface.format())],
-    ))?;
+    let draw = shaders.raster(
+        &RasterDesc::new(
+            gpu_driven::VERTEX.name,
+            gpu_driven::FRAGMENT.name,
+            &[ColorTarget::new(surface.format())],
+        )
+        .indirect(),
+    )?;
     let boundary = shaders.raster(&RasterDesc {
         topology: Topology::TriangleStrip,
         ..RasterDesc::new(
@@ -189,7 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let draws = heap.alloc_buffer(COUNT * size_of::<DrawArgs>())?;
-    let counter = heap.alloc_buffer(size_of::<u32>())?;
+    let range = heap.alloc_buffer(size_of::<ExecutionRange>())?;
+    let commands = IndirectCommands::counted_draws(&device, COUNT as u32)?;
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
@@ -245,7 +261,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .alloc(EncodeData {
                     instances: Gpu::new(instances.address()),
                     draws: GpuMut::new(draws.address()),
-                    count: GpuMut::new(counter.address()),
+                    range: GpuMut::new(range.address()),
+                    commands: commands.handle(),
                     cull_radius,
                     total: COUNT as u32,
                 })
@@ -271,13 +288,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             {
                 let compute = rec.compute();
-                // Metal resets the indirect command buffer's execution range with a dedicated
-                // `reset` command. Vulkan's equivalent is just zeroing the count word.
-                compute.fill_buffer(&counter, 0, size_of::<u32>(), 0);
-                // Every draw slot the encode pass does not claim this frame has to read as
-                // `instance_count == 0`: Vulkan stops at the count, but the Metal backend
-                // replays all `COUNT` slots because there is no GPU-side count to stop at.
-                compute.fill_buffer(&draws, 0, draws.len(), 0);
+                // Clear `{ location, length }`. Only compact slots below the new length execute,
+                // so neither backend needs the entire draw array cleared.
+                compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
                 compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::ALL);
 
                 compute.pipeline(simulate);
@@ -293,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
                 let raster = rec.raster(&pass, surface.width(), surface.height());
                 raster.pipeline(draw);
-                raster.draw_indirect_count(draw_root, &draws, &counter, COUNT as u32);
+                raster.draw_indirect_count(draw_root, &commands, &draws, &range);
 
                 raster.pipeline(boundary);
                 raster.draw(boundary_root, 0, SEGMENTS * 2 + 2);
@@ -311,7 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    heap.free_buffer(counter);
+    heap.free_buffer(range);
     heap.free_buffer(draws);
     heap.free_buffer(instances);
     Ok(())

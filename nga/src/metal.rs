@@ -680,7 +680,15 @@ impl Arena {
         })
     }
 
-    pub fn alloc_scratch<T>(&self, len: usize) -> Option<GpuBox<'_, [T]>> {
+    /// Reserves mapped memory for the GPU to fill.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not read any element through the returned [`GpuBox`] until GPU work has
+    /// initialised every element and the host has waited for that work to complete. Metal clears
+    /// the bytes for deterministic captures, but an all-zero byte pattern is not a valid value
+    /// for every `T`.
+    pub unsafe fn alloc_scratch<T>(&self, len: usize) -> Option<GpuBox<'_, [T]>> {
         let bytes = size_of::<T>() * len;
         let (cpu, gpu) = self.alloc_bytes(bytes, align_of::<T>().max(16))?;
         unsafe { std::ptr::write_bytes(cpu, 0, bytes) };
@@ -1960,25 +1968,22 @@ impl<'a> Raster<'a> {
         }
     }
 
-    /// Metal has no `vkCmdDrawIndirectCount`: the count lives on the GPU and only an indirect
-    /// command buffer can consume it there. Until `Feature::IndirectCommands` is implemented
-    /// the portable spelling is `max` indirect draws. An entry the encode pass never wrote
-    /// has `instance_count == 0` and costs nothing beyond the call, which is why the caller
-    /// must clear `draws` each frame.
+    /// Replays a GPU-compacted batch with one driver command.
+    ///
+    /// `range` begins with Metal's `{ location, length }` execution range. The producer
+    /// increments `length` and encodes the same compact slot through [`command_draw`].
+    /// `draws` is the parallel Vulkan argument array and is unused on Metal.
     pub fn draw_indirect_count<T>(
         &self,
         root: Gpu<'_, T>,
-        draws: &HeapBuffer,
-        _count: &HeapBuffer,
-        max: u32,
+        commands: &IndirectCommands,
+        _draws: &HeapBuffer,
+        range: &HeapBuffer,
     ) {
+        debug_assert!(range.len >= size_of::<[u32; 2]>());
         self.bind(root);
-        for index in 0..max as u64 {
-            self.encoder.draw_primitives_with_indirect_buffer(
-                self.primitive.get(),
-                draws.gpu + index * size_of::<crate::Draw>() as u64,
-            );
-        }
+        self.encoder
+            .execute_commands_in_buffer_with_indirect_buffer(&commands.icb, range.gpu);
     }
 
     /// A run of draws sharing every piece of state, including the root pointer.
@@ -2611,6 +2616,20 @@ pub struct IndirectCommands {
 }
 
 impl IndirectCommands {
+    /// A compact batch whose draw count is written by the same shader that encodes its slots.
+    ///
+    /// The render pass supplies the pipeline, root pointer, and dynamic state. The producer
+    /// only calls [`command_draw`] for each compacted slot, so Metal can replay the batch with
+    /// one counted ICB command rather than one CPU driver call per possible draw.
+    pub fn counted_draws(device: &Device, count: u32) -> Result<Self, Error> {
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(IndirectCommandType::DRAW);
+        desc.set_inherit_pipeline_state(true);
+        desc.set_inherit_buffers(true);
+        Self::inherit_render_state(&desc);
+        Self::new(device, &desc, count)
+    }
+
     /// `count` draw slots. `indexed` picks between `drawPrimitives` and
     /// `drawIndexedPrimitives`; a buffer cannot hold both.
     pub fn draws(device: &Device, count: u32, indexed: bool) -> Result<Self, Error> {

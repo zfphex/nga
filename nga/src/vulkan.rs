@@ -1105,7 +1105,13 @@ impl Arena {
         })
     }
 
-    pub fn alloc_scratch<T>(&self, len: usize) -> Option<GpuBox<'_, [T]>> {
+    /// Reserves uninitialised mapped memory for the GPU to fill.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not read any element through the returned [`GpuBox`] until GPU work has
+    /// initialised every element and the host has waited for that work to complete.
+    pub unsafe fn alloc_scratch<T>(&self, len: usize) -> Option<GpuBox<'_, [T]>> {
         let (cpu, gpu) = self.alloc_bytes(size_of::<T>() * len, align_of::<T>())?;
         Some(GpuBox {
             cpu: NonNull::new(std::ptr::slice_from_raw_parts_mut(cpu as *mut T, len))?,
@@ -2814,29 +2820,84 @@ pub(crate) struct Attachment {
     pub(crate) resolve_mode: vk::ResolveModeFlags,
 }
 
-#[derive(Default)]
+const MAX_COLOR_ATTACHMENTS: usize = 8;
+const MAX_IMAGE_BARRIERS: usize = MAX_COLOR_ATTACHMENTS * 2 + 2;
+
+impl Attachment {
+    fn unused() -> Self {
+        Self {
+            view: vk::ImageView::null(),
+            image: vk::Image::null(),
+            old_layout: vk::ImageLayout::UNDEFINED,
+            mips: 1,
+            layers: 1,
+            available_layers: 1,
+            clear: None,
+            store: false,
+            aspect: vk::ImageAspectFlags::COLOR,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            stencil: false,
+            stencil_clear: None,
+            stencil_store: false,
+            resolve_view: vk::ImageView::null(),
+            resolve_image: vk::Image::null(),
+            resolve_old_layout: vk::ImageLayout::UNDEFINED,
+            resolve_mips: 0,
+            resolve_layers: 0,
+            resolve_available_layers: 0,
+            resolve_mode: vk::ResolveModeFlags::NONE,
+        }
+    }
+}
+
 pub struct Pass {
-    pub(crate) colors: Vec<Attachment>,
+    pub(crate) colors: [Attachment; MAX_COLOR_ATTACHMENTS],
+    pub(crate) color_count: usize,
     pub(crate) depth: Option<Attachment>,
     pub(crate) layers: u32,
     pub(crate) occlusion: Option<(vk::QueryPool, u32)>,
 }
 
+impl Default for Pass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pass {
     pub fn new() -> Self {
         Self {
-            colors: Vec::new(),
+            colors: [Attachment::unused(); MAX_COLOR_ATTACHMENTS],
+            color_count: 0,
             depth: None,
             layers: 1,
             occlusion: None,
         }
     }
 
+    fn colors(&self) -> &[Attachment] {
+        &self.colors[..self.color_count]
+    }
+
+    fn set_color(&mut self, index: usize, attachment: Attachment) {
+        assert!(
+            index < MAX_COLOR_ATTACHMENTS,
+            "a pass supports at most {MAX_COLOR_ATTACHMENTS} color attachments"
+        );
+        self.colors[index] = attachment;
+        self.color_count = self.color_count.max(index + 1);
+    }
+
+    fn color_mut(&mut self, index: usize, message: &str) -> &mut Attachment {
+        assert!(index < self.color_count && self.colors[index].image != vk::Image::null(), "{message}");
+        &mut self.colors[index]
+    }
+
     /// Render each primitive into one of `layers` consecutive attachment slices. The vertex
     /// shader selects the relative slice with `render_target_array_index`.
     pub fn layers(mut self, layers: u32) -> Self {
         assert!(layers > 0, "a pass must render at least one layer");
-        for attachment in self.colors.iter().chain(self.depth.iter()) {
+        for attachment in self.colors().iter().chain(self.depth.iter()) {
             assert!(
                 layers <= attachment.available_layers,
                 "the pass asks for {layers} layers but an attachment has only {} available",
@@ -2883,34 +2944,7 @@ impl Pass {
             resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
-        if self.colors.len() <= index {
-            self.colors.resize(
-                index + 1,
-                Attachment {
-                    view: vk::ImageView::null(),
-                    image: vk::Image::null(),
-                    old_layout: vk::ImageLayout::UNDEFINED,
-                    mips: 1,
-                    layers: 1,
-                    available_layers: 1,
-                    clear: None,
-                    store: false,
-                    aspect: vk::ImageAspectFlags::COLOR,
-                    layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    stencil: false,
-                    stencil_clear: None,
-                    stencil_store: false,
-                    resolve_view: vk::ImageView::null(),
-                    resolve_image: vk::Image::null(),
-                    resolve_old_layout: vk::ImageLayout::UNDEFINED,
-                    resolve_mips: 0,
-                    resolve_layers: 0,
-                    resolve_available_layers: 0,
-                    resolve_mode: vk::ResolveModeFlags::NONE,
-                },
-            );
-        }
-        self.colors[index] = attachment;
+        self.set_color(index, attachment);
         self
     }
 
@@ -2972,34 +3006,7 @@ impl Pass {
             resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
-        if self.colors.len() <= index {
-            self.colors.resize(
-                index + 1,
-                Attachment {
-                    view: vk::ImageView::null(),
-                    image: vk::Image::null(),
-                    old_layout: vk::ImageLayout::UNDEFINED,
-                    mips: 1,
-                    layers: 1,
-                    available_layers: 1,
-                    clear: None,
-                    store: false,
-                    aspect: vk::ImageAspectFlags::COLOR,
-                    layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    stencil: false,
-                    stencil_clear: None,
-                    stencil_store: false,
-                    resolve_view: vk::ImageView::null(),
-                    resolve_image: vk::Image::null(),
-                    resolve_old_layout: vk::ImageLayout::UNDEFINED,
-                    resolve_mips: 0,
-                    resolve_layers: 0,
-                    resolve_available_layers: 0,
-                    resolve_mode: vk::ResolveModeFlags::NONE,
-                },
-            );
-        }
-        self.colors[index] = attachment;
+        self.set_color(index, attachment);
         self
     }
 
@@ -3094,10 +3101,7 @@ impl Pass {
     /// where it lands.
     pub fn resolve(mut self, index: usize, drawable: &Drawable) -> Self {
         assert!(self.layers == 1, "a surface resolve has only one layer");
-        let target = self
-            .colors
-            .get_mut(index)
-            .expect("Pass::resolve before Pass::color");
+        let target = self.color_mut(index, "Pass::resolve before Pass::color");
         target.resolve_view = drawable.view;
         target.resolve_image = drawable.image;
         target.resolve_old_layout = vk::ImageLayout::UNDEFINED;
@@ -3129,10 +3133,10 @@ impl Pass {
         let old_layout = texture
             .layout
             .replace(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        let target = self
-            .colors
-            .get_mut(index)
-            .expect("Pass::resolve_texture before Pass::color_texture");
+        let target = self.color_mut(
+            index,
+            "Pass::resolve_texture before Pass::color_texture",
+        );
         target.resolve_view = texture.attachment_view(level, layer);
         target.resolve_image = texture.image;
         target.resolve_old_layout = old_layout;
@@ -3222,43 +3226,45 @@ impl<'a> Raster<'a> {
         // Vulkan has no `MTLStorageMode`-style implicit transition: every attachment has to be
         // moved to its rendering layout by hand. `VK_KHR_unified_image_layouts` would delete
         // this block entirely, and it is absent on this driver.
-        let mut barriers: Vec<_> = pass
-            .colors
+        let mut barriers = [vk::ImageMemoryBarrier2::default(); MAX_IMAGE_BARRIERS];
+        let mut barrier_count = 0;
+        for attachment in pass
+            .colors()
             .iter()
             .filter(|attachment| attachment.image != vk::Image::null())
-            .map(|attachment| {
-                // A pass that clears may discard whatever was there; a pass that loads must
-                // keep it, and must additionally order its writes after the previous pass's.
-                // Metal's `Pass` needs neither distinction; this is the layout tax again.
-                let (src_stage, src_access) = match attachment.old_layout {
-                    vk::ImageLayout::UNDEFINED => (
-                        vk::PipelineStageFlags2::TOP_OF_PIPE,
-                        vk::AccessFlags2::empty(),
-                    ),
-                    _ => (
-                        vk::PipelineStageFlags2::ALL_COMMANDS,
-                        vk::AccessFlags2::MEMORY_WRITE,
-                    ),
-                };
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(src_stage)
-                    .src_access_mask(src_access)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(
-                        vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-                            | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
-                    )
-                    .old_layout(attachment.old_layout)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .image(attachment.image)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .level_count(attachment.mips)
-                            .layer_count(attachment.layers),
-                    )
-            })
-            .collect();
+        {
+            // A pass that clears may discard whatever was there; a pass that loads must
+            // keep it, and must additionally order its writes after the previous pass's.
+            // Metal's `Pass` needs neither distinction; this is the layout tax again.
+            let (src_stage, src_access) = match attachment.old_layout {
+                vk::ImageLayout::UNDEFINED => (
+                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    vk::AccessFlags2::empty(),
+                ),
+                _ => (
+                    vk::PipelineStageFlags2::ALL_COMMANDS,
+                    vk::AccessFlags2::MEMORY_WRITE,
+                ),
+            };
+            barriers[barrier_count] = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(src_stage)
+                .src_access_mask(src_access)
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+                )
+                .old_layout(attachment.old_layout)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(attachment.image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(attachment.mips)
+                        .layer_count(attachment.layers),
+                );
+            barrier_count += 1;
+        }
         if let Some(attachment) = pass.depth {
             let discards_all = attachment.clear.is_some()
                 && (!attachment.stencil || attachment.stencil_clear.is_some());
@@ -3267,27 +3273,26 @@ impl<'a> Raster<'a> {
                     true => vk::ImageLayout::UNDEFINED,
                     false => attachment.old_layout,
                 };
-            barriers.push(
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
-                    .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
-                    .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                    .old_layout(old_layout)
-                    .new_layout(attachment.layout)
-                    .image(attachment.image)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(attachment.aspect)
-                            .level_count(attachment.mips)
-                            .layer_count(attachment.layers),
-                    ),
-            );
+            barriers[barrier_count] = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .old_layout(old_layout)
+                .new_layout(attachment.layout)
+                .image(attachment.image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(attachment.aspect)
+                        .level_count(attachment.mips)
+                        .layer_count(attachment.layers),
+                );
+            barrier_count += 1;
         }
         // A resolve target is fully overwritten at pass end, so it comes from UNDEFINED the
         // same way a cleared attachment does.
         for (depth, attachment) in pass
-            .colors
+            .colors()
             .iter()
             .map(|attachment| (false, attachment))
             .chain(pass.depth.as_ref().map(|attachment| (true, attachment)))
@@ -3295,71 +3300,67 @@ impl<'a> Raster<'a> {
             if attachment.resolve_image == vk::Image::null() {
                 continue;
             }
-            barriers.push(
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                    .dst_stage_mask(match depth {
-                        true => vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                        false => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                    })
-                    .dst_access_mask(match depth {
-                        true => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        false => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                    })
-                    .old_layout(attachment.resolve_old_layout)
-                    .new_layout(match depth {
-                        true => attachment.layout,
-                        false => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    })
-                    .image(attachment.resolve_image)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(match depth {
-                                true => attachment.aspect,
-                                false => vk::ImageAspectFlags::COLOR,
-                            })
-                            .level_count(attachment.resolve_mips)
-                            .layer_count(attachment.resolve_layers),
-                    ),
-            );
+            barriers[barrier_count] = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .dst_stage_mask(match depth {
+                    true => vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    false => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                })
+                .dst_access_mask(match depth {
+                    true => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    false => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                })
+                .old_layout(attachment.resolve_old_layout)
+                .new_layout(match depth {
+                    true => attachment.layout,
+                    false => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                })
+                .image(attachment.resolve_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(match depth {
+                            true => attachment.aspect,
+                            false => vk::ImageAspectFlags::COLOR,
+                        })
+                        .level_count(attachment.resolve_mips)
+                        .layer_count(attachment.resolve_layers),
+                );
+            barrier_count += 1;
         }
         unsafe {
             device.cmd_pipeline_barrier2(
                 command_buffer,
-                &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(&barriers[..barrier_count]),
             )
         };
 
-        let colors: Vec<_> = pass
-            .colors
-            .iter()
-            .map(|attachment| {
-                let mut info = vk::RenderingAttachmentInfo::default()
-                    .image_view(attachment.view)
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .store_op(match attachment.store {
-                        true => vk::AttachmentStoreOp::STORE,
-                        false => vk::AttachmentStoreOp::DONT_CARE,
-                    });
-                info = match attachment.clear {
-                    Some(clear) => info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(clear),
-                    None => info.load_op(vk::AttachmentLoadOp::LOAD),
-                };
-                if attachment.resolve_view != vk::ImageView::null() {
-                    info = info
-                        .resolve_mode(attachment.resolve_mode)
-                        .resolve_image_view(attachment.resolve_view)
-                        .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-                }
-                info
-            })
-            .collect();
+        let mut colors = [vk::RenderingAttachmentInfo::default(); MAX_COLOR_ATTACHMENTS];
+        for (info, attachment) in colors.iter_mut().zip(pass.colors()) {
+            *info = vk::RenderingAttachmentInfo::default()
+                .image_view(attachment.view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .store_op(match attachment.store {
+                    true => vk::AttachmentStoreOp::STORE,
+                    false => vk::AttachmentStoreOp::DONT_CARE,
+                });
+            *info = match attachment.clear {
+                Some(clear) => info.load_op(vk::AttachmentLoadOp::CLEAR).clear_value(clear),
+                None => info.load_op(vk::AttachmentLoadOp::LOAD),
+            };
+            if attachment.resolve_view != vk::ImageView::null() {
+                *info = info
+                    .resolve_mode(attachment.resolve_mode)
+                    .resolve_image_view(attachment.resolve_view)
+                    .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            }
+        }
 
         let area = vk::Rect2D::default().extent(vk::Extent2D { width, height });
         let mut rendering = vk::RenderingInfo::default()
             .render_area(area)
             .layer_count(pass.layers)
-            .color_attachments(&colors);
+            .color_attachments(&colors[..pass.color_count]);
         let mut depth;
         let stencil;
         if let Some(attachment) = pass.depth {
@@ -3639,19 +3640,20 @@ impl<'a> Raster<'a> {
     pub fn draw_indirect_count<T>(
         &self,
         root: Gpu<'_, T>,
+        commands: &IndirectCommands,
         draws: &HeapBuffer,
-        count: &HeapBuffer,
-        max: u32,
+        range: &HeapBuffer,
     ) {
+        debug_assert!(range.len >= size_of::<[u32; 2]>());
         self.bind(root);
         unsafe {
             self.device.cmd_draw_indirect_count(
                 self.command_buffer,
                 draws.buffer,
                 0,
-                count.buffer,
-                0,
-                max,
+                range.buffer,
+                size_of::<u32>() as u64,
+                commands.count,
                 size_of::<[u32; 4]>() as u32,
             )
         };
@@ -3986,6 +3988,7 @@ pub struct Context {
     pub(crate) queue: vk::Queue,
     pub(crate) pools: Vec<vk::CommandPool>,
     pub(crate) command_buffers: Vec<vk::CommandBuffer>,
+    pub(crate) submit_infos: Vec<vk::CommandBufferSubmitInfo<'static>>,
     pub(crate) arenas: Vec<Arena>,
     pub(crate) timeline: vk::Semaphore,
     pub(crate) layout: vk::PipelineLayout,
@@ -4085,6 +4088,7 @@ impl Context {
             queue: device.queue(),
             pools,
             command_buffers,
+            submit_infos: vec![vk::CommandBufferSubmitInfo::default(); slots],
             arenas,
             timeline,
             layout,
@@ -4140,7 +4144,8 @@ impl Context {
             commands: &self.commands,
             queue: self.queue,
             arenas: &self.arenas[slots.clone()],
-            command_buffers: &self.command_buffers[slots],
+            command_buffers: &self.command_buffers[slots.clone()],
+            submit_infos: &mut self.submit_infos[slots],
             timeline: self.timeline,
             layout: self.layout,
             recording: 0,
@@ -4168,6 +4173,7 @@ pub struct Frame<'a> {
     pub(crate) queue: vk::Queue,
     pub(crate) arenas: &'a [Arena],
     pub(crate) command_buffers: &'a [vk::CommandBuffer],
+    pub(crate) submit_infos: &'a mut [vk::CommandBufferSubmitInfo<'static>],
     pub(crate) timeline: vk::Semaphore,
     pub(crate) layout: vk::PipelineLayout,
     pub(crate) recording: usize,
@@ -4284,48 +4290,47 @@ impl Frame<'_> {
             unsafe { self.device.end_command_buffer(command_buffer)? };
         }
 
-        let command_infos: Vec<_> = self.command_buffers[..self.recording]
-            .iter()
-            .map(|&command_buffer| {
-                vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)
-            })
-            .collect();
+        for (info, &command_buffer) in self.submit_infos[..self.recording]
+            .iter_mut()
+            .zip(&self.command_buffers[..self.recording])
+        {
+            *info = vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer);
+        }
+        let command_infos = &self.submit_infos[..self.recording];
 
-        let mut waits = Vec::new();
-        let mut signals = vec![
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.timeline)
-                .value(self.value)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
+        let mut waits = [vk::SemaphoreSubmitInfo::default(); 2];
+        let mut wait_count = 0;
+        let mut signals = [vk::SemaphoreSubmitInfo::default(); 2];
+        signals[0] = vk::SemaphoreSubmitInfo::default()
+            .semaphore(self.timeline)
+            .value(self.value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let mut signal_count = 1;
         if let Some((semaphore, value)) = self.upload {
-            waits.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(semaphore)
-                    .value(value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
+            waits[wait_count] = vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .value(value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            wait_count += 1;
         }
         if let Some(drawable) = drawable {
-            waits.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(drawable.acquired)
-                    .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
-            );
-            signals.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(drawable.released)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
+            waits[wait_count] = vk::SemaphoreSubmitInfo::default()
+                .semaphore(drawable.acquired)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
+            wait_count += 1;
+            signals[signal_count] = vk::SemaphoreSubmitInfo::default()
+                .semaphore(drawable.released)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            signal_count += 1;
         }
 
         unsafe {
             self.device.queue_submit2(
                 self.queue,
                 &[vk::SubmitInfo2::default()
-                    .wait_semaphore_infos(&waits)
-                    .command_buffer_infos(&command_infos)
-                    .signal_semaphore_infos(&signals)],
+                    .wait_semaphore_infos(&waits[..wait_count])
+                    .command_buffer_infos(command_infos)
+                    .signal_semaphore_infos(&signals[..signal_count])],
                 vk::Fence::null(),
             )?
         };
@@ -4621,6 +4626,13 @@ pub struct IndirectCommands {
 }
 
 impl IndirectCommands {
+    /// The portable counted-draw shape. Vulkan needs no opaque command buffer: the producer
+    /// writes ordinary `VkDrawIndirectCommand` records, while this value carries the maximum
+    /// count and supplies a zero shader handle for Metal's no-op [`command_draw`] intrinsic.
+    pub fn counted_draws(_device: &Device, count: u32) -> Result<Self, Error> {
+        Ok(Self { count })
+    }
+
     pub fn draws(_device: &Device, _count: u32, _indexed: bool) -> Result<Self, Error> {
         Err(Self::unsupported())
     }

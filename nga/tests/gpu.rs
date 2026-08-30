@@ -116,6 +116,21 @@ fn shape() {
     assert_eq!(GREY.calls[0].name, "luma");
 }
 
+#[test]
+fn device_pointers_cannot_be_dereferenced_on_the_host() {
+    let pointer = Gpu::<u32>::new(1);
+    assert!(std::panic::catch_unwind(|| {
+        let _ = *pointer;
+    })
+    .is_err());
+
+    let mut pointer = GpuMut::<[u32]>::new(1);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pointer[0] = 7;
+    }))
+    .is_err());
+}
+
 /// An inner attribute belongs to the module, not to the item under it.
 #[gpu_mod]
 mod inner_attribute {

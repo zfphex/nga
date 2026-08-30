@@ -544,8 +544,7 @@ fn supported(f: &GpuFn) -> bool {
                     | Intrinsic::TileRead
                     | Intrinsic::TileWrite
                     | Intrinsic::CommandSetPipeline
-                    | Intrinsic::CommandSetVertexBuffer
-                    | Intrinsic::CommandDraw,
+                    | Intrinsic::CommandSetVertexBuffer,
                 ..
             }
         )
@@ -1679,6 +1678,14 @@ fn binary(m: &mut M, w: &mut W, node: u32, op: BinOp, lhs: u32, rhs: u32) -> u32
 
 fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
     let ty = w.types.nodes[node as usize];
+
+    // A portable counted batch uses the same producer on both backends. Vulkan consumes the
+    // Draw record that producer writes; Metal additionally turns this intrinsic into an ICB
+    // command. It has no Vulkan side effect, and deliberately does not evaluate its
+    // Metal-only Commands handle.
+    if op == Intrinsic::CommandDraw {
+        return 0;
+    }
 
     // The handle intrinsics come first: their arguments have types the arithmetic path below
     // would try to make sense of.

@@ -131,9 +131,12 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
     let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
-    let pixels = readback
-        .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
-        .unwrap();
+    // The render and copy below initialise every byte before the host reads it.
+    let pixels = unsafe {
+        readback
+            .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
+            .unwrap()
+    };
     let dest: GpuMut<'_, [u8]> = GpuMut::new(pixels.gpu.0.get());
 
     let mut frame = ctx.begin_frame()?;

@@ -70,6 +70,20 @@ mod shader {
     }
 }
 
+#[gpu_mod]
+mod counted {
+    use nga::*;
+
+    pub struct EncodeData {
+        pub commands: Commands,
+    }
+
+    #[compute(1)]
+    fn encode(root: Gpu<'static, EncodeData>) {
+        command_draw(root.commands, 0, false, 0, 3, 1, 0);
+    }
+}
+
 #[cfg(target_vendor = "apple")]
 const SIZE: u32 = 128;
 #[cfg(target_vendor = "apple")]
@@ -83,6 +97,19 @@ fn icb_shader_is_generated_from_rust() {
     assert!(source.contains("nga_command_set_vertex_buffer("));
     assert!(source.contains("nga_command_draw("));
     assert!(source.contains("device const DrawData* data [[buffer(1)]]"));
+}
+
+#[test]
+fn inherited_counted_draw_is_metal_work_and_a_vulkan_no_op() {
+    let source = msl::module(&[&counted::ENCODE]);
+    assert!(source.contains("nga_command_draw("));
+
+    let words = spirv::words(&[&counted::ENCODE]);
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    assert!(
+        bytes.windows(b"encode\0".len()).any(|name| name == b"encode\0"),
+        "the Vulkan entry point was dropped instead of treating command_draw as a no-op"
+    );
 }
 
 #[cfg(target_vendor = "apple")]
@@ -145,9 +172,12 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
     let vertices: Gpu<'static, [Vertex]> = Gpu::new(vertices.gpu.0.get());
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
-    let pixels = readback
-        .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
-        .unwrap();
+    // The render and copy below initialise every byte before the host reads it.
+    let pixels = unsafe {
+        readback
+            .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
+            .unwrap()
+    };
     let dest: GpuMut<'_, [u8]> = GpuMut::new(pixels.gpu.0.get());
 
     let mut frame = ctx.begin_frame()?;

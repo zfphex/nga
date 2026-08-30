@@ -140,48 +140,57 @@ impl<T: ?Sized> Clone for GpuMut<'_, T> {
 
 impl<T: ?Sized> Copy for GpuMut<'_, T> {}
 
-// A shader body reads and writes through these exactly as it would through a reference, and
-// the host bodies below are what make that ordinary Rust. They are never called: the address is
-// a device one, so dereferencing here would be unsound. Their only job is to type-check, which
-// is what the shader compiler used to do and now does not have to.
+// A shader body reads and writes through these exactly as it would through a reference. The
+// host implementations only make that ordinary Rust type-check. They must not manufacture a
+// reference from a device address: shader functions are still callable host functions, and a
+// safe call must panic rather than invoke undefined behaviour.
+
+#[cold]
+#[track_caller]
+fn shader_pointer_on_host() -> ! {
+    panic!("a GPU device pointer cannot be dereferenced by host code")
+}
 
 impl<T> Deref for Gpu<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { &*(self.0.get() as *const T) }
+        shader_pointer_on_host()
     }
 }
 
 impl<T> Deref for GpuMut<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { &*(self.0.get() as *const T) }
+        shader_pointer_on_host()
     }
 }
 
 impl<T> DerefMut for GpuMut<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *(self.0.get() as *mut T) }
+        shader_pointer_on_host()
     }
 }
 
 impl<T> Index<u32> for Gpu<'_, [T]> {
     type Output = T;
     fn index(&self, index: u32) -> &T {
-        unsafe { &*(self.0.get() as *const T).add(index as usize) }
+        let _ = index;
+        shader_pointer_on_host()
     }
 }
 
 impl<T> Index<u32> for GpuMut<'_, [T]> {
     type Output = T;
     fn index(&self, index: u32) -> &T {
-        unsafe { &*(self.0.get() as *const T).add(index as usize) }
+        let _ = index;
+        shader_pointer_on_host()
     }
 }
 
 impl<T> IndexMut<u32> for GpuMut<'_, [T]> {
     fn index_mut(&mut self, index: u32) -> &mut T {
-        unsafe { &mut *(self.0.get() as *mut T).add(index as usize) }
+        let _ = index;
+        shader_pointer_on_host()
     }
 }
 
