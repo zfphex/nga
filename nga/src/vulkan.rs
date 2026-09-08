@@ -582,7 +582,8 @@ pub(crate) fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAt
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Push {
     pub(crate) root: u64,
-    pub(crate) resources: u32,
+    pub(crate) resources: u64,
+    pub(crate) resources_stride: u32,
     pub(crate) samplers: u32,
 }
 

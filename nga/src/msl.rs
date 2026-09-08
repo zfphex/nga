@@ -792,6 +792,27 @@ fn expr(w: &mut W, node: u32) -> String {
     }
 }
 
+fn tex_expr(w: &W, arg: u32, expr: &str) -> String {
+    match w.types.nodes[arg as usize] {
+        Ty::Handle(HandleKind::Texture2d) => format!("nga_deref_tex2d(nga_push_data, {expr})"),
+        Ty::Handle(HandleKind::Texture2dRW) => {
+            format!("nga_deref_tex2d_rw(nga_push_data, {expr})")
+        }
+        Ty::Handle(HandleKind::Texture2dArray) => {
+            format!("nga_deref_tex2d_array(nga_push_data, {expr})")
+        }
+        Ty::Handle(HandleKind::Texture3d) => format!("nga_deref_tex3d(nga_push_data, {expr})"),
+        Ty::Handle(HandleKind::Texture3dRW) => {
+            format!("nga_deref_tex3d_rw(nga_push_data, {expr})")
+        }
+        Ty::Handle(HandleKind::TextureCube) => {
+            format!("nga_deref_texcube(nga_push_data, {expr})")
+        }
+        Ty::Handle(HandleKind::Depth2d) => format!("nga_deref_depth2d(nga_push_data, {expr})"),
+        _ => format!("{expr}.t"),
+    }
+}
+
 fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
     let a: Vec<String> = args
         .iter()
@@ -843,14 +864,25 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         Intrinsic::Mul => format!("({} * {})", a[0], a[1]),
         Intrinsic::Barrier => "threadgroup_barrier(mem_flags::mem_device)".into(),
         Intrinsic::ThreadgroupBarrier => "threadgroup_barrier(mem_flags::mem_threadgroup)".into(),
-        Intrinsic::Sample => format!("{}.t.sample({}.s, {})", a[0], a[1], a[2]),
-        Intrinsic::SampleLevel => {
-            format!("{}.t.sample({}.s, {}, level({}))", a[0], a[1], a[2], a[3])
+        Intrinsic::Sample => {
+            let tex = tex_expr(w, args[0], &a[0]);
+            format!("{tex}.sample({}.s, {})", a[1], a[2])
         }
-        Intrinsic::Load => format!("{}.t.read({})", a[0], a[1]),
-        Intrinsic::Store => format!("{}.t.write({}, {})", a[0], a[2], a[1]),
+        Intrinsic::SampleLevel => {
+            let tex = tex_expr(w, args[0], &a[0]);
+            format!("{tex}.sample({}.s, {}, level({}))", a[1], a[2], a[3])
+        }
+        Intrinsic::Load => {
+            let tex = tex_expr(w, args[0], &a[0]);
+            format!("{tex}.read({})", a[1])
+        }
+        Intrinsic::Store => {
+            let tex = tex_expr(w, args[0], &a[0]);
+            format!("{tex}.write({}, {})", a[2], a[1])
+        }
         Intrinsic::Dimensions => {
-            format!("uint2({}.t.get_width(), {}.t.get_height())", a[0], a[0])
+            let tex = tex_expr(w, args[0], &a[0]);
+            format!("uint2({tex}.get_width(), {tex}.get_height())")
         }
         Intrinsic::Dfdx => call("dfdx"),
         Intrinsic::Dfdy => call("dfdy"),

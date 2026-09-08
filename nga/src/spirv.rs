@@ -730,10 +730,10 @@ fn push_block(m: &mut M) -> u32 {
     inst(
         &mut m.globals,
         OP_TYPE_STRUCT,
-        &[id, u64_id, u32_id, u32_id],
+        &[id, u64_id, u64_id, u32_id, u32_id],
     );
     m.decorate(id, DEC_BLOCK, &[]);
-    for (index, offset) in [(0u32, 0u32), (1, 8), (2, 12)] {
+    for (index, offset) in [(0u32, 0u32), (1, 8), (2, 16), (3, 20)] {
         inst(
             &mut m.decorations,
             OP_MEMBER_DECORATE,

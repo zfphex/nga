@@ -49,9 +49,10 @@ use minmetal::{
     M4TimestampGranularity, M4VisibilityOptions, MetalError, MetalLayer,
     MultisampleDepthResolveFilter, Origin, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
     Region, RenderStages, ResidencySet, ResidencySetDescriptor, ResourceOptions,
-    SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent,
-    Size, Stages, StencilDescriptor, StencilOperation, StorageMode, Texture, TextureDescriptor,
-    TextureType, TextureUsage, VisibilityResultMode, VisibilityResultType, id, retain,
+    ResourceViewPoolDescriptor, SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter,
+    SamplerMipFilter, SharedEvent, Size, Stages, StencilDescriptor, StencilOperation,
+    StorageMode, Texture, TextureDescriptor, TextureType, TextureUsage, TextureViewPool,
+    VisibilityResultMode, VisibilityResultType, id, retain,
 };
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -479,7 +480,8 @@ pub(crate) fn data_type(scalar: Scalar) -> minmetal::DataType {
 #[derive(Clone, Copy, Default)]
 struct Push {
     root: u64,
-    resources: u32,
+    resources: u64,
+    resources_stride: u32,
     samplers: u32,
 }
 
@@ -1120,19 +1122,52 @@ pub struct HeapRange {
     pub(crate) len: u32,
 }
 
-/// On Metal a bindless handle is the `MTLResourceID` itself, stored inline in the root struct
-/// the shader dereferences. See the argument-buffer members `msl.rs` emits for a handle type.
-/// So there is no descriptor memory to manage and this type is a slot bookkeeper: it exists so
-/// that `alloc_range` / `write_texture` / `write_sampler` mean the same thing on both backends,
-/// where Vulkan really does have three descriptor arrays behind them.
+/// Backed by an `MTLTextureViewPool`. A bindless handle is a 32-bit slot index, matching Vulkan.
+/// The shader synthesizes the required `MTLResourceID` on the fly from the pool's base resource ID
+/// and descriptor stride.
 pub struct ResourceHeap {
     pub(crate) cap: u32,
     pub(crate) head: u32,
+    pub(crate) pool: TextureViewPool,
+    pub(crate) base_id: u64,
+    pub(crate) stride: u32,
 }
 
 impl ResourceHeap {
-    pub fn new(_device: &Device, cap: u32) -> Result<Self, Error> {
-        Ok(Self { cap, head: 0 })
+    pub fn new(device: &Device, cap: u32) -> Result<Self, Error> {
+        let desc = ResourceViewPoolDescriptor::new()
+            .map_err(|e| Error::new(format!("failed to create pool descriptor: {e:?}")))?;
+        desc.set_resource_view_count(cap.max(2) as usize);
+        let pool = device
+            .device
+            .new_texture_view_pool_with_descriptor(&desc)
+            .map_err(|e| Error::new(format!("failed to create texture view pool: {e:?}")))?;
+        let base_id = pool.base_resource_id().impl_;
+
+        let tex_desc = TextureDescriptor::texture_2d(PixelFormat::Rgba8Unorm, 1, 1, false);
+        let dummy = device
+            .device
+            .new_texture(&tex_desc)
+            .map_err(|e| Error::new(format!("failed to create dummy texture: {e:?}")))?;
+        let id0 = pool
+            .set_texture_view(&dummy, 0)
+            .map_err(|e| Error::new(format!("failed to set dummy view 0: {e:?}")))?
+            .impl_;
+        let id1 = pool
+            .set_texture_view(&dummy, 1)
+            .map_err(|e| Error::new(format!("failed to set dummy view 1: {e:?}")))?
+            .impl_;
+        let stride = (id1 - id0) as u32;
+
+        device.make_resident(&Allocation { raw: pool.raw })?;
+
+        Ok(Self {
+            cap,
+            head: 0,
+            pool,
+            base_id,
+            stride,
+        })
     }
 
     pub fn alloc_range(&mut self, len: u32) -> Result<HeapRange, Error> {
@@ -1149,7 +1184,11 @@ impl ResourceHeap {
 
     pub fn write_texture(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2d {
         debug_assert!(slot < range.len && range.base + slot < self.cap);
-        Texture2d(resource_id(&texture.texture))
+        let index = (range.base + slot) as usize;
+        self.pool
+            .set_texture_view(&texture.texture, index)
+            .expect("failed to set texture view in pool");
+        Texture2d(Handle((range.base + slot) as u64))
     }
 
     /// The Vulkan version needs the usage to pick an image layout for the descriptor. There is
@@ -1166,7 +1205,11 @@ impl ResourceHeap {
 
     pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
         debug_assert!(slot < range.len && range.base + slot < self.cap);
-        Texture2dRW(resource_id(&texture.texture))
+        let index = (range.base + slot) as usize;
+        self.pool
+            .set_texture_view(&texture.texture, index)
+            .expect("failed to set storage texture view in pool");
+        Texture2dRW(Handle((range.base + slot) as u64))
     }
 
     pub fn write_sampler(&self, range: HeapRange, slot: u32, sampler: &SamplerState) -> Sampler {
@@ -1179,15 +1222,6 @@ impl ResourceHeap {
                 .impl_,
         ))
     }
-}
-
-fn resource_id(texture: &Texture) -> Handle {
-    Handle(
-        texture
-            .gpu_resource_id()
-            .expect("texture has no resource id")
-            .impl_,
-    )
 }
 
 // -- surface -----------------------------------------------------------------------------
@@ -1824,6 +1858,7 @@ pub struct Raster<'a> {
     pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) primitive: Cell<PrimitiveType>,
     pub(crate) occlusion_base: u32,
+    pub(crate) resources: Cell<(u64, u32)>,
 }
 
 impl<'a> Raster<'a> {
@@ -1854,6 +1889,7 @@ impl<'a> Raster<'a> {
             depth_states,
             primitive: Cell::new(PrimitiveType::Triangle),
             occlusion_base: pass.occlusion_base,
+            resources: Cell::new((0, 0)),
         };
         raster.viewport(
             Viewport::new(width, height),
@@ -1875,7 +1911,14 @@ impl<'a> Raster<'a> {
     /// is the address of a struct, not the root itself, so a bind costs one 16-byte arena
     /// allocation.
     fn bind<T>(&self, root: Gpu<'_, T>) {
-        bind_push(self.table, self.arena, root.0.get());
+        let (resources, resources_stride) = self.resources.get();
+        bind_push(
+            self.table,
+            self.arena,
+            root.0.get(),
+            resources,
+            resources_stride,
+        );
     }
 
     pub fn pipeline(&self, pipeline: Pipeline) {
@@ -1884,9 +1927,9 @@ impl<'a> Raster<'a> {
         self.encoder.set_render_pipeline_state(&state);
     }
 
-    /// Nothing to bind: a handle carries the resource itself. Vulkan binds two descriptor
-    /// buffers here.
-    pub fn heap(&self, _heap: &ResourceHeap) {}
+    pub fn heap(&self, heap: &ResourceHeap) {
+        self.resources.set((heap.base_id, heap.stride));
+    }
 
     pub fn depth(&self, state: &DepthState) {
         assert!(
@@ -2120,6 +2163,7 @@ pub struct Compute<'a> {
     pub(crate) encoder: M4ComputeCommandEncoder,
     pub(crate) table: &'a M4ArgumentTable,
     pub(crate) arena: &'a Arena,
+    pub(crate) resources: Cell<(u64, u32)>,
 }
 
 impl<'a> Compute<'a> {
@@ -2136,11 +2180,19 @@ impl<'a> Compute<'a> {
             encoder,
             table,
             arena,
+            resources: Cell::new((0, 0)),
         }
     }
 
     fn bind<T>(&self, root: Gpu<'_, T>) {
-        bind_push(self.table, self.arena, root.0.get());
+        let (resources, resources_stride) = self.resources.get();
+        bind_push(
+            self.table,
+            self.arena,
+            root.0.get(),
+            resources,
+            resources_stride,
+        );
     }
 
     pub fn pipeline(&self, pipeline: Pipeline) {
@@ -2148,7 +2200,9 @@ impl<'a> Compute<'a> {
         self.encoder.set_compute_pipeline_state(&state);
     }
 
-    pub fn heap(&self, _heap: &ResourceHeap) {}
+    pub fn heap(&self, heap: &ResourceHeap) {
+        self.resources.set((heap.base_id, heap.stride));
+    }
 
     pub fn dispatch<T>(&self, root: Gpu<'_, T>, threads: usize, group: usize) {
         self.bind(root);
@@ -2310,14 +2364,21 @@ impl Drop for Compute<'_> {
     }
 }
 
-fn bind_push(table: &M4ArgumentTable, arena: &Arena, root: u64) {
+fn bind_push(
+    table: &M4ArgumentTable,
+    arena: &Arena,
+    root: u64,
+    resources: u64,
+    resources_stride: u32,
+) {
     let (cpu, gpu) = arena
         .alloc_bytes(size_of::<Push>(), 16)
         .expect("frame arena is full: no room for a root binding");
     unsafe {
         (cpu as *mut Push).write(Push {
             root,
-            resources: 0,
+            resources,
+            resources_stride,
             samplers: 0,
         })
     };
