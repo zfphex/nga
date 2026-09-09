@@ -687,11 +687,30 @@ fn expr(w: &mut W, node: u32) -> String {
         Node::Const(Const::Bool(value)) => value.to_string(),
         Node::Const(Const::Int(value)) => match w.types.nodes[node as usize] {
             Ty::Scalar(Prim::U32) => format!("{value}u"),
+            Ty::Scalar(Prim::U64) => format!("{value}ul"),
+            Ty::Scalar(Prim::I64) => format!("{value}l"),
+            Ty::Scalar(Prim::U16) => format!("ushort({value})"),
+            Ty::Scalar(Prim::I16) => format!("short({value})"),
+            Ty::Scalar(Prim::U8) => format!("uchar({value})"),
+            Ty::Scalar(Prim::I8) => format!("char({value})"),
+            Ty::Scalar(Prim::F32) => format!("{:?}f", value as f64),
+            Ty::Scalar(Prim::F16) => format!("{:?}h", value as f64),
             _ => value.to_string(),
         },
         // MSL is C++: an unsuffixed float literal is a `double`, which Metal will not promote
         // silently in every position. The suffix is not optional.
-        Node::Const(Const::Float(value)) => format!("{value:?}f"),
+        Node::Const(Const::Float(value)) => match w.types.nodes[node as usize] {
+            Ty::Scalar(Prim::U32) => format!("{}u", value as u32),
+            Ty::Scalar(Prim::U64) => format!("{}ul", value as u64),
+            Ty::Scalar(Prim::I32) => format!("{}", value as i32),
+            Ty::Scalar(Prim::I64) => format!("{}l", value as i64),
+            Ty::Scalar(Prim::U16) => format!("ushort({})", value as u16),
+            Ty::Scalar(Prim::I16) => format!("short({})", value as i16),
+            Ty::Scalar(Prim::U8) => format!("uchar({})", value as u8),
+            Ty::Scalar(Prim::I8) => format!("char({})", value as i8),
+            Ty::Scalar(Prim::F16) => format!("{value:?}h"),
+            _ => format!("{value:?}f"),
+        },
         Node::Field { base, name } => {
             // A constants parameter has no value of its own; each field is its own constant.
             if let Node::Param(index) = w.f.nodes[base as usize]
