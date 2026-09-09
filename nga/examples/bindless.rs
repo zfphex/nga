@@ -13,7 +13,7 @@ mod bindless {
     }
 
     pub struct Material {
-        pub layers: [Texture2d; 3],
+        pub base_layer: Texture2d,
         pub samp: Sampler,
         pub tint: f32x3,
     }
@@ -70,7 +70,7 @@ mod bindless {
     fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
         let m = root.materials[input.material];
         let layer = ((input.uv.x * 3.0) as u32).min(2);
-        let c = m.layers[layer as usize].sample(m.samp, input.uv).xyz() * m.tint;
+        let c = m.base_layer.offset(layer).sample(m.samp, input.uv).xyz() * m.tint;
         f32x4::new(c.x, c.y, c.z, 1.0)
     }
 }
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pixels = vec![0u8; (TEX * TEX * 4) as usize];
     for quad in 0..QUADS {
         let range = textures.alloc_range(LAYERS)?;
-        let mut layer_handles = [Texture2d::default(); LAYERS as usize];
+        let mut base_layer = Texture2d::default();
         for layer in 0..LAYERS {
             for y in 0..TEX {
                 for x in 0..TEX {
@@ -181,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // A painted texture is read and written in the same frame, so it stays in GENERAL.
             // Metal needs no such distinction, because there is no layout to choose.
-            layer_handles[layer as usize] = match painted {
+            let handle = match painted {
                 true => {
                     heap.transition(&texture, Usage::STORAGE);
                     paint_target = textures.write_storage(range, layer, &texture);
@@ -192,10 +192,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     textures.write_texture(range, layer, &texture)
                 }
             };
+            if layer == 0 {
+                base_layer = handle;
+            }
             live.push(texture);
         }
         materials.push(Material {
-            layers: layer_handles,
+            base_layer,
             samp,
             tint: f32x3([
                 1.0 - quad as f32 * 0.15,
@@ -203,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0.5 + quad as f32 * 0.12,
             ]),
         });
-        eprintln!("material {quad}: layers {layer_handles:?}");
+        eprintln!("material {quad}: base_layer {base_layer:?}");
     }
     let material_buffer = heap.alloc_buffer(size_of_val(materials.as_slice()))?;
     heap.write(&material_buffer, 0, &materials);

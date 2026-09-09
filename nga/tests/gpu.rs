@@ -519,3 +519,34 @@ fn the_msl_pads_to_the_same_offsets() {
     assert_eq!(offset_of!(Transform, mvp), 16);
     assert_eq!(size_of::<Transform>(), 80);
 }
+
+#[gpu_mod]
+mod handle_offset {
+    use nga::*;
+
+    pub struct Material {
+        pub base_texture: Texture2d,
+        pub samp: Sampler,
+    }
+
+    #[repr(C, align(16))]
+    pub struct Data {
+        pub material: Gpu<'static, Material>,
+        pub uv: f32x2,
+    }
+
+    #[fragment]
+    fn sample_offset(root: Gpu<'static, Data>) -> f32x4 {
+        let mat = root.material;
+        mat.base_texture.offset(1).sample(mat.samp, root.uv)
+    }
+}
+
+#[test]
+fn spirv_handle_offset() {
+    let words = nga::spirv::words(&[&handle_offset::SAMPLE_OFFSET]);
+    assert_eq!(words[0], 0x0723_0203);
+    // OpIAdd (opcode 128) must be emitted for the handle offset
+    let has_op_iadd = words.iter().any(|&w| (w & 0xffff) == 128);
+    assert!(has_op_iadd, "SPIR-V should contain OpIAdd for handle offset");
+}

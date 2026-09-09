@@ -228,6 +228,7 @@ pub enum Intrinsic {
     AtomicMin,
     AtomicMax,
     AtomicExchange,
+    Offset,
     Sample,
     SampleLevel,
     Load,
@@ -684,6 +685,8 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
                 for &arg in args {
                     coerce(f, types, arg, seed);
                 }
+            } else if op == Intrinsic::Offset && args.len() > 1 {
+                coerce(f, types, args[1], Ty::U32);
             }
             intrinsic(op, seed, f, types, args)
         }

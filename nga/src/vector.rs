@@ -390,6 +390,19 @@ macro_rules! sampled {
                     let _ = self;
                     u32x2::splat(0)
                 }
+
+                #[inline]
+                pub fn offset(self, off: u32) -> Self {
+                    Self(crate::Handle(self.0.0 + off as u64))
+                }
+            }
+
+            impl std::ops::Add<u32> for crate::$name {
+                type Output = Self;
+                #[inline]
+                fn add(self, rhs: u32) -> Self {
+                    self.offset(rhs)
+                }
             }
         )*
     };

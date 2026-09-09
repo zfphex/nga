@@ -883,6 +883,7 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         Intrinsic::Mul => format!("({} * {})", a[0], a[1]),
         Intrinsic::Barrier => "threadgroup_barrier(mem_flags::mem_device)".into(),
         Intrinsic::ThreadgroupBarrier => "threadgroup_barrier(mem_flags::mem_threadgroup)".into(),
+        Intrinsic::Offset => format!("nga_offset({}, {})", a[0], a[1]),
         Intrinsic::Sample => {
             let tex = tex_expr(w, args[0], &a[0]);
             format!("{tex}.sample({}.s, {})", a[1], a[2])

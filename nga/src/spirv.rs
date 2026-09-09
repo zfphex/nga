@@ -1699,6 +1699,16 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
         | Intrinsic::AtomicMin
         | Intrinsic::AtomicMax
         | Intrinsic::AtomicExchange => return atomic(m, w, op, args),
+        Intrinsic::Offset => {
+            let base = value(m, w, args[0]);
+            let off = value(m, w, args[1]);
+            let u64_id = m.ty(Ty::Scalar(Prim::U64));
+            let off_u64 = m.id();
+            inst(&mut w.body, OP_U_CONVERT, &[u64_id, off_u64, off]);
+            let result = m.id();
+            inst(&mut w.body, OP_I_ADD, &[u64_id, result, base, off_u64]);
+            return result;
+        }
         _ => {}
     }
 

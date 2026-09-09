@@ -198,6 +198,7 @@ fn intrinsic(name: &str) -> Option<&'static str> {
         "atomic_min" => "AtomicMin",
         "atomic_max" => "AtomicMax",
         "atomic_exchange" => "AtomicExchange",
+        "offset" => "Offset",
         "sample" => "Sample",
         "sample_level" => "SampleLevel",
         "load" => "Load",

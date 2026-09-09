@@ -41,6 +41,26 @@ mod table {
         let palette = root.palette;
         palette.texture.sample_level(palette.samp, input.uv, 1.0)
     }
+
+    pub struct VertexOutSimple {
+        pub position: f32x4,
+        pub uv: f32x2,
+    }
+
+    #[vertex]
+    fn vertex_simple(#[vertex_id] vid: u32) -> VertexOutSimple {
+        let uv = f32x2::new((vid % 2) as f32 * 2.0, (vid / 2) as f32 * 2.0);
+        VertexOutSimple {
+            position: f32x4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0),
+            uv: uv,
+        }
+    }
+
+    #[fragment]
+    fn fragment_offset(root: Gpu<'static, Data>, input: VertexOutSimple) -> f32x4 {
+        let palette = root.palette;
+        palette.texture.offset(1).sample_level(palette.samp, input.uv, 0.0)
+    }
 }
 
 const SLOTS: u32 = 8;
@@ -117,9 +137,10 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     let (cpu, gpu) = readback
         .alloc_bytes((SIZE * SIZE * 4) as usize, 16)
         .ok_or(Error::new("readback arena is full"))?;
-    recorder
-        .compute()
-        .read_texture_at(&target, 1, 1, &readback, unsafe { GpuMut::new(gpu) });
+    let compute = recorder.compute();
+    compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
+    compute.read_texture_at(&target, 1, 1, &readback, unsafe { GpuMut::new(gpu) });
+    drop(compute);
     drop(recorder);
     frame.submit(None)?;
     device.wait_idle()?;
@@ -142,3 +163,93 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
     heap.free_buffer(palette);
     Ok(())
 }
+
+#[test]
+fn base_slot_offset_pattern() -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(device) = Device::new(true) else {
+        eprintln!("no supported device; skipping");
+        return Ok(());
+    };
+
+    let mut shaders = Shaders::new(&device, &nga::compile(table::ENTRIES))?;
+    let pipeline = shaders.raster(&RasterDesc::new(
+        table::VERTEX_SIMPLE.name,
+        table::FRAGMENT_OFFSET.name,
+        &[ColorTarget::new(Format::Rgba8Unorm)],
+    ))?;
+
+    let mut heap = GpuHeap::new(&device, 4 * 1024 * 1024)?;
+    let mut resources = ResourceHeap::new(&device, 8)?;
+
+    let range = resources.alloc_range(4)?;
+    let sampler = device.sampler(&SamplerDesc::nearest())?;
+    let samp = resources.write_sampler(range, 2, &sampler);
+
+    // Texture 0 (slot 0): Red [0xff, 0x00, 0x00, 0xff]
+    let tex0 = heap.alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE))?;
+    heap.upload(&tex0, 0, &[0xff, 0x00, 0x00, 0xff].repeat((SIZE * SIZE) as usize))?;
+    heap.transition(&tex0, Usage::SAMPLED);
+    let base_texture = resources.write_texture(range, 0, &tex0);
+
+    // Texture 1 (slot 1): Blue [0x00, 0x00, 0xff, 0xff]
+    let tex1 = heap.alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE))?;
+    heap.upload(&tex1, 0, &[0x00, 0x00, 0xff, 0xff].repeat((SIZE * SIZE) as usize))?;
+    heap.transition(&tex1, Usage::SAMPLED);
+    resources.write_texture(range, 1, &tex1);
+
+    // Palette only stores base_texture (slot 0)
+    let palette = heap.alloc_buffer(size_of::<Palette>())?;
+    heap.write(&palette, 0, &[Palette { texture: base_texture, samp }]);
+    heap.flush()?;
+
+    let target = heap.alloc_texture(
+        &TextureDesc::texture_2d(Format::Rgba8Unorm, SIZE, SIZE)
+            .usage(Usage::COLOR | Usage::COPY_SRC),
+    )?;
+    let readback = Arena::new(&device, (SIZE * SIZE * 4) as usize, Memory::Readback)?;
+
+    let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
+    let mut frame = ctx.begin_frame()?;
+    let root = frame
+        .arena(0)
+        .alloc(Data {
+            palette: palette.gpu(),
+        })
+        .ok_or(Error::new("frame arena is full"))?
+        .gpu;
+    let mut recorder = frame.recorder();
+    {
+        let pass = Pass::new().color_texture_at(0, &target, 0, 0, Some([1.0, 0.0, 0.0, 1.0]));
+        let raster = recorder.raster(&pass, SIZE, SIZE);
+        raster.heap(&resources);
+        raster.pipeline(pipeline);
+        raster.draw(root, 0, 3);
+    }
+    let (cpu, gpu) = readback
+        .alloc_bytes((SIZE * SIZE * 4) as usize, 16)
+        .ok_or(Error::new("readback arena is full"))?;
+    let compute = recorder.compute();
+    compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
+    compute.read_texture_at(&target, 0, 0, &readback, unsafe { GpuMut::new(gpu) });
+    drop(compute);
+    drop(recorder);
+    frame.submit(None)?;
+    device.wait_idle()?;
+
+    let pixels = unsafe { std::slice::from_raw_parts(cpu, (SIZE * SIZE * 4) as usize) };
+    // The shader sampled `base_texture.offset(1)`, so it must read tex1 (Blue: 0, 0, 0xff, 0xff)
+    assert_eq!(
+        &pixels[..4],
+        &[0x00, 0x00, 0xff, 0xff],
+        "offset(1) did not sample texture at slot 1"
+    );
+
+    assert_eq!(device.validation_errors(), 0);
+
+    heap.free_texture(target);
+    heap.free_texture(tex0);
+    heap.free_texture(tex1);
+    heap.free_buffer(palette);
+    Ok(())
+}
+
