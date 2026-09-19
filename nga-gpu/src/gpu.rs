@@ -12,7 +12,11 @@ use proc_macro::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 
 /// The Rust type spellings that reach the GPU, as `nga::ir::Ty` expressions. Shared with
 /// the struct half, which records the same types in `FieldAbi`.
-pub fn ir_ty(mut tokens: &[TokenTree]) -> Result<String, Fail> {
+pub fn ir_ty(tokens: &[TokenTree]) -> Result<String, Fail> {
+    ir_ty_collect(tokens, &mut Vec::new())
+}
+
+pub fn ir_ty_collect(mut tokens: &[TokenTree], users: &mut Vec<String>) -> Result<String, Fail> {
     let Some(first) = tokens.first() else {
         return Ok("::nga::ir::Ty::Void".into());
     };
@@ -32,9 +36,7 @@ pub fn ir_ty(mut tokens: &[TokenTree]) -> Result<String, Fail> {
         TokenTree::Group(g) if g.delimiter() == Delimiter::Bracket && tokens.len() == 1 => {
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
             let Some(semi) = inner.iter().position(|t| punct(Some(t), ';')) else {
-                // `[T]`, the pointee of a `Gpu<'static, [T]>`. The element is the whole story:
-                // a device pointer into an array points at an element.
-                return ir_ty(&inner);
+                return ir_ty_collect(&inner, users);
             };
             let [TokenTree::Literal(len)] = &inner[semi + 1..] else {
                 return Err((span, "array length must be an integer literal".into()));
@@ -44,13 +46,13 @@ pub fn ir_ty(mut tokens: &[TokenTree]) -> Result<String, Fail> {
             };
             Ok(format!(
                 "::nga::ir::Ty::Array(&{}, {len})",
-                ir_ty(&inner[..semi])?
+                ir_ty_collect(&inner[..semi], users)?
             ))
         }
         TokenTree::Ident(id) => {
             let name = id.to_string();
             if tokens.len() == 1 {
-                return Ok(named_ty(&name));
+                return Ok(named_ty(&name, users));
             }
             let mutable = match name.as_str() {
                 "Gpu" => "false",
@@ -72,18 +74,25 @@ pub fn ir_ty(mut tokens: &[TokenTree]) -> Result<String, Fail> {
             }
             Ok(format!(
                 "::nga::ir::Ty::Ptr {{ mutable: {mutable}, pointee: &{} }}",
-                ir_ty(pointee)?
+                ir_ty_collect(pointee, users)?
             ))
         }
         TokenTree::Punct(p) if p.as_char() == '&' => Err((
             span,
             "references cannot cross to the GPU; use Gpu<'static, T>".into(),
         )),
+        TokenTree::Punct(p) if p.as_char() == '*' => Err((
+            span,
+            "raw pointers cannot be shared with the GPU; use Gpu<'static, T>".into(),
+        )),
+        TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis => {
+            Err((span, "tuple types cannot be shared with the GPU".into()))
+        }
         _ => Err((span, "this type cannot cross to the GPU".into())),
     }
 }
 
-fn named_ty(name: &str) -> String {
+fn named_ty(name: &str, users: &mut Vec<String>) -> String {
     let prim = |p: &str| format!("::nga::ir::Ty::Scalar(::nga::ir::Prim::{p})");
     let vector = |p: &str, n: u8| format!("::nga::ir::Ty::Vec(::nga::ir::Prim::{p}, {n})");
     let handle = |k: &str| format!("::nga::ir::Ty::Handle(::nga::ir::HandleKind::{k})");
@@ -120,36 +129,28 @@ fn named_ty(name: &str) -> String {
         "Commands" => handle("Commands"),
         "PipelineHandle" => handle("Pipeline"),
         "Draw" | "DrawIndexed" | "Dispatch" | "DispatchThreads" => handle("Opaque"),
-        _ => match vector_spelling(name) {
-            Some((p, n)) => vector(p, n),
-            // Anything left is a struct from the same module, and saying so is Rust's job,
-            // not ours: an unknown name fails as a missing `DeviceAbi` impl at the use site.
-            None => format!("::nga::ir::Ty::Struct(&<{name} as ::nga::DeviceAbi>::ABI)"),
-        },
+        _ => {
+            if let Some((prim, count_str)) = name.split_once('x')
+                && let Ok(count @ 2..=4) = count_str.parse::<u8>()
+                && let Some(p) = match prim {
+                    "f32" => Some("F32"),
+                    "f16" => Some("F16"),
+                    "i32" => Some("I32"),
+                    "u32" => Some("U32"),
+                    "u16" => Some("U16"),
+                    "i16" => Some("I16"),
+                    "u8" => Some("U8"),
+                    "i8" => Some("I8"),
+                    _ => None,
+                }
+            {
+                vector(p, count)
+            } else {
+                users.push(name.to_string());
+                format!("::nga::ir::Ty::Struct(&<{name} as ::nga::DeviceAbi>::ABI)")
+            }
+        }
     }
-}
-
-/// `f32x4` and friends, split back into element and count.
-fn vector_spelling(name: &str) -> Option<(&'static str, u8)> {
-    let (prim, count) = name.split_once('x')?;
-    let count = count.parse::<u8>().ok()?;
-    if !(2..=4).contains(&count) {
-        return None;
-    }
-    Some((
-        match prim {
-            "f32" => "F32",
-            "f16" => "F16",
-            "i32" => "I32",
-            "u32" => "U32",
-            "u16" => "U16",
-            "i16" => "I16",
-            "u8" => "U8",
-            "i8" => "I8",
-            _ => return None,
-        },
-        count,
-    ))
 }
 
 fn intrinsic(name: &str) -> Option<&'static str> {
@@ -737,7 +738,7 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         // `f32x4::splat(x)` is a one-argument construction, not an intrinsic: the type is in the
         // path and nowhere else, so it has to be read here or it is lost.
         if path.len() >= 2 && matches!(last.as_str(), "new" | "from_array" | "splat") {
-            let ty = named_ty(&path[path.len() - 2]);
+            let ty = named_ty(&path[path.len() - 2], &mut Vec::new());
             return Ok(b.push(format!(
                 "::nga::ir::Node::Construct {{ ty: {ty}, args: &[{}] }}",
                 list.join(", ")
@@ -777,7 +778,7 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         && let Some(fields) = group_at(t, *i, Delimiter::Brace)
     {
         *i += 1;
-        let ty = named_ty(&path[path.len() - 1]);
+        let ty = named_ty(&path[path.len() - 1], &mut Vec::new());
         let mut list = Vec::new();
         for field in commas(&fields, false) {
             let Some(name) = ident_at(&field, 0) else {

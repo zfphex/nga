@@ -10,35 +10,6 @@ struct Field {
     span: Span,
 }
 
-enum Ty {
-    Builtin,
-    User(String),
-    Array(Box<Ty>),
-    Ptr(Box<Ty>),
-}
-
-/// Every type name a shared struct knows without being told. Anything else is a user struct,
-/// and the expansion asserts it implements `DeviceAbi`. The spellings the two backends give
-/// these live in `msl.rs` and `spirv.rs`; all this decides is which of the two kinds a field is.
-fn scalar(name: &str) -> bool {
-    matches!(
-        name,
-        "f32" | "f16" | "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "u64" | "i64" | "bool"
-            | "f16x2" | "f16x3" | "f16x4"
-            | "f32x2" | "f32x3" | "f32x4"
-            | "packed_f32x3"
-            | "u32x2" | "u32x3" | "u32x4"
-            | "i32x2" | "i32x3" | "i32x4"
-            | "f32x3x3" | "f32x4x4"
-            | "AtomicU32"
-            | "Texture2d" | "Texture2dW" | "Texture2dRW" | "Texture2dArray"
-            | "Texture3d" | "Texture3dW" | "Texture3dRW" | "TextureCube"
-            | "Depth2d" | "Sampler"
-            // Metal-only handles used by Rust shaders that encode indirect command buffers.
-            | "Commands" | "PipelineHandle"
-            | "Draw" | "DrawIndexed" | "Dispatch" | "DispatchThreads"
-    )
-}
 
 fn compile_error(span: Span, message: &str) -> TokenStream {
     let mut literal = Literal::string(message);
@@ -143,96 +114,6 @@ fn parse_struct(tokens: &[TokenTree]) -> Result<(Ident, Vec<Field>), Fail> {
     Ok((name.clone(), fields))
 }
 
-fn parse_ty(mut tokens: &[TokenTree], slice_ok: bool) -> Result<Ty, Fail> {
-    let Some(first) = tokens.first() else {
-        return Err((Span::call_site(), "expected a type".into()));
-    };
-    let span = first.span();
-    while tokens.len() > 3
-        && matches!(&tokens[0], TokenTree::Ident(_))
-        && punct(tokens.get(1), ':')
-        && punct(tokens.get(2), ':')
-    {
-        tokens = &tokens[3..];
-    }
-
-    match &tokens[0] {
-        TokenTree::Group(g) if g.delimiter() == Delimiter::Bracket && tokens.len() == 1 => {
-            let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-            let Some(semi) = inner.iter().position(|t| punct(Some(t), ';')) else {
-                if !slice_ok {
-                    return Err((span, "unsized fields are not allowed; use [T; N]".into()));
-                }
-                return parse_ty(&inner, false);
-            };
-            let [TokenTree::Literal(len)] = &inner[semi + 1..] else {
-                return Err((span, "array length must be an integer literal".into()));
-            };
-            if len.to_string().parse::<u32>().is_err() {
-                return Err((span, "array length must be an integer literal".into()));
-            }
-            let element = parse_ty(&inner[..semi], false)?;
-            Ok(Ty::Array(Box::new(element)))
-        }
-        TokenTree::Ident(id) => {
-            let name = id.to_string();
-            if tokens.len() == 1 {
-                return Ok(if scalar(&name) {
-                    Ty::Builtin
-                } else {
-                    Ty::User(name)
-                });
-            }
-            if name != "Gpu" && name != "GpuMut" {
-                return Err((span, format!("`{name}` cannot be shared with the GPU")));
-            }
-            let generics = &tokens[1..];
-            if !punct(generics.first(), '<') || !punct(generics.last(), '>') {
-                return Err((span, format!("expected `{name}<'static, T>`")));
-            }
-            let [lifetime, static_, comma, pointee @ ..] = &generics[1..generics.len() - 1] else {
-                return Err((span, format!("expected `{name}<'static, T>`")));
-            };
-            if !punct(Some(lifetime), '\'')
-                || !matches!(static_, TokenTree::Ident(id) if id.to_string() == "static")
-                || !punct(Some(comma), ',')
-            {
-                return Err((
-                    span,
-                    format!("`{name}` fields must use the `'static` lifetime"),
-                ));
-            }
-            match parse_ty(pointee, true)? {
-                pointee @ (Ty::Builtin | Ty::User(_)) => Ok(Ty::Ptr(Box::new(pointee))),
-                _ => Err((
-                    span,
-                    "a GPU pointer must point at a scalar, vector or shared struct".into(),
-                )),
-            }
-        }
-        TokenTree::Punct(p) if p.as_char() == '&' => Err((
-            span,
-            "references cannot be shared with the GPU; use Gpu<'static, T>".into(),
-        )),
-        TokenTree::Punct(p) if p.as_char() == '*' => Err((
-            span,
-            "raw pointers cannot be shared with the GPU; use Gpu<'static, T>".into(),
-        )),
-        TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis => {
-            Err((span, "tuple types cannot be shared with the GPU".into()))
-        }
-        _ => Err((span, "this type cannot be shared with the GPU".into())),
-    }
-}
-
-fn users(ty: &Ty, out: &mut Vec<String>) {
-    match ty {
-        Ty::User(t) => out.push(t.clone()),
-        Ty::Ptr(pointee) => users(pointee, out),
-        Ty::Array(element) => users(element, out),
-        _ => {}
-    }
-}
 
 /// A module of shader code: every `struct` in it is shared with the GPU, every `fn` is a shader
 /// function, and `ENTRIES` beside them lists the ones that are entry points.
@@ -361,52 +242,36 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
                 return Err((item[i].span(), "expected `#[..]`".into()));
             };
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-            match inner.first() {
-                Some(TokenTree::Ident(id)) => match id.to_string().as_str() {
-                    "host" => host = true,
-                    "vertex" | "fragment" | "compute" | "object" | "mesh" | "tile" => {
-                        stage = Some(g.stream())
+            let attr = match inner.first() {
+                Some(TokenTree::Ident(id)) => id.to_string(),
+                _ => String::new(),
+            };
+            match attr.as_str() {
+                "host" => host = true,
+                "vertex" | "fragment" | "compute" | "object" | "mesh" | "tile" => {
+                    stage = Some(g.stream())
+                }
+                "repr" => {
+                    if !inner.iter().any(|t| matches!(t, TokenTree::Group(g) if g.stream().to_string().split(',').any(|part| part.trim() == "C"))) {
+                        return Err((
+                            item[i].span(),
+                            "a shared struct needs `#[repr(C)]`, or `#[repr(C, align(N))]`".into(),
+                        ));
                     }
-                    // A struct spelling its own `#[repr]` keeps it, but it has to be a `C` one:
-                    // the offsets both backends write out are the ones Rust chose, and Rust's
-                    // own layout is free to reorder fields.
-                    "repr" => {
-                        if !inner
-                            .iter()
-                            .any(|t| matches!(t, TokenTree::Group(g) if g.stream().to_string().split(',').any(|part| part.trim() == "C")))
-                        {
-                            return Err((
-                                item[i].span(),
-                                "a shared struct needs `#[repr(C)]`, or `#[repr(C, align(N))]`"
-                                    .into(),
-                            ));
-                        }
-                        repr = false;
-                        kept.extend_from_slice(&item[i..i + 2]);
-                    }
-                    _ => kept.extend_from_slice(&item[i..i + 2]),
-                },
+                    repr = false;
+                    kept.extend_from_slice(&item[i..i + 2]);
+                }
                 _ => kept.extend_from_slice(&item[i..i + 2]),
             }
             i += 2;
         }
 
         let rest: Vec<TokenTree> = item[i..].to_vec();
-        // What kind of item it is, past the visibility.
         let mut j = 0;
         if matches!(rest.get(j), Some(TokenTree::Ident(id)) if id.to_string() == "pub") {
-            j += 1;
-            if matches!(rest.get(j), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis)
-            {
-                j += 1;
-            }
+            j += if matches!(rest.get(j + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) { 2 } else { 1 };
         }
-        let kind = match rest.get(j) {
-            Some(TokenTree::Ident(id)) => id.to_string(),
-            _ => String::new(),
-        };
-        // `unsafe fn`, `const fn` and the rest would otherwise read as an item kind of their
-        // own and pass through untagged, which fails much further away.
+        let kind = rest.get(j).and_then(|t| match t { TokenTree::Ident(id) => Some(id.to_string()), _ => None }).unwrap_or_default();
         let mut k = j;
         while matches!(rest.get(k), Some(TokenTree::Ident(id))
             if matches!(id.to_string().as_str(), "unsafe" | "const" | "async" | "extern"))
@@ -471,15 +336,8 @@ fn expand_struct(item: TokenStream, repr: bool) -> Result<TokenStream, Fail> {
     let mut offsets = String::new();
     let mut nested = Vec::new();
     for field in &fields {
-        let ty = match parse_ty(&field.tokens, false) {
-            Ok(ty) => ty,
-            Err((_, message)) => {
-                return Err((field.span, format!("field `{}`: {message}", field.name)));
-            }
-        };
-        users(&ty, &mut nested);
         let ty_tokens: TokenStream = field.tokens.iter().cloned().collect();
-        let ir = match gpu::ir_ty(&field.tokens) {
+        let ir = match gpu::ir_ty_collect(&field.tokens, &mut nested) {
             Ok(ir) => ir,
             Err((_, message)) => {
                 return Err((field.span, format!("field `{}`: {message}", field.name)));

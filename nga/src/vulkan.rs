@@ -509,31 +509,6 @@ pub(crate) fn index_type<I: IndexFormat>() -> vk::IndexType {
     }
 }
 
-/// Negative height flips clip space so the two backends agree on which way is up without the
-/// shader or the caller knowing which one is running.
-pub(crate) fn viewport(v: Viewport) -> vk::Viewport {
-    vk::Viewport {
-        x: v.x,
-        y: v.y + v.height,
-        width: v.width,
-        height: -v.height,
-        min_depth: v.min_depth,
-        max_depth: v.max_depth,
-    }
-}
-
-pub(crate) fn scissor(s: Scissor) -> vk::Rect2D {
-    vk::Rect2D {
-        offset: vk::Offset2D {
-            x: s.x as i32,
-            y: s.y as i32,
-        },
-        extent: vk::Extent2D {
-            width: s.width,
-            height: s.height,
-        },
-    }
-}
 
 pub(crate) fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAttachmentState {
     let mask = vk::ColorComponentFlags::from_raw(target.write_mask as u32);
@@ -1372,16 +1347,6 @@ impl HeapTexture {
     }
 
     fn attachment_view(&self, level: u32, layer: u32) -> vk::ImageView {
-        assert!(
-            level < self.mips,
-            "mip level {level} is outside the {} this texture has",
-            self.mips
-        );
-        assert!(
-            layer < self.layers,
-            "array layer {layer} is outside the {} this texture has",
-            self.layers
-        );
         self.attachment_views[(level * self.layers + layer) as usize]
     }
 }
@@ -3681,10 +3646,32 @@ impl<'a> Raster<'a> {
 
     pub fn viewport(&self, view: Viewport, clip: Scissor) {
         unsafe {
-            self.device
-                .cmd_set_viewport(self.command_buffer, 0, &[viewport(view)]);
-            self.device
-                .cmd_set_scissor(self.command_buffer, 0, &[scissor(clip)]);
+            self.device.cmd_set_viewport(
+                self.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: view.x,
+                    y: view.y + view.height,
+                    width: view.width,
+                    height: -view.height,
+                    min_depth: view.min_depth,
+                    max_depth: view.max_depth,
+                }],
+            );
+            self.device.cmd_set_scissor(
+                self.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: clip.x as i32,
+                        y: clip.y as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: clip.width,
+                        height: clip.height,
+                    },
+                }],
+            );
         }
     }
 

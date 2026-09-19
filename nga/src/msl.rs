@@ -547,15 +547,11 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
     w.out
 }
 
-fn indent(depth: usize) -> String {
-    "    ".repeat(depth)
-}
-
 fn stmt(w: &mut W, node: u32, depth: usize) {
     if node == NONE {
         return;
     }
-    let pad = indent(depth);
+    let pad = "    ".repeat(depth);
     match w.f.nodes[node as usize] {
         Node::Block(stmts) => {
             for &s in stmts {
