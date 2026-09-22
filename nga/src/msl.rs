@@ -951,7 +951,8 @@ fn atomic(w: &W, args: &[u32], a: &[String], op: &str) -> String {
 fn atomic_target(ty: Ty, value: &str) -> String {
     match ty {
         Ty::ThreadgroupAtomicU32 => format!("&({value})"),
-        _ => format!("(device atomic_uint*){value}"),
+        Ty::Ptr { .. } => format!("(device atomic_uint*)({value})"),
+        _ => format!("(device atomic_uint*)&({value})"),
     }
 }
 
@@ -1038,4 +1039,28 @@ fn keep_diagnostic(diag: &Diagnostic, line: &str) -> bool {
         return diag.file == "program_source";
     }
     diag.file == "program_source" || diag.severity == "error"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_atomic_target() {
+        assert_eq!(atomic_target(Ty::ThreadgroupAtomicU32, "val"), "&(val)");
+        assert_eq!(
+            atomic_target(
+                Ty::Ptr {
+                    pointee: &Ty::U32,
+                    mutable: true,
+                },
+                "ptr"
+            ),
+            "(device atomic_uint*)(ptr)"
+        );
+        assert_eq!(
+            atomic_target(Ty::U32, "range->length"),
+            "(device atomic_uint*)&(range->length)"
+        );
+    }
 }
