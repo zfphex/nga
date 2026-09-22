@@ -55,12 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
-    let mut shaders = device.shaders(triangle::ENTRIES)?;
-    let pipeline = shaders.raster(&RasterDesc::new(
-        triangle::VERTEX.name,
-        triangle::FRAGMENT.name,
-        &[ColorTarget::new(surface.format())],
-    ))?;
+    let mut shaders = device.shaders(triangle::MODULE)?;
+    let pipeline = shaders
+        .raster(triangle::VERTEX, triangle::FRAGMENT)
+        .color(surface.format())
+        .build()?;
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

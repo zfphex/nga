@@ -98,13 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
-    let mut shaders = device.shaders(bindless::ENTRIES)?;
-    let pipeline = shaders.raster(&RasterDesc::new(
-        bindless::VERTEX.name,
-        bindless::FRAGMENT.name,
-        &[ColorTarget::new(surface.format())],
-    ))?;
-    let paint_pipeline = shaders.compute(bindless::PAINT.name, None)?;
+    let mut shaders = device.shaders(bindless::MODULE)?;
+    let pipeline = shaders
+        .raster(bindless::VERTEX, bindless::FRAGMENT)
+        .color(surface.format())
+        .build()?;
+    let paint_pipeline = shaders.compute(bindless::PAINT)?;
 
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     // One sampler plus one range of layers per quad. A heap costs descriptor bytes for the

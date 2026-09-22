@@ -93,45 +93,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
-    let mut shaders = device.shaders(raster::ENTRIES)?;
-    let opaque = shaders.raster(&RasterDesc {
-        depth: Some(DEPTH_FORMAT),
-        constants: Some(&Options {
+    let mut shaders = device.shaders(raster::MODULE)?;
+    let opaque = shaders
+        .raster(raster::VERTEX, raster::FRAGMENT)
+        .color(surface.format())
+        .depth(DEPTH_FORMAT)
+        .constants(&Options {
             boost: false,
             gamma: 1.0,
-        }),
-        ..RasterDesc::new(
-            raster::VERTEX.name,
-            raster::FRAGMENT.name,
-            &[ColorTarget::new(surface.format())],
-        )
-    })?;
-    let translucent = shaders.raster(&RasterDesc {
-        depth: Some(DEPTH_FORMAT),
-        constants: Some(&Options {
+        })
+        .build()?;
+    let translucent = shaders
+        .raster(raster::VERTEX, raster::FRAGMENT)
+        .color(surface.format())
+        .blend(BlendMode::Alpha)
+        .depth(DEPTH_FORMAT)
+        .constants(&Options {
             boost: true,
             gamma: 0.6,
-        }),
-        ..RasterDesc::new(
-            raster::VERTEX.name,
-            raster::FRAGMENT.name,
-            &[ColorTarget {
-                blend: BlendMode::Alpha,
-                ..ColorTarget::new(surface.format())
-            }],
-        )
-    })?;
-    let screen = shaders.raster(&RasterDesc {
-        depth: Some(DEPTH_FORMAT),
-        ..RasterDesc::new(
-            raster::VERTEX.name,
-            raster::FRAGMENT_SCREEN.name,
-            &[ColorTarget {
-                blend: BlendMode::Screen,
-                ..ColorTarget::new(surface.format())
-            }],
-        )
-    })?;
+        })
+        .build()?;
+    let screen = shaders
+        .raster(raster::VERTEX, raster::FRAGMENT_SCREEN)
+        .color(surface.format())
+        .blend(BlendMode::Screen)
+        .depth(DEPTH_FORMAT)
+        .build()?;
 
     let depth_write = DepthState::new(CompareOp::Less, true);
     let depth_test = DepthState::new(CompareOp::Less, false);

@@ -307,10 +307,12 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
 
     let list = format!(
         "#[allow(dead_code)]
-         pub const ENTRIES: &[&::nga::ir::GpuFn] = &[{}];",
+         pub const MODULE: &[&::nga::ir::GpuFn] = &[{}];
+         #[allow(dead_code)]
+         pub const ENTRIES: &[&::nga::ir::GpuFn] = MODULE;",
         entries
             .iter()
-            .map(|e| format!("&{e}"))
+            .map(|e| format!("{e}.0"))
             .collect::<Vec<_>>()
             .join(", ")
     );

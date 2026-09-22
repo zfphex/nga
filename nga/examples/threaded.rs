@@ -24,14 +24,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
-    let mut shaders = device.shaders(sync::ENTRIES)?;
-    let simulate = shaders.compute(sync::SIMULATE.name, None)?;
-    let build = shaders.compute(sync::BUILD_VERTICES.name, None)?;
-    let draw = shaders.raster(&RasterDesc::new(
-        sync::VERTEX.name,
-        sync::FRAGMENT.name,
-        &[ColorTarget::new(surface.format())],
-    ))?;
+    let mut shaders = device.shaders(sync::MODULE)?;
+    let simulate = shaders.compute(sync::SIMULATE)?;
+    let build = shaders.compute(sync::BUILD_VERTICES)?;
+    let draw = shaders
+        .raster(sync::VERTEX, sync::FRAGMENT)
+        .color(surface.format())
+        .build()?;
 
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(FRAMES_IN_FLIGHT as usize * COUNT * size_of::<Instance>())?;

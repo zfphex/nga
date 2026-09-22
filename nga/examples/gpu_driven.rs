@@ -170,28 +170,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
-    let mut shaders = device.shaders(gpu_driven::ENTRIES)?;
-    let simulate = shaders.compute(gpu_driven::SIMULATE.name, None)?;
-    let encode = shaders.compute(gpu_driven::ENCODE.name, None)?;
-    let draw = shaders.raster(
-        &RasterDesc::new(
-            gpu_driven::VERTEX.name,
-            gpu_driven::FRAGMENT.name,
-            &[ColorTarget::new(surface.format())],
-        )
-        .indirect(),
-    )?;
-    let boundary = shaders.raster(&RasterDesc {
-        topology: Topology::TriangleStrip,
-        ..RasterDesc::new(
-            gpu_driven::BOUNDARY.name,
-            gpu_driven::BOUNDARY_FRAGMENT.name,
-            &[ColorTarget {
-                blend: BlendMode::Alpha,
-                ..ColorTarget::new(surface.format())
-            }],
-        )
-    })?;
+    let mut shaders = device.shaders(gpu_driven::MODULE)?;
+    let simulate = shaders.compute(gpu_driven::SIMULATE)?;
+    let encode = shaders.compute(gpu_driven::ENCODE)?;
+    let draw = shaders
+        .raster(gpu_driven::VERTEX, gpu_driven::FRAGMENT)
+        .color(surface.format())
+        .indirect()
+        .build()?;
+    let boundary = shaders
+        .raster(gpu_driven::BOUNDARY, gpu_driven::BOUNDARY_FRAGMENT)
+        .color(surface.format())
+        .blend(BlendMode::Alpha)
+        .topology(Topology::TriangleStrip)
+        .build()?;
 
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;

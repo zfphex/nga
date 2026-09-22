@@ -841,7 +841,20 @@ fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
     )))
 }
 
-// -- the attribute -----------------------------------------------------------------------
+fn stage_wrapper(attr: &[TokenTree]) -> Option<&'static str> {
+    match attr.first() {
+        Some(TokenTree::Ident(id)) => match id.to_string().as_str() {
+            "vertex" => Some("VertexShader"),
+            "fragment" => Some("FragmentShader"),
+            "compute" => Some("ComputeShader"),
+            "object" => Some("ObjectShader"),
+            "mesh" => Some("MeshShader"),
+            "tile" => Some("TileShader"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 fn stage(attr: &[TokenTree]) -> Result<String, Fail> {
     match attr {
@@ -929,7 +942,8 @@ fn builtin(name: &str) -> Option<&'static str> {
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail> {
     let t: Vec<TokenTree> = item.into_iter().collect();
-    let stage = stage(&attr.into_iter().collect::<Vec<_>>())?;
+    let attr_tokens: Vec<TokenTree> = attr.into_iter().collect();
+    let stage = stage(&attr_tokens)?;
 
     let Some(keyword) = t
         .iter()
@@ -1039,30 +1053,58 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
     let body_tokens: Vec<TokenTree> = body.stream().into_iter().collect();
     let root = block(&mut b, &body_tokens, ret != "::nga::ir::Ty::Void")?;
 
-    let konst = format!(
-        "#[allow(non_upper_case_globals)]
-         pub const {upper}: ::nga::ir::GpuFn = ::nga::ir::GpuFn {{
-             name: {name:?},
-             stage: {stage},
-             params: &[{params}],
-             ret: {ret},
-             locals: &[{locals}],
-             nodes: &[{nodes}],
-             body: {root},
-             calls: &[{calls}],
-         }};",
-        upper = name.to_string().to_uppercase(),
-        name = name.to_string(),
-        params = params.join(", "),
-        locals = b.locals.join(", "),
-        nodes = b.nodes.join(", "),
-        calls = b
-            .calls
-            .iter()
-            .map(|c| format!("&{c}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
+    let konst = if let Some(wrapper) = stage_wrapper(&attr_tokens) {
+        format!(
+            "const {upper}_FN: ::nga::ir::GpuFn = ::nga::ir::GpuFn {{
+                 name: {name:?},
+                 stage: {stage},
+                 params: &[{params}],
+                 ret: {ret},
+                 locals: &[{locals}],
+                 nodes: &[{nodes}],
+                 body: {root},
+                 calls: &[{calls}],
+             }};
+             #[allow(non_upper_case_globals)]
+             pub const {upper}: ::nga::{wrapper} = ::nga::{wrapper}(&{upper}_FN);",
+            upper = name.to_string().to_uppercase(),
+            name = name.to_string(),
+            params = params.join(", "),
+            locals = b.locals.join(", "),
+            nodes = b.nodes.join(", "),
+            calls = b
+                .calls
+                .iter()
+                .map(|c| format!("&{c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        format!(
+            "#[allow(non_upper_case_globals)]
+             pub const {upper}: ::nga::ir::GpuFn = ::nga::ir::GpuFn {{
+                 name: {name:?},
+                 stage: {stage},
+                 params: &[{params}],
+                 ret: {ret},
+                 locals: &[{locals}],
+                 nodes: &[{nodes}],
+                 body: {root},
+                 calls: &[{calls}],
+             }};",
+            upper = name.to_string().to_uppercase(),
+            name = name.to_string(),
+            params = params.join(", "),
+            locals = b.locals.join(", "),
+            nodes = b.nodes.join(", "),
+            calls = b
+                .calls
+                .iter()
+                .map(|c| format!("&{c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
 
     // The function itself, with parameter attributes gone. It is never called on the host, so
     // everything in it is dead by construction.

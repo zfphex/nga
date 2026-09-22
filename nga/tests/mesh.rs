@@ -99,8 +99,7 @@ fn a_mesh_pipeline_emits_a_triangle() -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    let source = compile(shader::ENTRIES);
-    let mut shaders = Shaders::new(&device, &source)?;
+    let mut shaders = device.shaders(shader::MODULE)?;
     let pipeline = shaders.mesh(&MeshDesc::new(
         "",
         "mesh_main",

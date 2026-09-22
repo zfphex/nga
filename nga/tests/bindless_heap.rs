@@ -80,12 +80,11 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
         "a device that cannot hold {SLOTS} descriptors cannot run this"
     );
 
-    let mut shaders = device.shaders(table::ENTRIES)?;
-    let pipeline = shaders.raster(&RasterDesc::new(
-        table::VERTEX.name,
-        table::FRAGMENT.name,
-        &[ColorTarget::new(Format::Rgba8Unorm)],
-    ))?;
+    let mut shaders = device.shaders(table::MODULE)?;
+    let pipeline = shaders
+        .raster(table::VERTEX, table::FRAGMENT)
+        .color(Format::Rgba8Unorm)
+        .build()?;
 
     let mut heap = GpuHeap::new(&device, 4 * 1024 * 1024)?;
     let mut resources = ResourceHeap::new(&device, SLOTS)?;
@@ -182,12 +181,11 @@ fn base_slot_offset_pattern() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let mut shaders = device.shaders(table::ENTRIES)?;
-    let pipeline = shaders.raster(&RasterDesc::new(
-        table::VERTEX_SIMPLE.name,
-        table::FRAGMENT_OFFSET.name,
-        &[ColorTarget::new(Format::Rgba8Unorm)],
-    ))?;
+    let mut shaders = device.shaders(table::MODULE)?;
+    let pipeline = shaders
+        .raster(table::VERTEX_SIMPLE, table::FRAGMENT_OFFSET)
+        .color(Format::Rgba8Unorm)
+        .build()?;
 
     let mut heap = GpuHeap::new(&device, 4 * 1024 * 1024)?;
     let mut resources = ResourceHeap::new(&device, 8)?;

@@ -127,18 +127,13 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    let source = compile(shader::ENTRIES);
-    let mut shaders = Shaders::new(&device, &source)?;
-    // `indirect` is what gives the pipeline a resource ID for the shader to name.
-    let drawn = shaders.raster(
-        &RasterDesc::new(
-            "icb_vertex",
-            "icb_fragment",
-            &[ColorTarget::new(Format::Rgba8Unorm)],
-        )
-        .indirect(),
-    )?;
-    let encode = shaders.compute("encode", None)?;
+    let mut shaders = device.shaders(shader::MODULE)?;
+    let drawn = shaders
+        .raster(shader::ICB_VERTEX, shader::ICB_FRAGMENT)
+        .color(Format::Rgba8Unorm)
+        .indirect()
+        .build()?;
+    let encode = shaders.compute(shader::ENCODE)?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 
     let commands = IndirectCommands::draws(&device, DRAWS, false)?;

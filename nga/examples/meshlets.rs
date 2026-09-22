@@ -172,8 +172,7 @@ mod meshlets {
         let (mut width, mut height) = window.scaled_size();
         let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
 
-        let source = compile(shader::ENTRIES);
-        let mut shaders = Shaders::new(&device, &source)?;
+        let mut shaders = device.shaders(shader::MODULE)?;
         let pipeline = shaders.mesh(&MeshDesc::new(
             "meshlet_object",
             "meshlet_mesh",

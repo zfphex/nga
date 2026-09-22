@@ -94,13 +94,11 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    let source = compile(shader::ENTRIES);
-    let mut shaders = Shaders::new(&device, &source)?;
-    let draw = shaders.raster(&RasterDesc::new(
-        "tile_vertex",
-        "tile_fragment",
-        &[ColorTarget::new(Format::Rgba8Unorm)],
-    ))?;
+    let mut shaders = device.shaders(shader::MODULE)?;
+    let draw = shaders
+        .raster(shader::TILE_VERTEX, shader::TILE_FRAGMENT)
+        .color(Format::Rgba8Unorm)
+        .build()?;
     let halve = shaders.tile(&TileDesc::new("tile_halve", &[Format::Rgba8Unorm]))?;
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

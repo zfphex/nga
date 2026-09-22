@@ -16,11 +16,11 @@
 //! a newtype declared here with private fields, so `pub use backend::*` cannot leak one.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader, Constant,
     Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
-    ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d,
-    Texture2dRW, TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
+    FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
+    RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace,
+    StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
@@ -2777,7 +2777,30 @@ impl Shaders {
 
     // }
 
-    pub fn raster(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
+    pub fn raster(
+        &mut self,
+        vertex: VertexShader,
+        fragment: FragmentShader,
+    ) -> RasterBuilder<'_> {
+        RasterBuilder {
+            shaders: self,
+            vertex: vertex.0.name,
+            fragment: fragment.0.name,
+            colors: [ColorTarget::new(Format::Rgba8Unorm); 4],
+            color_count: 0,
+            depth: None,
+            topology: Topology::TriangleList,
+            samples: 1,
+            constants: None,
+            indirect: false,
+        }
+    }
+
+    pub fn raster_desc(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
+        self.build_raster(desc)
+    }
+
+    pub(crate) fn build_raster(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
         let vertex = std::ffi::CString::new(desc.vertex).unwrap();
         let fragment = std::ffi::CString::new(desc.fragment).unwrap();
         let specialization = desc.constants.map(|c| specialize(&c.values()));
@@ -2818,8 +2841,6 @@ impl Shaders {
         let attachments: Vec<_> = desc.colors.iter().map(blend_attachment).collect();
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
 
-        // Depth and stencil stay dynamic so `depth_state()` remains a state object bound at
-        // record time, the way `MTLDepthStencilState` is, instead of multiplying pipelines.
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
@@ -2887,12 +2908,16 @@ impl Shaders {
         ))
     }
 
-    pub fn compute(
+    pub fn compute(&mut self, entry: ComputeShader) -> Result<Pipeline, Error> {
+        self.compute_with(entry, None)
+    }
+
+    pub fn compute_with(
         &mut self,
-        entry: &str,
+        entry: ComputeShader,
         constants: Option<&dyn Constants>,
     ) -> Result<Pipeline, Error> {
-        let entry = std::ffi::CString::new(entry).unwrap();
+        let entry = std::ffi::CString::new(entry.0.name).unwrap();
         let specialization = constants.map(|c| specialize(&c.values()));
         let info = specialization.as_ref().map(|(entries, data)| {
             vk::SpecializationInfo::default()

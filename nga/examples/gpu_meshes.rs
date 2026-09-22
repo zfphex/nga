@@ -249,30 +249,21 @@ mod commands {
         let (mut width, mut height) = window.scaled_size();
     let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
 
-        let source = compile(shader::ENTRIES);
-        let mut shaders = Shaders::new(&device, &source)?;
-        // `indirect` is what gives each pipeline a resource ID for the shader to name. Without
-        // it the handle is zero and the encoded command replays nothing.
-        let solid = shaders.raster(
-            &RasterDesc::new(
-                "solid_vertex",
-                "solid_fragment",
-                &[ColorTarget::new(surface.format())],
-            )
-            .depth(Format::D32Float)
-            .indirect(),
-        )?;
-        let wire = shaders.raster(&RasterDesc {
-            topology: Topology::LineList,
-            ..RasterDesc::new(
-                "wire_vertex",
-                "wire_fragment",
-                &[ColorTarget::new(surface.format())],
-            )
+        let mut shaders = device.shaders(shader::MODULE)?;
+        let solid = shaders
+            .raster(shader::SOLID_VERTEX, shader::SOLID_FRAGMENT)
+            .color(surface.format())
             .depth(Format::D32Float)
             .indirect()
-        })?;
-        let encode = shaders.compute("encode", None)?;
+            .build()?;
+        let wire = shaders
+            .raster(shader::WIRE_VERTEX, shader::WIRE_FRAGMENT)
+            .color(surface.format())
+            .depth(Format::D32Float)
+            .topology(Topology::LineList)
+            .indirect()
+            .build()?;
+        let encode = shaders.compute(shader::ENCODE)?;
 
         let commands = IndirectCommands::draws(&device, OBJECTS, false)?;
 

@@ -943,6 +943,95 @@ impl<'a> RasterDesc<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct VertexShader(pub &'static ir::GpuFn);
+
+#[derive(Clone, Copy)]
+pub struct FragmentShader(pub &'static ir::GpuFn);
+
+#[derive(Clone, Copy)]
+pub struct ComputeShader(pub &'static ir::GpuFn);
+
+#[derive(Clone, Copy)]
+pub struct ObjectShader(pub &'static ir::GpuFn);
+
+#[derive(Clone, Copy)]
+pub struct MeshShader(pub &'static ir::GpuFn);
+
+#[derive(Clone, Copy)]
+pub struct TileShader(pub &'static ir::GpuFn);
+
+pub struct RasterBuilder<'a> {
+    pub(crate) shaders: &'a mut Shaders,
+    pub vertex: &'a str,
+    pub fragment: &'a str,
+    pub colors: [ColorTarget; 4],
+    pub color_count: usize,
+    pub depth: Option<Format>,
+    pub topology: Topology,
+    pub samples: u32,
+    pub constants: Option<&'a dyn Constants>,
+    pub indirect: bool,
+}
+
+impl<'a> RasterBuilder<'a> {
+    pub fn color(mut self, format: Format) -> Self {
+        self.colors[self.color_count] = ColorTarget::new(format);
+        self.color_count += 1;
+        self
+    }
+
+    pub fn color_target(mut self, target: ColorTarget) -> Self {
+        self.colors[self.color_count] = target;
+        self.color_count += 1;
+        self
+    }
+
+    pub fn blend(mut self, blend: BlendMode) -> Self {
+        self.colors[self.color_count - 1].blend = blend;
+        self
+    }
+
+    pub fn depth(mut self, format: Format) -> Self {
+        self.depth = Some(format);
+        self
+    }
+
+    pub fn topology(mut self, topology: Topology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    pub fn samples(mut self, samples: u32) -> Self {
+        self.samples = samples;
+        self
+    }
+
+    pub fn constants(mut self, constants: &'a dyn Constants) -> Self {
+        self.constants = Some(constants);
+        self
+    }
+
+    pub fn indirect(mut self) -> Self {
+        self.indirect = true;
+        self
+    }
+
+    pub fn build(self) -> Result<Pipeline, Error> {
+        let shaders = self.shaders;
+        shaders.build_raster(&RasterDesc {
+            vertex: self.vertex,
+            fragment: self.fragment,
+            colors: &self.colors[..self.color_count],
+            depth: self.depth,
+            topology: self.topology,
+            samples: self.samples,
+            constants: self.constants,
+            indirect: self.indirect,
+        })
+    }
+}
+
 /// How a multisample depth attachment collapses to its single-sample resolve target.
 ///
 /// Colour has no equivalent knob: both APIs average, and Vulkan only guarantees `AVERAGE` for

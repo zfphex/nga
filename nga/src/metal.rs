@@ -28,11 +28,11 @@
 //!   the shader dereferences, so `ResourceHeap` allocates no descriptor memory at all.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader, Constant,
     Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
-    ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d,
-    Texture2dRW, TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
+    FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
+    RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace,
+    StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
@@ -600,6 +600,10 @@ impl Device {
         }
         descriptor.set_support_argument_buffers(true);
         Ok(SamplerState(self.device.new_sampler_state(&descriptor)?))
+    }
+
+    pub fn shaders(&self, entries: &[&'static crate::ir::GpuFn]) -> Result<Shaders, Error> {
+        Shaders::new(self, entries)
     }
 
     /// Registers an allocation with the queue's residency set. Every type in this file that owns
@@ -1356,7 +1360,30 @@ impl Shaders {
         }
     }
 
-    pub fn raster(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
+    pub fn raster(
+        &mut self,
+        vertex: VertexShader,
+        fragment: FragmentShader,
+    ) -> RasterBuilder<'_> {
+        RasterBuilder {
+            shaders: self,
+            vertex: vertex.0.name,
+            fragment: fragment.0.name,
+            colors: [ColorTarget::new(Format::Rgba8Unorm); 4],
+            color_count: 0,
+            depth: None,
+            topology: Topology::TriangleList,
+            samples: 1,
+            constants: None,
+            indirect: false,
+        }
+    }
+
+    pub fn raster_desc(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
+        self.build_raster(desc)
+    }
+
+    pub(crate) fn build_raster(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
         let pipeline = M4RenderPipelineDescriptor::new();
         pipeline.set_label(desc.vertex);
         pipeline.set_vertex_function_descriptor(Some(&self.function(desc.vertex, desc.constants)));
@@ -1369,9 +1396,6 @@ impl Shaders {
         pipeline.set_input_primitive_topology(topology_class(desc.topology));
         pipeline.set_raster_sample_count(desc.samples as usize);
         pipeline.set_alpha_to_coverage_state(M4AlphaToCoverageState::Disabled);
-        // `desc.depth` is deliberately unused. `MTL4RenderPipelineDescriptor` carries no depth
-        // attachment format, since Metal 4 takes it from the render pass. Vulkan bakes it
-        // into `VkPipelineRenderingCreateInfo` and refuses to render without a match.
 
         color_targets(&pipeline.color_attachments(), desc.colors);
 
@@ -1450,14 +1474,18 @@ impl Shaders {
         })
     }
 
-    pub fn compute(
+    pub fn compute(&mut self, entry: ComputeShader) -> Result<Pipeline, Error> {
+        self.compute_with(entry, None)
+    }
+
+    pub fn compute_with(
         &mut self,
-        entry: &str,
+        entry: ComputeShader,
         constants: Option<&dyn Constants>,
     ) -> Result<Pipeline, Error> {
         let pipeline = M4ComputePipelineDescriptor::new();
-        pipeline.set_label(entry);
-        pipeline.set_compute_function_descriptor(Some(&self.function(entry, constants)));
+        pipeline.set_label(entry.0.name);
+        pipeline.set_compute_function_descriptor(Some(&self.function(entry.0.name, constants)));
         let state = self.compiler.new_compute_pipeline_state(&pipeline, None)?;
         let raw = state.raw;
         self.compute.push(state);

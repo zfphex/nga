@@ -233,6 +233,18 @@ fn entries() {
 }
 
 #[test]
+fn stage_types() {
+    fn assert_compute(_: ComputeShader) {}
+    fn assert_vertex(_: VertexShader) {}
+    fn assert_fragment(_: FragmentShader) {}
+
+    assert_compute(CLEAR);
+    assert_vertex(VERTEX_MAIN);
+    assert_fragment(FRAGMENT_MAIN);
+    assert_eq!(shader::MODULE.len(), 5);
+}
+
+#[test]
 fn types() {
     let types = ir::infer(&CLEAR);
     // `index`, then `colour`.

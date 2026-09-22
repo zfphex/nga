@@ -113,13 +113,11 @@ mod tiles {
         let (mut width, mut height) = window.scaled_size();
         let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
 
-        let source = compile(shader::ENTRIES);
-        let mut shaders = Shaders::new(&device, &source)?;
-        let draw = shaders.raster(&RasterDesc::new(
-            "tbdr_vertex",
-            "tbdr_fragment",
-            &[ColorTarget::new(surface.format())],
-        ))?;
+        let mut shaders = device.shaders(shader::MODULE)?;
+        let draw = shaders
+            .raster(shader::TBDR_VERTEX, shader::TBDR_FRAGMENT)
+            .color(surface.format())
+            .build()?;
         let vignette = shaders.tile(&TileDesc::new("tbdr_vignette", &[surface.format()]))?;
 
         // A triangle per grid cell, each a different hue. Built once: only the transform moves.
