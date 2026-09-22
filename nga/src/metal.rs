@@ -614,6 +614,24 @@ impl Device {
         self.residency.commit()?;
         Ok(())
     }
+
+    pub fn surface(&self, view: isize, width: u32, height: u32) -> Result<Surface, Error> {
+        let layer = unsafe {
+            MetalLayer::attach_to_view(
+                id(view as *mut std::ffi::c_void),
+                &self.device,
+                PixelFormat::Bgra8Unorm,
+                width as usize,
+                height as usize,
+                1.0,
+            )?
+        };
+        Ok(Surface {
+            layer,
+            width,
+            height,
+        })
+    }
 }
 
 // -- arena -------------------------------------------------------------------------------
