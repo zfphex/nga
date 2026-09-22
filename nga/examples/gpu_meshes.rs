@@ -119,10 +119,7 @@ mod commands {
         }
 
         #[vertex]
-        fn solid_vertex(
-            #[buffer(1)] data: Gpu<DrawData>,
-            #[vertex_id] vid: u32,
-        ) -> VertexOut {
+        fn solid_vertex(#[buffer(1)] data: Gpu<DrawData>, #[vertex_id] vid: u32) -> VertexOut {
             let source = data.vertices[vid];
             let p = f32x3::new(source.position[0], source.position[1], source.position[2]);
             VertexOut {
@@ -145,10 +142,7 @@ mod commands {
         }
 
         #[vertex]
-        fn wire_vertex(
-            #[buffer(1)] data: Gpu<DrawData>,
-            #[vertex_id] vid: u32,
-        ) -> VertexOut {
+        fn wire_vertex(#[buffer(1)] data: Gpu<DrawData>, #[vertex_id] vid: u32) -> VertexOut {
             let source = data.vertices[vid];
             let p = f32x3::new(source.position[0], source.position[1], source.position[2]) * 1.08;
             VertexOut {
@@ -247,7 +241,7 @@ mod commands {
         }
 
         let (mut width, mut height) = window.scaled_size();
-    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+        let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
 
         let mut shaders = device.shaders(shader::MODULE)?;
         let solid = shaders
@@ -366,34 +360,33 @@ mod commands {
                 let mut frame = ctx.begin_frame().unwrap();
                 let mut rec = frame.recorder();
 
-                let root = rec
-                    .arena()
-                    .alloc(EncodeData {
-                        objects: object_list,
-                        vertices,
-                        draws: draws.gpu_rw(),
-                        commands: commands.handle(),
-                        pipelines: [solid.handle(), wire.handle()],
-                        viewproj,
-                        time,
-                        cull_radius: 0.9 + 0.5 * (time * 0.4).sin(),
-                        count: OBJECTS,
-                        tri_start: 0,
-                        tri_count,
-                        line_start: tri_count,
-                        line_count,
-                    })
-                    .unwrap()
-                    .gpu;
-
                 {
                     let compute = rec.compute();
                     // A slot the encode pass does not claim keeps whatever it last held, so the
                     // buffer is cleared first. A reset slot replays as nothing, which is what
                     // makes "execute everything" safe without a GPU-side count.
                     compute.reset(&commands, commands.all());
-                    compute.pipeline(encode);
-                    compute.dispatch(root, OBJECTS as usize, GROUP);
+                    compute
+                        .dispatch(
+                            encode,
+                            EncodeData {
+                                objects: object_list,
+                                vertices,
+                                draws: draws.gpu_rw(),
+                                commands: commands.handle(),
+                                pipelines: [solid.handle(), wire.handle()],
+                                viewproj,
+                                time,
+                                cull_radius: 0.9 + 0.5 * (time * 0.4).sin(),
+                                count: OBJECTS,
+                                tri_start: 0,
+                                tri_count,
+                                line_start: tri_count,
+                                line_count,
+                            },
+                            Dispatch::x(OBJECTS as usize, GROUP),
+                        )
+                        .unwrap();
                     compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::DRAW_ARGUMENTS);
                 }
                 {

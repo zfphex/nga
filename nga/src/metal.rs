@@ -28,11 +28,12 @@
 //!   the shader dereferences, so `ResourceHeap` allocates no descriptor memory at all.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader, Constant,
-    Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
-    RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace,
-    StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
+    Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
+    Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf,
+    Topology, Usage, VertexShader, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
@@ -50,9 +51,9 @@ use minmetal::{
     MultisampleDepthResolveFilter, Origin, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
     Region, RenderStages, ResidencySet, ResidencySetDescriptor, ResourceOptions,
     ResourceViewPoolDescriptor, SamplerAddressMode, SamplerDescriptor, SamplerMinMagFilter,
-    SamplerMipFilter, SharedEvent, Size, Stages, StencilDescriptor, StencilOperation,
-    StorageMode, Texture, TextureDescriptor, TextureType, TextureUsage, TextureViewPool,
-    VisibilityResultMode, VisibilityResultType, id, retain,
+    SamplerMipFilter, SharedEvent, Size, Stages, StencilDescriptor, StencilOperation, StorageMode,
+    Texture, TextureDescriptor, TextureType, TextureUsage, TextureViewPool, VisibilityResultMode,
+    VisibilityResultType, id, retain,
 };
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -1319,7 +1320,7 @@ pub struct Shaders {
 
 impl Shaders {
     /// `source` is generated MSL, as bytes, the same shape the Vulkan side takes SPIR-V in.
-    pub fn new(device: &Device,entries: &[&'static crate::ir::GpuFn]) -> Result<Self, Error> {
+    pub fn new(device: &Device, entries: &[&'static crate::ir::GpuFn]) -> Result<Self, Error> {
         let source = crate::msl::module(entries);
         let source = std::str::from_utf8(source.as_bytes())
             .map_err(|_| Error::new("shader source is not valid UTF-8"))?;
@@ -1360,11 +1361,7 @@ impl Shaders {
         }
     }
 
-    pub fn raster(
-        &mut self,
-        vertex: VertexShader,
-        fragment: FragmentShader,
-    ) -> RasterBuilder<'_> {
+    pub fn raster(&mut self, vertex: VertexShader, fragment: FragmentShader) -> RasterBuilder<'_> {
         RasterBuilder {
             shaders: self,
             vertex: vertex.0.name,
@@ -1943,7 +1940,7 @@ impl<'a> Raster<'a> {
     /// a `constant nga_push* [[buffer(0)]]` parameter, so what the argument table holds
     /// is the address of a struct, not the root itself, so a bind costs one 16-byte arena
     /// allocation.
-    fn bind<T>(&self, root: Gpu<T>) {
+    fn bind<T>(&self, root: Gpu<T>) -> Result<(), Error> {
         let (resources, resources_stride) = self.resources.get();
         bind_push(
             self.table,
@@ -1951,7 +1948,12 @@ impl<'a> Raster<'a> {
             root.0.get(),
             resources,
             resources_stride,
-        );
+        )
+    }
+
+    fn prepare<T>(&self, pipeline: Pipeline, root: T) -> Result<(), Error> {
+        self.pipeline(pipeline);
+        self.bind(alloc_root(self.arena, root)?)
     }
 
     pub fn pipeline(&self, pipeline: Pipeline) {
@@ -2006,11 +2008,12 @@ impl<'a> Raster<'a> {
 
     pub fn draw_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         count: u32,
-    ) {
-        self.bind(root);
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         self.encoder.draw_indexed_primitives(
             self.primitive.get(),
             count as usize,
@@ -2021,17 +2024,19 @@ impl<'a> Raster<'a> {
             indices.gpu,
             indices.len,
         );
+        Ok(())
     }
 
     pub fn draw_indexed_indirect<I: IndexFormat, T>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         _arena: &Arena,
         draws: Gpu<[DrawIndexed]>,
         count: u32,
-    ) {
-        self.bind(root);
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         let index_type = match I::WIDE {
             true => IndexType::UInt32,
             false => IndexType::UInt16,
@@ -2045,6 +2050,7 @@ impl<'a> Raster<'a> {
                 draws.0.get() + index * size_of::<DrawIndexed>() as u64,
             );
         }
+        Ok(())
     }
 
     /// Replays a GPU-compacted batch with one driver command.
@@ -2054,15 +2060,17 @@ impl<'a> Raster<'a> {
     /// `draws` is the parallel Vulkan argument array and is unused on Metal.
     pub fn draw_indirect_count<T>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         commands: &IndirectCommands,
         _draws: &HeapBuffer,
         range: &HeapBuffer,
-    ) {
+    ) -> Result<(), Error> {
         debug_assert!(range.len >= size_of::<[u32; 2]>());
-        self.bind(root);
+        self.prepare(pipeline, root)?;
         self.encoder
             .execute_commands_in_buffer_with_indirect_buffer(&commands.icb, range.gpu);
+        Ok(())
     }
 
     /// A run of draws sharing every piece of state, including the root pointer.
@@ -2071,8 +2079,13 @@ impl<'a> Raster<'a> {
     /// is a loop and `Device::supports(Feature::MultiDraw)` answers `false`. The result is
     /// identical, which is why the method exists at all. Portable code should not have to
     /// carry two spellings of the same draw.
-    pub fn draw_multi<T>(&self, root: Gpu<T>, draws: &[MultiDraw]) {
-        self.bind(root);
+    pub fn draw_multi<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        draws: &[MultiDraw],
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         for draw in draws {
             self.encoder.draw_primitives(
                 self.primitive.get(),
@@ -2080,6 +2093,7 @@ impl<'a> Raster<'a> {
                 draw.vertex_count as usize,
             );
         }
+        Ok(())
     }
 
     /// The indexed counterpart of [`Raster::draw_multi`]. `first_index` is applied by moving
@@ -2089,11 +2103,12 @@ impl<'a> Raster<'a> {
     /// vertex, and silently ignoring the field would be worse than refusing it.
     pub fn draw_multi_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         draws: &[MultiDrawIndexed],
-    ) {
-        self.bind(root);
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         let width = match I::WIDE {
             true => 4,
             false => 2,
@@ -2115,6 +2130,7 @@ impl<'a> Raster<'a> {
                 indices.len - offset,
             );
         }
+        Ok(())
     }
 
     /// Runs a mesh pipeline: `groups` object threadgroups, each amplifying into mesh
@@ -2124,22 +2140,31 @@ impl<'a> Raster<'a> {
     /// Metal-only; ask [`Device::supports`] with [`Feature::MeshShaders`] first.
     pub fn draw_mesh<T>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         groups: [u32; 3],
         object_group: [u32; 3],
         mesh_group: [u32; 3],
-    ) {
-        self.bind(root);
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         self.encoder
             .draw_mesh_threadgroups(size(groups), size(object_group), size(mesh_group));
+        Ok(())
     }
 
     /// Runs a tile pipeline over the pass's imageblock. One dispatch covers one tile, so the
     /// grid is the tile size the pass was given, not the render target. Apple-only.
-    pub fn dispatch_tile<T>(&self, root: Gpu<T>, width: u32, height: u32) {
-        self.bind(root);
+    pub fn dispatch_tile<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         self.encoder
             .dispatch_threads_per_tile(Size::new(width as usize, height as usize, 1));
+        Ok(())
     }
 
     /// Replays draws a shader encoded into `commands`. The GPU wrote both the arguments and the
@@ -2179,10 +2204,18 @@ impl<'a> Raster<'a> {
         );
     }
 
-    pub fn draw<T>(&self, root: Gpu<T>, start: u32, count: u32) {
-        self.bind(root);
+    /// Copies `root` into this recorder's frame arena and draws `count` vertices from `start`.
+    pub fn draw<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        start: u32,
+        count: u32,
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         self.encoder
             .draw_primitives(self.primitive.get(), start as usize, count as usize);
+        Ok(())
     }
 }
 
@@ -2217,7 +2250,7 @@ impl<'a> Compute<'a> {
         }
     }
 
-    fn bind<T>(&self, root: Gpu<T>) {
+    fn bind<T>(&self, root: Gpu<T>) -> Result<(), Error> {
         let (resources, resources_stride) = self.resources.get();
         bind_push(
             self.table,
@@ -2225,7 +2258,12 @@ impl<'a> Compute<'a> {
             root.0.get(),
             resources,
             resources_stride,
-        );
+        )
+    }
+
+    fn prepare<T>(&self, pipeline: Pipeline, root: T) -> Result<(), Error> {
+        self.pipeline(pipeline);
+        self.bind(alloc_root(self.arena, root)?)
     }
 
     pub fn pipeline(&self, pipeline: Pipeline) {
@@ -2237,18 +2275,26 @@ impl<'a> Compute<'a> {
         self.resources.set((heap.base_id, heap.stride));
     }
 
-    pub fn dispatch<T>(&self, root: Gpu<T>, threads: usize, group: usize) {
-        self.bind(root);
-        self.encoder
-            .dispatch_threads(Size::new(threads, 1, 1), Size::new(group, 1, 1));
-    }
-
-    pub fn dispatch_2d<T>(&self, root: Gpu<T>, width: u32, height: u32, group: u32) {
-        self.bind(root);
+    /// Copies `root` into this recorder's frame arena and launches `pipeline` over `launch`.
+    ///
+    /// [`Dispatch::x`] and [`Dispatch::xy`] build `launch`. The error is a full arena.
+    pub fn dispatch<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        launch: DispatchThreads,
+    ) -> Result<(), Error> {
+        let (threads, group) = launch.grid();
+        self.prepare(pipeline, root)?;
         self.encoder.dispatch_threads(
-            Size::new(width as usize, height as usize, 1),
-            Size::new(group as usize, group as usize, 1),
+            Size::new(
+                threads[0] as usize,
+                threads[1] as usize,
+                threads[2] as usize,
+            ),
+            Size::new(group[0] as usize, group[1] as usize, group[2] as usize),
         );
+        Ok(())
     }
 
     /// The whole barrier, with no resource list, exactly the design the post argues for. Metal
@@ -2397,16 +2443,25 @@ impl Drop for Compute<'_> {
     }
 }
 
+fn alloc_root<T>(arena: &Arena, value: T) -> Result<Gpu<T>, Error> {
+    arena
+        .alloc(value)
+        .map(|boxed| boxed.gpu)
+        .ok_or_else(|| Error::new("frame arena is full"))
+}
+
 fn bind_push(
     table: &M4ArgumentTable,
     arena: &Arena,
     root: u64,
     resources: u64,
     resources_stride: u32,
-) {
-    let (cpu, gpu) = arena
-        .alloc_bytes(size_of::<Push>(), 16)
-        .expect("frame arena is full: no room for a root binding");
+) -> Result<(), Error> {
+    let Some((cpu, gpu)) = arena.alloc_bytes(size_of::<Push>(), 16) else {
+        return Err(Error::new(
+            "frame arena is full: no room for a root binding",
+        ));
+    };
     unsafe {
         (cpu as *mut Push).write(Push {
             root,
@@ -2416,6 +2471,7 @@ fn bind_push(
         })
     };
     table.set_address(gpu, 0);
+    Ok(())
 }
 
 // -- frames ------------------------------------------------------------------------------
@@ -2640,9 +2696,11 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-    /// This recorder's slice of the frame arena, where root data for the commands being
-    /// recorded belongs. Borrowed from the context, not from `self`, so allocating does not
-    /// prevent recording.
+    /// This recorder's frame arena.
+    ///
+    /// Draws and dispatches copy their root structs here. What a caller still allocates is
+    /// bytes those calls do not own: indirect arguments, scratch, readback. Borrowed from the
+    /// context, not from `self`, so allocating does not prevent recording.
     pub fn arena(&self) -> &'a Arena {
         self.arena
     }

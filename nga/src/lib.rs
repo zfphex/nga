@@ -399,17 +399,57 @@ pub struct DrawIndexed {
     pub base_instance: u32,
 }
 
+/// Indirect dispatch: three group counts, matching `VkDispatchIndirectCommand`.
+///
+/// A direct launch is a [`DispatchThreads`], built with [`Dispatch::x`] or [`Dispatch::xy`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Dispatch {
     pub threadgroups: [u32; 3],
 }
 
+impl Dispatch {
+    /// `threads` invocations along X, in groups of `group`.
+    pub fn x(threads: usize, group: usize) -> DispatchThreads {
+        debug_assert!(
+            group > 0 && threads <= u32::MAX as usize && group <= u32::MAX as usize,
+            "dispatch dimensions do not fit in u32"
+        );
+        DispatchThreads {
+            threads: [threads as u32, 1, 1],
+            group: [group as u32, 1, 1],
+        }
+    }
+
+    /// `width` by `height` invocations, in square groups of `group`.
+    pub fn xy(width: u32, height: u32, group: u32) -> DispatchThreads {
+        debug_assert!(group > 0, "a dispatch group has size zero");
+        DispatchThreads {
+            threads: [width, height, 1],
+            group: [group, group, 1],
+        }
+    }
+}
+
+/// How many threads a compute launch runs, and the size of each group.
+///
+/// [`Compute::dispatch`] takes one. A shader that writes an indirect dispatch-threads command
+/// uses the same layout. [`Dispatch`] is the other indirect layout: group counts, no group size.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DispatchThreads {
     pub threads: [u32; 3],
     pub group: [u32; 3],
+}
+
+impl DispatchThreads {
+    fn grid(self) -> ([u32; 3], [u32; 3]) {
+        debug_assert!(
+            self.group[0] > 0 && self.group[1] > 0 && self.group[2] > 0,
+            "a dispatch group has size zero"
+        );
+        (self.threads, self.group)
+    }
 }
 
 // -- shared ABI --------------------------------------------------------------------------

@@ -226,32 +226,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut frame = ctx.begin_frame().unwrap();
-            let arena = frame.arena(0);
-            let solid = arena
-                .alloc(Data {
-                    vertices,
-                    mvp: f32x4x4(scaled(1.0)),
-                    tint: f32x4([1.0, 1.0, 1.0, 1.0]),
-                })
-                .unwrap()
-                .gpu;
-            let glass = arena
-                .alloc(Data {
-                    vertices,
-                    mvp: f32x4x4(scaled(1.6)),
-                    tint: f32x4([0.4, 0.8, 1.0, 0.35]),
-                })
-                .unwrap()
-                .gpu;
-            let halo = arena
-                .alloc(Data {
-                    vertices,
-                    mvp: f32x4x4(scaled(2.1)),
-                    tint: f32x4([1.0, 0.5, 0.2, 0.6]),
-                })
-                .unwrap()
-                .gpu;
-
             let mut recorder = frame.recorder();
             {
                 let pass = Pass::new()
@@ -260,17 +234,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let raster = recorder.raster(&pass, surface.width(), surface.height());
                 raster.cull(Cull::Back, Winding::Clockwise);
 
-                raster.pipeline(opaque);
                 raster.depth(&depth_write);
-                raster.draw_indexed::<_, u16>(solid, &index_buffer, indices.len() as u32);
+                raster
+                    .draw_indexed::<_, u16>(
+                        opaque,
+                        Data {
+                            vertices,
+                            mvp: f32x4x4(scaled(1.0)),
+                            tint: f32x4([1.0, 1.0, 1.0, 1.0]),
+                        },
+                        &index_buffer,
+                        indices.len() as u32,
+                    )
+                    .unwrap();
 
-                raster.pipeline(translucent);
                 raster.depth(&depth_test);
-                raster.draw_indexed::<_, u16>(glass, &index_buffer, indices.len() as u32);
+                raster
+                    .draw_indexed::<_, u16>(
+                        translucent,
+                        Data {
+                            vertices,
+                            mvp: f32x4x4(scaled(1.6)),
+                            tint: f32x4([0.4, 0.8, 1.0, 0.35]),
+                        },
+                        &index_buffer,
+                        indices.len() as u32,
+                    )
+                    .unwrap();
 
-                raster.pipeline(screen);
                 raster.depth(&depth_off);
-                raster.draw_indexed::<_, u16>(halo, &index_buffer, indices.len() as u32);
+                raster
+                    .draw_indexed::<_, u16>(
+                        screen,
+                        Data {
+                            vertices,
+                            mvp: f32x4x4(scaled(2.1)),
+                            tint: f32x4([1.0, 0.5, 0.2, 0.6]),
+                        },
+                        &index_buffer,
+                        indices.len() as u32,
+                    )
+                    .unwrap();
             }
             drop(recorder);
             frame.submit(Some(&drawable)).unwrap();

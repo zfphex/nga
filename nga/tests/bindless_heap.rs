@@ -126,13 +126,6 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
     let mut frame = ctx.begin_frame()?;
-    let root = frame
-        .arena(0)
-        .alloc(Data {
-            palette: palette.gpu(),
-        })
-        .ok_or(Error::new("frame arena is full"))?
-        .gpu;
     let mut recorder = frame.recorder();
     {
         let pass =
@@ -141,8 +134,14 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
                 .color_texture_at(0, &target, 1, 0, Some([1.0, 0.0, 1.0, 1.0]));
         let raster = recorder.raster(&pass, SIZE / 2, SIZE / 2);
         raster.heap(&resources);
-        raster.pipeline(pipeline);
-        raster.draw(root, 0, 3);
+        raster.draw(
+            pipeline,
+            Data {
+                palette: palette.gpu(),
+            },
+            0,
+            3,
+        )?;
     }
     let (cpu, gpu) = readback
         .alloc_bytes((SIZE * SIZE * 4) as usize, 16)
@@ -234,20 +233,19 @@ fn base_slot_offset_pattern() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
     let mut frame = ctx.begin_frame()?;
-    let root = frame
-        .arena(0)
-        .alloc(Data {
-            palette: palette.gpu(),
-        })
-        .ok_or(Error::new("frame arena is full"))?
-        .gpu;
     let mut recorder = frame.recorder();
     {
         let pass = Pass::new().color_texture_at(0, &target, 0, 0, Some([1.0, 0.0, 0.0, 1.0]));
         let raster = recorder.raster(&pass, SIZE, SIZE);
         raster.heap(&resources);
-        raster.pipeline(pipeline);
-        raster.draw(root, 0, 3);
+        raster.draw(
+            pipeline,
+            Data {
+                palette: palette.gpu(),
+            },
+            0,
+            3,
+        )?;
     }
     let (cpu, gpu) = readback
         .alloc_bytes((SIZE * SIZE * 4) as usize, 16)

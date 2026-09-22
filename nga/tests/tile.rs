@@ -138,19 +138,15 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
     let dest: GpuRw<[u8]> = pixels.gpu.as_rw();
 
     let mut frame = ctx.begin_frame()?;
-    let data = frame
-        .arena(0)
-        .alloc(Data {
-            vertices,
-            mvp: f32x4x4([
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ]),
-        })
-        .unwrap();
-    let root = data.gpu;
+    let data = Data {
+        vertices,
+        mvp: f32x4x4([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]),
+    };
 
     let mut recorder = frame.recorder();
     {
@@ -158,10 +154,8 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
             .color_texture(0, &target, Some([0.0, 0.0, 0.0, 1.0]))
             .tile(TILE, TILE, IMAGEBLOCK_BYTES);
         let raster = recorder.raster(&pass, SIZE, SIZE);
-        raster.pipeline(draw);
-        raster.draw(root, 0, 3);
-        raster.pipeline(halve);
-        raster.dispatch_tile(root, TILE, TILE);
+        raster.draw(draw, data, 0, 3)?;
+        raster.dispatch_tile(halve, data, TILE, TILE)?;
     }
     {
         let compute = recorder.compute();

@@ -119,16 +119,20 @@ fn shape() {
 #[test]
 fn device_pointers_cannot_be_dereferenced_on_the_host() {
     let pointer = unsafe { Gpu::<u32>::new(1) };
-    assert!(std::panic::catch_unwind(|| {
-        let _ = *pointer;
-    })
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _ = *pointer;
+        })
+        .is_err()
+    );
 
     let mut pointer = unsafe { GpuRw::<[u32]>::new(1) };
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pointer[0] = 7;
-    }))
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pointer[0] = 7;
+        }))
+        .is_err()
+    );
 }
 
 /// An inner attribute belongs to the module, not to the item under it.
@@ -169,7 +173,9 @@ mod mixed {
 
     #[host]
     pub fn fill(count: usize) -> Buffers {
-        Buffers { staging: vec![0.0; count] }
+        Buffers {
+            staging: vec![0.0; count],
+        }
     }
 
     #[compute(32)]
@@ -202,7 +208,10 @@ mod nested_shader_data {
     use data::*;
 
     pub fn corner() -> Corner {
-        Corner { position: [0.0; 3], uv: f32x2::splat(0.0) }
+        Corner {
+            position: [0.0; 3],
+            uv: f32x2::splat(0.0),
+        }
     }
 
     pub fn camera_size() -> usize {
@@ -229,7 +238,10 @@ fn host_items_pass_through() {
 #[test]
 fn entries() {
     let names: Vec<&str> = shader::ENTRIES.iter().map(|f| f.name).collect();
-    assert_eq!(names, ["clear", "grey", "vertex_main", "fragment_main", "transform"]);
+    assert_eq!(
+        names,
+        ["clear", "grey", "vertex_main", "fragment_main", "transform"]
+    );
 }
 
 #[test]
@@ -386,9 +398,18 @@ program_source:2:5: warning: comparison of integers of different signs: 'int' an
 #[test]
 fn dump_writes_both_targets() {
     let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/generated"));
-    let (spirv, metal) = nga::dump(&dir, "gpu-test", &[&CLEAR, &GREY, &VERTEX_MAIN, &FRAGMENT_MAIN]).unwrap();
+    let (spirv, metal) = nga::dump(
+        &dir,
+        "gpu-test",
+        &[&CLEAR, &GREY, &VERTEX_MAIN, &FRAGMENT_MAIN],
+    )
+    .unwrap();
     assert!(std::fs::metadata(&spirv).unwrap().len() > 0);
-    assert!(std::fs::read_to_string(&metal).unwrap().contains("kernel void clear("));
+    assert!(
+        std::fs::read_to_string(&metal)
+            .unwrap()
+            .contains("kernel void clear(")
+    );
 }
 
 /// Emits the module and runs `spirv-val` over it. The SDK is not a build dependency, so a
@@ -491,7 +512,10 @@ fn text(words: &[u32]) -> String {
 #[test]
 fn the_spirv_offsets_are_the_rust_offsets() {
     let found = spirv_offsets(&nga::spirv::words(&[&CLEAR, &TRANSFORM]));
-    assert!(!found.is_empty(), "no member offsets, so this would pass vacuously");
+    assert!(
+        !found.is_empty(),
+        "no member offsets, so this would pass vacuously"
+    );
 
     let mut checked = 0;
     for abi in [<Scene as DeviceAbi>::ABI, <Transform as DeviceAbi>::ABI] {
@@ -514,7 +538,10 @@ fn the_spirv_offsets_are_the_rust_offsets() {
 #[test]
 fn the_msl_pads_to_the_same_offsets() {
     let source = nga::msl::module(&[&CLEAR, &TRANSFORM]);
-    let body = source.split_once("struct Transform {").expect("no Transform struct").1;
+    let body = source
+        .split_once("struct Transform {")
+        .expect("no Transform struct")
+        .1;
     let body = &body[..body.find("};").unwrap()];
 
     assert!(
@@ -525,8 +552,11 @@ fn the_msl_pads_to_the_same_offsets() {
     let scene = body.find("scene").unwrap();
     let pad = body.find("_nga_pad0").unwrap();
     let mvp = body.find("mvp").unwrap();
-    assert!(scene < pad && pad < mvp, "the padding is in the wrong place:
-{body}");
+    assert!(
+        scene < pad && pad < mvp,
+        "the padding is in the wrong place:
+{body}"
+    );
 
     assert_eq!(offset_of!(Transform, mvp), 16);
     assert_eq!(size_of::<Transform>(), 80);
@@ -560,5 +590,8 @@ fn spirv_handle_offset() {
     assert_eq!(words[0], 0x0723_0203);
     // OpIAdd (opcode 128) must be emitted for the handle offset
     let has_op_iadd = words.iter().any(|&w| (w & 0xffff) == 128);
-    assert!(has_op_iadd, "SPIR-V should contain OpIAdd for handle offset");
+    assert!(
+        has_op_iadd,
+        "SPIR-V should contain OpIAdd for handle offset"
+    );
 }

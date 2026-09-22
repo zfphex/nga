@@ -114,11 +114,7 @@ mod gpu_driven {
     }
 
     #[vertex]
-    fn vertex(
-        root: Gpu<DrawData>,
-        #[vertex_id] vid: u32,
-        #[base_instance] base: u32,
-    ) -> VertexOut {
+    fn vertex(root: Gpu<DrawData>, #[vertex_id] vid: u32, #[base_instance] base: u32) -> VertexOut {
         let inst = root.instances[base];
         let a = inst.angle + vid as f32 * 2.0943951;
         let p = inst.center + f32x2::new(a.cos(), a.sin()) * inst.scale;
@@ -231,45 +227,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut frame = ctx.begin_frame().unwrap();
             let mut rec = frame.recorder();
 
-            let sim_root = rec
-                .arena()
-                .alloc(SimData {
-                    instances: instances.gpu_rw(),
-                    time,
-                    count: COUNT as u32,
-                })
-                .unwrap()
-                .gpu;
-            let encode_root = rec
-                .arena()
-                .alloc(EncodeData {
-                    instances: instances.gpu(),
-                    draws: draws.gpu_rw(),
-                    range: range.gpu_rw(),
-                    commands: commands.handle(),
-                    cull_radius,
-                    total: COUNT as u32,
-                })
-                .unwrap()
-                .gpu;
-            let draw_root = rec
-                .arena()
-                .alloc(DrawData {
-                    instances: instances.gpu(),
-                    mvp,
-                })
-                .unwrap()
-                .gpu;
-            let boundary_root = rec
-                .arena()
-                .alloc(BoundaryData {
-                    mvp,
-                    radius: cull_radius,
-                    segments: SEGMENTS,
-                })
-                .unwrap()
-                .gpu;
-
             {
                 let compute = rec.compute();
                 // Clear `{ location, length }`. Only compact slots below the new length execute,
@@ -277,12 +234,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
                 compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::BUFFERS);
 
-                compute.pipeline(simulate);
-                compute.dispatch(sim_root, COUNT, GROUP);
+                compute
+                    .dispatch(
+                        simulate,
+                        SimData {
+                            instances: instances.gpu_rw(),
+                            time,
+                            count: COUNT as u32,
+                        },
+                        Dispatch::x(COUNT, GROUP),
+                    )
+                    .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
 
-                compute.pipeline(encode);
-                compute.dispatch(encode_root, COUNT, GROUP);
+                compute
+                    .dispatch(
+                        encode,
+                        EncodeData {
+                            instances: instances.gpu(),
+                            draws: draws.gpu_rw(),
+                            range: range.gpu_rw(),
+                            commands: commands.handle(),
+                            cull_radius,
+                            total: COUNT as u32,
+                        },
+                        Dispatch::x(COUNT, GROUP),
+                    )
+                    .unwrap();
                 compute.barrier(
                     Stage::COMPUTE,
                     Stage::INDIRECT | Stage::VERTEX,
@@ -293,11 +271,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
                 let raster = rec.raster(&pass, surface.width(), surface.height());
-                raster.pipeline(draw);
-                raster.draw_indirect_count(draw_root, &commands, &draws, &range);
+                raster
+                    .draw_indirect_count(
+                        draw,
+                        DrawData {
+                            instances: instances.gpu(),
+                            mvp,
+                        },
+                        &commands,
+                        &draws,
+                        &range,
+                    )
+                    .unwrap();
 
-                raster.pipeline(boundary);
-                raster.draw(boundary_root, 0, SEGMENTS * 2 + 2);
+                raster
+                    .draw(
+                        boundary,
+                        BoundaryData {
+                            mvp,
+                            radius: cull_radius,
+                            segments: SEGMENTS,
+                        },
+                        0,
+                        SEGMENTS * 2 + 2,
+                    )
+                    .unwrap();
             }
 
             drop(rec);

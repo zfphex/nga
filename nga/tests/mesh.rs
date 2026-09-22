@@ -145,28 +145,23 @@ fn a_mesh_pipeline_emits_a_triangle() -> Result<(), Box<dyn std::error::Error>> 
     let dest: GpuRw<[u8]> = pixels.gpu.as_rw();
 
     let mut frame = ctx.begin_frame()?;
-    let data = frame
-        .arena(0)
-        .alloc(Data {
-            vertices,
-            mvp: f32x4x4([
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ]),
-        })
-        .unwrap();
-    let root = data.gpu;
+    let data = Data {
+        vertices,
+        mvp: f32x4x4([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]),
+    };
 
     let mut recorder = frame.recorder();
     {
         let pass = Pass::new().color_texture(0, &target, Some([0.0, 0.0, 0.0, 1.0]));
         let raster = recorder.raster(&pass, SIZE, SIZE);
-        raster.pipeline(pipeline);
         // One mesh threadgroup of three threads, one thread per vertex. No object stage, so the
         // object threadgroup size is unused.
-        raster.draw_mesh(root, [1, 1, 1], [1, 1, 1], [3, 1, 1]);
+        raster.draw_mesh(pipeline, data, [1, 1, 1], [1, 1, 1], [3, 1, 1])?;
     }
     {
         let compute = recorder.compute();

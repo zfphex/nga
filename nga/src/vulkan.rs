@@ -16,11 +16,12 @@
 //! a newtype declared here with private fields, so `pub use backend::*` cannot leak one.
 
 use crate::{
-    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader, Constant,
-    Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle,
-    RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace,
-    StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
+    AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
+    Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
+    Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf,
+    Topology, Usage, VertexShader, Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
@@ -1053,7 +1054,7 @@ impl Device {
             pipelines: Vec::new(),
         })
     }
-    
+
     pub fn surface(&self, hwnd: isize, width: u32, height: u32) -> Result<Surface, Error> {
         let surface = unsafe {
             self.win32_surface_ext.create_win32_surface(
@@ -1075,8 +1076,7 @@ impl Device {
         }
 
         let formats = unsafe {
-            self
-                .surface_ext
+            self.surface_ext
                 .get_physical_device_surface_formats(self.physical, surface)?
         };
         let format = formats
@@ -2777,11 +2777,7 @@ impl Shaders {
 
     // }
 
-    pub fn raster(
-        &mut self,
-        vertex: VertexShader,
-        fragment: FragmentShader,
-    ) -> RasterBuilder<'_> {
+    pub fn raster(&mut self, vertex: VertexShader, fragment: FragmentShader) -> RasterBuilder<'_> {
         RasterBuilder {
             shaders: self,
             vertex: vertex.0.name,
@@ -3364,11 +3360,19 @@ impl Pass {
     }
 }
 
+fn alloc_root<T>(arena: &Arena, value: T) -> Result<Gpu<T>, Error> {
+    arena
+        .alloc(value)
+        .map(|boxed| boxed.gpu)
+        .ok_or_else(|| Error::new("frame arena is full"))
+}
+
 pub struct Raster<'a> {
     pub(crate) device: &'a ash::Device,
     pub(crate) commands: &'a Extensions,
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) layout: vk::PipelineLayout,
+    pub(crate) arena: &'a Arena,
     pub(crate) push: Cell<Push>,
     pub(crate) occlusion: Option<(vk::QueryPool, u32)>,
     /// The slot `vkCmdBeginQuery` is open on, so `occlusion_off` and the pass end can close it.
@@ -3382,6 +3386,7 @@ impl<'a> Raster<'a> {
         commands: &'a Extensions,
         command_buffer: vk::CommandBuffer,
         layout: vk::PipelineLayout,
+        arena: &'a Arena,
         pass: &Pass,
         width: u32,
         height: u32,
@@ -3573,6 +3578,7 @@ impl<'a> Raster<'a> {
             commands,
             command_buffer,
             layout,
+            arena,
             push: Cell::new(Push::default()),
             occlusion: pass.occlusion,
             query: Cell::new(None),
@@ -3600,6 +3606,12 @@ impl<'a> Raster<'a> {
                 pipeline.0,
             )
         };
+    }
+
+    fn prepare<T>(&self, pipeline: Pipeline, root: T) -> Result<(), Error> {
+        self.pipeline(pipeline);
+        self.bind(alloc_root(self.arena, root)?);
+        Ok(())
     }
 
     pub fn heap(&self, heap: &ResourceHeap) {
@@ -3711,16 +3723,18 @@ impl<'a> Raster<'a> {
 
     pub fn draw_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         count: u32,
-    ) {
+    ) -> Result<(), Error> {
         self.bind_indices::<I>(indices);
-        self.bind(root);
+        self.prepare(pipeline, root)?;
         unsafe {
             self.device
                 .cmd_draw_indexed(self.command_buffer, count, 1, 0, 0, 0)
         };
+        Ok(())
     }
 
     /// `vkCmdBindIndexBuffer2` takes the range explicitly, so an out-of-bounds index faults
@@ -3741,8 +3755,13 @@ impl<'a> Raster<'a> {
     /// pointer. This is the CPU-side counterpart to `draw_indirect_count`: the ranges are known
     /// at record time rather than computed on the GPU, but the per-draw cost is a `[u32; 2]`
     /// write instead of a command-buffer round trip. `Device::max_multi_draw` bounds `draws`.
-    pub fn draw_multi<T>(&self, root: Gpu<T>, draws: &[MultiDraw]) {
-        self.bind(root);
+    pub fn draw_multi<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        draws: &[MultiDraw],
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         unsafe {
             (self.commands.multi_draw.fp().cmd_draw_multi_ext)(
                 self.command_buffer,
@@ -3753,16 +3772,18 @@ impl<'a> Raster<'a> {
                 size_of::<vk::MultiDrawInfoEXT>() as u32,
             )
         };
+        Ok(())
     }
 
     pub fn draw_multi_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         draws: &[MultiDrawIndexed],
-    ) {
+    ) -> Result<(), Error> {
         self.bind_indices::<I>(indices);
-        self.bind(root);
+        self.prepare(pipeline, root)?;
         unsafe {
             (self.commands.multi_draw.fp().cmd_draw_multi_indexed_ext)(
                 self.command_buffer,
@@ -3774,6 +3795,7 @@ impl<'a> Raster<'a> {
                 std::ptr::null(),
             )
         };
+        Ok(())
     }
 
     fn bind<T>(&self, root: Gpu<T>) {
@@ -3798,14 +3820,15 @@ impl<'a> Raster<'a> {
     /// share the bound index buffer, so the caller has to have put their indices in one.
     pub fn draw_indexed_indirect<I: IndexFormat, T>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         indices: &HeapBuffer,
         arena: &Arena,
         draws: Gpu<[DrawIndexed]>,
         count: u32,
-    ) {
+    ) -> Result<(), Error> {
         self.bind_indices::<I>(indices);
-        self.bind(root);
+        self.prepare(pipeline, root)?;
         unsafe {
             self.device.cmd_draw_indexed_indirect(
                 self.command_buffer,
@@ -3815,6 +3838,7 @@ impl<'a> Raster<'a> {
                 size_of::<DrawIndexed>() as u32,
             )
         };
+        Ok(())
     }
 
     /// Metal replays an indirect command buffer the GPU filled in, with each encoded draw
@@ -3824,13 +3848,14 @@ impl<'a> Raster<'a> {
     /// here through `first_instance`.
     pub fn draw_indirect_count<T>(
         &self,
-        root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         commands: &IndirectCommands,
         draws: &HeapBuffer,
         range: &HeapBuffer,
-    ) {
+    ) -> Result<(), Error> {
         debug_assert!(range.len >= size_of::<[u32; 2]>());
-        self.bind(root);
+        self.prepare(pipeline, root)?;
         unsafe {
             self.device.cmd_draw_indirect_count(
                 self.command_buffer,
@@ -3842,29 +3867,41 @@ impl<'a> Raster<'a> {
                 size_of::<[u32; 4]>() as u32,
             )
         };
+        Ok(())
     }
 
     /// See `metal.rs`. There is no mesh pipeline to draw with here, so this is unreachable.
     /// `Shaders::mesh` failed long before a caller got this far.
     pub fn draw_mesh<T>(
         &self,
-        _root: Gpu<T>,
+        pipeline: Pipeline,
+        root: T,
         _groups: [u32; 3],
         _object_group: [u32; 3],
         _mesh_group: [u32; 3],
-    ) {
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         debug_assert!(
             false,
             "Feature::MeshShaders is not supported on this backend"
         );
+        Ok(())
     }
 
     /// Apple-only, and unreachable for the same reason `draw_mesh` is.
-    pub fn dispatch_tile<T>(&self, _root: Gpu<T>, _width: u32, _height: u32) {
+    pub fn dispatch_tile<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        _width: u32,
+        _height: u32,
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         debug_assert!(
             false,
             "Feature::TileShaders is not supported on this backend"
         );
+        Ok(())
     }
 
     /// Apple-only. An [`IndirectCommands`] cannot be created here, so nothing can reach this.
@@ -3916,12 +3953,20 @@ impl<'a> Raster<'a> {
         };
     }
 
-    pub fn draw<T>(&self, root: Gpu<T>, start: u32, count: u32) {
-        self.bind(root);
+    /// Copies `root` into this recorder's frame arena and draws `count` vertices from `start`.
+    pub fn draw<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        start: u32,
+        count: u32,
+    ) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
         unsafe {
             self.device
                 .cmd_draw(self.command_buffer, count, 1, start, 0)
         };
+        Ok(())
     }
 }
 
@@ -3939,6 +3984,7 @@ pub struct Compute<'a> {
     pub(crate) device: &'a ash::Device,
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) layout: vk::PipelineLayout,
+    pub(crate) arena: &'a Arena,
     pub(crate) push: Cell<Push>,
 }
 
@@ -3947,11 +3993,13 @@ impl<'a> Compute<'a> {
         device: &'a ash::Device,
         command_buffer: vk::CommandBuffer,
         layout: vk::PipelineLayout,
+        arena: &'a Arena,
     ) -> Self {
         Self {
             device,
             command_buffer,
             layout,
+            arena,
             push: Cell::new(Push::default()),
         }
     }
@@ -3966,50 +4014,51 @@ impl<'a> Compute<'a> {
         };
     }
 
+    fn bind<T>(&self, root: Gpu<T>) {
+        let mut push = self.push.get();
+        push.root = root.0.get();
+        self.push.set(push);
+        unsafe {
+            self.device.cmd_push_constants(
+                self.command_buffer,
+                self.layout,
+                vk::ShaderStageFlags::ALL,
+                0,
+                std::slice::from_raw_parts(&push as *const Push as *const u8, PUSH_SIZE as usize),
+            )
+        };
+    }
+
+    fn prepare<T>(&self, pipeline: Pipeline, root: T) -> Result<(), Error> {
+        self.pipeline(pipeline);
+        self.bind(alloc_root(self.arena, root)?);
+        Ok(())
+    }
+
     pub fn heap(&self, heap: &ResourceHeap) {
         heap.bind(self.command_buffer, self.layout, false);
     }
 
-    pub fn dispatch<T>(&self, root: Gpu<T>, threads: usize, group: usize) {
-        let mut push = self.push.get();
-        push.root = root.0.get();
-        self.push.set(push);
+    /// Copies `root` into this recorder's frame arena and launches `pipeline` over `launch`.
+    ///
+    /// [`Dispatch::x`] and [`Dispatch::xy`] build `launch`. The error is a full arena.
+    pub fn dispatch<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        launch: DispatchThreads,
+    ) -> Result<(), Error> {
+        let (threads, group) = launch.grid();
+        self.prepare(pipeline, root)?;
         unsafe {
-            self.device.cmd_push_constants(
-                self.command_buffer,
-                self.layout,
-                vk::ShaderStageFlags::ALL,
-                0,
-                std::slice::from_raw_parts(&push as *const Push as *const u8, PUSH_SIZE as usize),
-            );
             self.device.cmd_dispatch(
                 self.command_buffer,
-                ((threads + group - 1) / group) as u32,
-                1,
-                1,
-            );
-        }
-    }
-
-    pub fn dispatch_2d<T>(&self, root: Gpu<T>, width: u32, height: u32, group: u32) {
-        let mut push = self.push.get();
-        push.root = root.0.get();
-        self.push.set(push);
-        unsafe {
-            self.device.cmd_push_constants(
-                self.command_buffer,
-                self.layout,
-                vk::ShaderStageFlags::ALL,
-                0,
-                std::slice::from_raw_parts(&push as *const Push as *const u8, PUSH_SIZE as usize),
-            );
-            self.device.cmd_dispatch(
-                self.command_buffer,
-                width.div_ceil(group),
-                height.div_ceil(group),
-                1,
-            );
-        }
+                threads[0].div_ceil(group[0]),
+                threads[1].div_ceil(group[1]),
+                threads[2].div_ceil(group[2]),
+            )
+        };
+        Ok(())
     }
 
     /// The whole barrier, with no resource list, exactly the design the post argues for, and
@@ -4529,9 +4578,11 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-    /// This recorder's slice of the frame arena, where root data for the commands being
-    /// recorded belongs. Borrowed from the context, not from `self`, so allocating does not
-    /// prevent recording.
+    /// This recorder's frame arena.
+    ///
+    /// Draws and dispatches copy their root structs here. What a caller still allocates is
+    /// bytes those calls do not own: indirect arguments, scratch, readback. Borrowed from the
+    /// context, not from `self`, so allocating does not prevent recording.
     pub fn arena(&self) -> &'a Arena {
         self.arena
     }
@@ -4539,7 +4590,7 @@ impl<'a> Recorder<'a> {
 
 impl Recorder<'_> {
     pub fn compute(&mut self) -> Compute<'_> {
-        Compute::new(self.device, self.command_buffer, self.layout)
+        Compute::new(self.device, self.command_buffer, self.layout, self.arena)
     }
 
     pub fn raster(&mut self, pass: &Pass, width: u32, height: u32) -> Raster<'_> {
@@ -4548,6 +4599,7 @@ impl Recorder<'_> {
             self.commands,
             self.command_buffer,
             self.layout,
+            self.arena,
             pass,
             width,
             height,

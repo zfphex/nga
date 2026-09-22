@@ -107,7 +107,9 @@ fn inherited_counted_draw_is_metal_work_and_a_vulkan_no_op() {
     let words = spirv::words(&[&counted::ENCODE]);
     let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     assert!(
-        bytes.windows(b"encode\0".len()).any(|name| name == b"encode\0"),
+        bytes
+            .windows(b"encode\0".len())
+            .any(|name| name == b"encode\0"),
         "the Vulkan entry point was dropped instead of treating command_draw as a no-op"
     );
 }
@@ -176,25 +178,22 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
     let dest: GpuRw<[u8]> = pixels.gpu.as_rw();
 
     let mut frame = ctx.begin_frame()?;
-    let data = frame
-        .arena(0)
-        .alloc(EncodeData {
-            vertices,
-            draws: draw_block,
-            commands: commands.handle(),
-            pipeline: drawn.handle(),
-            count: DRAWS,
-        })
-        .unwrap();
-    let root = data.gpu;
-
     let mut recorder = frame.recorder();
     {
         let compute = recorder.compute();
         // An unreset slot replays whatever it last held, so clearing comes first.
         compute.reset(&commands, commands.all());
-        compute.pipeline(encode);
-        compute.dispatch(root, DRAWS as usize, 64);
+        compute.dispatch(
+            encode,
+            EncodeData {
+                vertices,
+                draws: draw_block,
+                commands: commands.handle(),
+                pipeline: drawn.handle(),
+                count: DRAWS,
+            },
+            Dispatch::x(DRAWS as usize, 64),
+        )?;
         compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::DRAW_ARGUMENTS);
     }
     {

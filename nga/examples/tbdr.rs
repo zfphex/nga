@@ -188,19 +188,6 @@ mod tiles {
                 let mut frame = ctx.begin_frame().unwrap();
                 let mut rec = frame.recorder();
 
-                let draw_root = rec.arena().alloc(Data { vertices, mvp }).unwrap().gpu;
-                let vignette_root = rec
-                    .arena()
-                    .alloc(Vignette {
-                        size: f32x2([surface.width() as f32, surface.height() as f32]),
-                        tile: f32x2([TILE as f32, TILE as f32]),
-                        // Swings so the effect is visibly the tile pass and not the geometry.
-                        strength: 0.9 + 0.6 * (time * 0.7).sin(),
-                        levels: 6.0,
-                    })
-                    .unwrap()
-                    .gpu;
-
                 {
                     // The tile size and the imageblock layout belong to the *pass*: they decide
                     // how the hardware splits the render target, so they cannot change per draw.
@@ -208,13 +195,24 @@ mod tiles {
                         .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
                         .tile(TILE, TILE, IMAGEBLOCK_BYTES);
                     let raster = rec.raster(&pass, surface.width(), surface.height());
-                    raster.pipeline(draw);
-                    raster.draw(draw_root, 0, count);
+                    raster.draw(draw, Data { vertices, mvp }, 0, count).unwrap();
 
                     // Same encoder, same tile memory. On any other backend this would be a
                     // second pass over a stored texture.
-                    raster.pipeline(vignette);
-                    raster.dispatch_tile(vignette_root, TILE, TILE);
+                    raster
+                        .dispatch_tile(
+                            vignette,
+                            Vignette {
+                                size: f32x2([surface.width() as f32, surface.height() as f32]),
+                                tile: f32x2([TILE as f32, TILE as f32]),
+                                // Swings so the effect is visibly the tile pass and not the geometry.
+                                strength: 0.9 + 0.6 * (time * 0.7).sin(),
+                                levels: 6.0,
+                            },
+                            TILE,
+                            TILE,
+                        )
+                        .unwrap();
                 }
 
                 drop(rec);

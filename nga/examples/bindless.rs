@@ -243,35 +243,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut frame = ctx.begin_frame().unwrap();
             let mut rec = frame.recorder();
 
-            let paint_root = rec
-                .arena()
-                .alloc(Paint {
-                    target: paint_target,
-                    size: TEX,
-                    time,
-                })
-                .unwrap()
-                .gpu;
-            let data_root = rec
-                .arena()
-                .alloc(Data {
-                    vertices: vertex_buffer.gpu(),
-                    materials: material_buffer.gpu(),
-                    mvp: f32x4x4([
-                        [aspect.min(1.0), 0.0, 0.0, 0.0],
-                        [0.0, (1.0 / aspect).min(1.0), 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ]),
-                })
-                .unwrap()
-                .gpu;
-
             {
                 let compute = rec.compute();
                 compute.heap(&textures);
-                compute.pipeline(paint_pipeline);
-                compute.dispatch_2d(paint_root, TEX, TEX, 8);
+                compute
+                    .dispatch(
+                        paint_pipeline,
+                        Paint {
+                            target: paint_target,
+                            size: TEX,
+                            time,
+                        },
+                        Dispatch::xy(TEX, TEX, 8),
+                    )
+                    .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::TEXTURES);
             }
 
@@ -279,8 +264,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
                 let raster = rec.raster(&pass, surface.width(), surface.height());
                 raster.heap(&textures);
-                raster.pipeline(pipeline);
-                raster.draw(data_root, 0, QUADS * 6);
+                raster
+                    .draw(
+                        pipeline,
+                        Data {
+                            vertices: vertex_buffer.gpu(),
+                            materials: material_buffer.gpu(),
+                            mvp: f32x4x4([
+                                [aspect.min(1.0), 0.0, 0.0, 0.0],
+                                [0.0, (1.0 / aspect).min(1.0), 0.0, 0.0],
+                                [0.0, 0.0, 1.0, 0.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ]),
+                        },
+                        0,
+                        QUADS * 6,
+                    )
+                    .unwrap();
             }
 
             drop(rec);

@@ -98,41 +98,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut frame = ctx.begin_frame().unwrap();
             let mut rec = frame.recorder();
-            let sim_root = rec
-                .arena()
-                .alloc(SimData {
-                    instances: instances_rw,
-                    time,
-                    count: COUNT as u32,
-                })
-                .unwrap()
-                .gpu;
-            let build_root = rec
-                .arena()
-                .alloc(BuildData {
-                    instances: instances_ro,
-                    vertices: vertices_rw,
-                    count: COUNT as u32,
-                    pad: 0,
-                })
-                .unwrap()
-                .gpu;
-            let draw_root = rec
-                .arena()
-                .alloc(DrawData {
-                    vertices: vertices_ro,
-                    mvp,
-                })
-                .unwrap()
-                .gpu;
 
             {
                 let compute = rec.compute();
-                compute.pipeline(simulate);
-                compute.dispatch(sim_root, COUNT, GROUP);
+                compute
+                    .dispatch(
+                        simulate,
+                        SimData {
+                            instances: instances_rw,
+                            time,
+                            count: COUNT as u32,
+                        },
+                        Dispatch::x(COUNT, GROUP),
+                    )
+                    .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
-                compute.pipeline(build);
-                compute.dispatch(build_root, COUNT, GROUP);
+                compute
+                    .dispatch(
+                        build,
+                        BuildData {
+                            instances: instances_ro,
+                            vertices: vertices_rw,
+                            count: COUNT as u32,
+                            pad: 0,
+                        },
+                        Dispatch::x(COUNT, GROUP),
+                    )
+                    .unwrap();
                 // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
                 // cross-encoder fence inside one command buffer: a barrier on the queue is the
                 // whole mechanism, so the compute -> vertex handoff is one more `barrier`.
@@ -144,9 +136,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .color(0, &drawable, Some([0.03, 0.03, 0.05, 1.0]))
                     .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
                 let raster = rec.raster(&pass, surface.width(), surface.height());
-                raster.pipeline(draw);
                 raster.depth(&depth_write);
-                raster.draw(draw_root, 0, (COUNT * 3) as u32);
+                raster
+                    .draw(
+                        draw,
+                        DrawData {
+                            vertices: vertices_ro,
+                            mvp,
+                        },
+                        0,
+                        (COUNT * 3) as u32,
+                    )
+                    .unwrap();
             }
 
             drop(rec);

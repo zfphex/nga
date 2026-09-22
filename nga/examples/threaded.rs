@@ -87,41 +87,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         + ((slot + index * SLICE) * 3 * size_of::<Vertex>()) as u64;
 
                     scope.spawn(move || {
-                        let sim_root = rec
-                            .arena()
-                            .alloc(SimData {
-                                instances: unsafe { GpuRw::new(instance_base) },
-                                time: time + index as f32 * 0.35,
-                                count: SLICE as u32,
-                            })
-                            .unwrap()
-                            .gpu;
-                        let build_root = rec
-                            .arena()
-                            .alloc(BuildData {
-                                instances: unsafe { Gpu::new(instance_base) },
-                                vertices: unsafe { GpuRw::new(vertex_base) },
-                                count: SLICE as u32,
-                                pad: 0,
-                            })
-                            .unwrap()
-                            .gpu;
-                        let draw_root = rec
-                            .arena()
-                            .alloc(DrawData {
-                                vertices: unsafe { Gpu::new(vertex_base) },
-                                mvp,
-                            })
-                            .unwrap()
-                            .gpu;
-
                         {
                             let compute = rec.compute();
-                            compute.pipeline(simulate);
-                            compute.dispatch(sim_root, SLICE, GROUP);
+                            compute
+                                .dispatch(
+                                    simulate,
+                                    SimData {
+                                        instances: unsafe { GpuRw::new(instance_base) },
+                                        time: time + index as f32 * 0.35,
+                                        count: SLICE as u32,
+                                    },
+                                    Dispatch::x(SLICE, GROUP),
+                                )
+                                .unwrap();
                             compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
-                            compute.pipeline(build);
-                            compute.dispatch(build_root, SLICE, GROUP);
+                            compute
+                                .dispatch(
+                                    build,
+                                    BuildData {
+                                        instances: unsafe { Gpu::new(instance_base) },
+                                        vertices: unsafe { GpuRw::new(vertex_base) },
+                                        count: SLICE as u32,
+                                        pad: 0,
+                                    },
+                                    Dispatch::x(SLICE, GROUP),
+                                )
+                                .unwrap();
                             compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
                         }
 
@@ -134,8 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let pass = Pass::new().color(0, drawable, clear);
                         let raster = rec.raster(&pass, sw, sh);
-                        raster.pipeline(draw);
-                        raster.draw(draw_root, 0, (SLICE * 3) as u32);
+                        raster
+                            .draw(
+                                draw,
+                                DrawData {
+                                    vertices: unsafe { Gpu::new(vertex_base) },
+                                    mvp,
+                                },
+                                0,
+                                (SLICE * 3) as u32,
+                            )
+                            .unwrap();
                     });
                 }
             });

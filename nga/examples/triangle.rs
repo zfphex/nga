@@ -111,26 +111,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut frame = ctx.begin_frame().unwrap();
             let (sin, cos) = angle.sin_cos();
             let aspect = surface.height() as f32 / surface.width() as f32;
-            let data = frame
-                .arena(0)
-                .alloc(Data {
-                    vertices,
-                    mvp: f32x4x4([
-                        [cos * aspect, sin, 0.0, 0.0],
-                        [-sin * aspect, cos, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ]),
-                })
-                .unwrap();
-            let root = data.gpu;
 
             let mut recorder = frame.recorder();
             {
                 let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
                 let raster = recorder.raster(&pass, surface.width(), surface.height());
-                raster.pipeline(pipeline);
-                raster.draw(root, 0, 3);
+                raster
+                    .draw(
+                        pipeline,
+                        Data {
+                            vertices,
+                            mvp: f32x4x4([
+                                [cos * aspect, sin, 0.0, 0.0],
+                                [-sin * aspect, cos, 0.0, 0.0],
+                                [0.0, 0.0, 1.0, 0.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ]),
+                        },
+                        0,
+                        3,
+                    )
+                    .unwrap();
             }
             drop(recorder);
             frame.submit(Some(&drawable)).unwrap();
