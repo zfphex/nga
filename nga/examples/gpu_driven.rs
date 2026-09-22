@@ -1,8 +1,6 @@
+use gpu_driven::{BoundaryData, DrawArgs, DrawData, EncodeData, ExecutionRange, Instance, SimData};
 use minwin::*;
 use nga::*;
-use gpu_driven::{
-    BoundaryData, DrawArgs, DrawData, EncodeData, ExecutionRange, Instance, SimData,
-};
 
 /// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
@@ -172,11 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
-    #[cfg(not(target_vendor = "apple"))]
-    let handle = window.hwnd;
-    #[cfg(target_vendor = "apple")]
-    let handle = window.ns_view as isize;
-    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
+    let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
 
     let mut shaders = Shaders::new(&device, &nga::compile(gpu_driven::ENTRIES))?;
     let simulate = shaders.compute(gpu_driven::SIMULATE.name, None)?;

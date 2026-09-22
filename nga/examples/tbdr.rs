@@ -111,9 +111,7 @@ mod tiles {
         }
 
         let (mut width, mut height) = window.scaled_size();
-        // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
-        let handle = window.ns_view as isize;
-        let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
+        let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
 
         let source = compile(shader::ENTRIES);
         let mut shaders = Shaders::new(&device, &source)?;

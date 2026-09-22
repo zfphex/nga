@@ -55,11 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut width, mut height) = window.scaled_size();
     // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
-    #[cfg(not(target_vendor = "apple"))]
-    let handle = window.hwnd;
-    #[cfg(target_vendor = "apple")]
-    let handle = window.ns_view as isize;
-    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
+    let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
 
     let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
@@ -118,7 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut frame = ctx.begin_frame().unwrap();
             let (sin, cos) = angle.sin_cos();
             let aspect = surface.height() as f32 / surface.width() as f32;
-            let data = frame.arena(0)
+            let data = frame
+                .arena(0)
                 .alloc(Data {
                     vertices,
                     mvp: f32x4x4([

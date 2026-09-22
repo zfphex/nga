@@ -1,6 +1,6 @@
+use bindless::{Data, Material, Paint, Vertex};
 use minwin::*;
 use nga::*;
-use bindless::{Data, Material, Paint, Vertex};
 
 /// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
@@ -91,15 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let device = Device::new(cfg!(debug_assertions))?;
     eprintln!("device: {}", device.name());
-    eprintln!("this device holds up to {} descriptors", device.max_resources());
+    eprintln!(
+        "this device holds up to {} descriptors",
+        device.max_resources()
+    );
 
     let (mut width, mut height) = window.scaled_size();
-    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
-    #[cfg(not(target_vendor = "apple"))]
-    let handle = window.hwnd;
-    #[cfg(target_vendor = "apple")]
-    let handle = window.ns_view as isize;
-    let mut surface = Surface::new(&device, handle, width as u32, height as u32)?;
+    let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
 
     let mut shaders = Shaders::new(&device, &nga::compile(bindless::ENTRIES))?;
     let pipeline = shaders.raster(&RasterDesc::new(
