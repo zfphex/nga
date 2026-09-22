@@ -23,10 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
- let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
-
-    let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+    let mut shaders = device.shaders(sync::ENTRIES)?;
     let simulate = shaders.compute(sync::SIMULATE.name, None)?;
     let build = shaders.compute(sync::BUILD_VERTICES.name, None)?;
     let draw = shaders.raster(&RasterDesc::new(
@@ -84,10 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::scope(|scope| {
                 for (index, mut rec) in recorders.into_iter().enumerate() {
                     let (simulate, build, draw, drawable) = (simulate, build, draw, &drawable);
-                    let instance_base =
-                        instances.address() + ((slot + index * SLICE) * size_of::<Instance>()) as u64;
-                    let vertex_base =
-                        vertices.address() + ((slot + index * SLICE) * 3 * size_of::<Vertex>()) as u64;
+                    let instance_base = instances.address()
+                        + ((slot + index * SLICE) * size_of::<Instance>()) as u64;
+                    let vertex_base = vertices.address()
+                        + ((slot + index * SLICE) * 3 * size_of::<Vertex>()) as u64;
 
                     scope.spawn(move || {
                         let sim_root = rec

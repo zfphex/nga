@@ -247,7 +247,7 @@ mod commands {
         }
 
         let (mut width, mut height) = window.scaled_size();
-        let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
 
         let source = compile(shader::ENTRIES);
         let mut shaders = Shaders::new(&device, &source)?;

@@ -22,10 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
- let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
-
-    let mut shaders = Shaders::new(&device, &nga::compile(sync::ENTRIES))?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+    let mut shaders = device.shaders(sync::ENTRIES)?;
     let simulate = shaders.compute(sync::SIMULATE.name, None)?;
     let build = shaders.compute(sync::BUILD_VERTICES.name, None)?;
     let draw = shaders.raster(&RasterDesc {

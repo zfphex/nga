@@ -97,9 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let (mut width, mut height) = window.scaled_size();
-    let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
-
-    let mut shaders = Shaders::new(&device, &nga::compile(bindless::ENTRIES))?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+    let mut shaders = device.shaders(bindless::ENTRIES)?;
     let pipeline = shaders.raster(&RasterDesc::new(
         bindless::VERTEX.name,
         bindless::FRAGMENT.name,

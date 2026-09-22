@@ -92,10 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
- let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
-
-    let mut shaders = Shaders::new(&device, &nga::compile(raster::ENTRIES))?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+    let mut shaders = device.shaders(raster::ENTRIES)?;
     let opaque = shaders.raster(&RasterDesc {
         depth: Some(DEPTH_FORMAT),
         constants: Some(&Options {

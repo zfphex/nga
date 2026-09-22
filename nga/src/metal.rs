@@ -1311,8 +1311,9 @@ pub struct Shaders {
 
 impl Shaders {
     /// `source` is generated MSL, as bytes, the same shape the Vulkan side takes SPIR-V in.
-    pub fn new(device: &Device, source: &[u8]) -> Result<Self, Error> {
-        let source = std::str::from_utf8(source)
+    pub fn new(device: &Device,entries: &[&'static crate::ir::GpuFn]) -> Result<Self, Error> {
+        let source = crate::msl::module(entries);
+        let source = std::str::from_utf8(source.as_bytes())
             .map_err(|_| Error::new("shader source is not valid UTF-8"))?;
         let compiler = device
             .device

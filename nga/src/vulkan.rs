@@ -386,7 +386,9 @@ fn access_in(group: Stage, hazard: Hazard, write: bool) -> vk::AccessFlags2 {
         if hazard.has(Hazard::TEXTURES) {
             flags |= match write {
                 true => vk::AccessFlags2::SHADER_STORAGE_WRITE,
-                false => vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
+                false => {
+                    vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ
+                }
             };
         }
         return flags;
@@ -508,7 +510,6 @@ pub(crate) fn index_type<I: IndexFormat>() -> vk::IndexType {
         false => vk::IndexType::UINT16,
     }
 }
-
 
 pub(crate) fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAttachmentState {
     let mask = vk::ColorComponentFlags::from_raw(target.write_mask as u32);
@@ -1017,6 +1018,90 @@ impl Device {
                     .property_flags
                     .contains(flags)
         })
+    }
+
+    pub fn shaders(&self, entries: &[&'static crate::ir::GpuFn]) -> Result<Shaders, Error> {
+        let spirv = crate::spirv::module(entries);
+        debug_assert!(
+            spirv.len() % 4 == 0,
+            "SPIR-V is not a whole number of words"
+        );
+        let words: Vec<u32> = spirv
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        let module = unsafe {
+            self.device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?
+        };
+        let ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::ALL)
+            .size(PUSH_SIZE)];
+        let layout = unsafe {
+            self.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&self.set_layouts)
+                    .push_constant_ranges(&ranges),
+                None,
+            )?
+        };
+
+        Ok(Shaders {
+            module,
+            layout,
+            device: self.device.clone(),
+            pipelines: Vec::new(),
+        })
+    }
+    
+    pub fn surface(&self, hwnd: isize, width: u32, height: u32) -> Result<Surface, Error> {
+        let surface = unsafe {
+            self.win32_surface_ext.create_win32_surface(
+                &vk::Win32SurfaceCreateInfoKHR::default()
+                    .hinstance(0)
+                    .hwnd(hwnd),
+                None,
+            )?
+        };
+        let supported = unsafe {
+            self.surface_ext.get_physical_device_surface_support(
+                self.physical,
+                self.queue_family,
+                surface,
+            )?
+        };
+        if !supported {
+            return Err(Error::new("queue family cannot present to this surface"));
+        }
+
+        let formats = unsafe {
+            self
+                .surface_ext
+                .get_physical_device_surface_formats(self.physical, surface)?
+        };
+        let format = formats
+            .iter()
+            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
+            .copied()
+            .unwrap_or(formats[0]);
+
+        let mut swapchain = Surface {
+            surface_khr: surface,
+            swapchain: vk::SwapchainKHR::null(),
+            images: Vec::new(),
+            views: Vec::new(),
+            format: format.format,
+            width,
+            height,
+            acquired: Vec::new(),
+            released: Vec::new(),
+            cursor: 0,
+            owner: self.device.clone(),
+            swapchain_ext: self.swapchain_ext.clone(),
+            surface_ext: self.surface_ext.clone(),
+        };
+        swapchain.rebuild(self, width, height)?;
+        Ok(swapchain)
     }
 }
 
@@ -2481,56 +2566,6 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(device: &Device, hwnd: isize, width: u32, height: u32) -> Result<Self, Error> {
-        let surface = unsafe {
-            device.win32_surface_ext.create_win32_surface(
-                &vk::Win32SurfaceCreateInfoKHR::default()
-                    .hinstance(0)
-                    .hwnd(hwnd),
-                None,
-            )?
-        };
-        let supported = unsafe {
-            device.surface_ext.get_physical_device_surface_support(
-                device.physical,
-                device.queue_family,
-                surface,
-            )?
-        };
-        if !supported {
-            return Err(Error::new("queue family cannot present to this surface"));
-        }
-
-        let formats = unsafe {
-            device
-                .surface_ext
-                .get_physical_device_surface_formats(device.physical, surface)?
-        };
-        let format = formats
-            .iter()
-            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
-            .copied()
-            .unwrap_or(formats[0]);
-
-        let mut swapchain = Self {
-            surface_khr: surface,
-            swapchain: vk::SwapchainKHR::null(),
-            images: Vec::new(),
-            views: Vec::new(),
-            format: format.format,
-            width,
-            height,
-            acquired: Vec::new(),
-            released: Vec::new(),
-            cursor: 0,
-            owner: device.device.clone(),
-            swapchain_ext: device.swapchain_ext.clone(),
-            surface_ext: device.surface_ext.clone(),
-        };
-        swapchain.rebuild(device, width, height)?;
-        Ok(swapchain)
-    }
-
     pub fn rebuild(&mut self, device: &Device, width: u32, height: u32) -> Result<(), Error> {
         unsafe { device.device.device_wait_idle()? };
         let caps = unsafe {
@@ -2734,38 +2769,9 @@ pub struct Shaders {
 }
 
 impl Shaders {
-    pub fn new(device: &Device, spirv: &[u8]) -> Result<Self, Error> {
-        debug_assert!(
-            spirv.len() % 4 == 0,
-            "SPIR-V is not a whole number of words"
-        );
-        let words: Vec<u32> = spirv
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
-            .collect();
-        let module = unsafe {
-            device
-                .device
-                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?
-        };
-        let ranges = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::ALL)
-            .size(PUSH_SIZE)];
-        let layout = unsafe {
-            device.device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&device.set_layouts)
-                    .push_constant_ranges(&ranges),
-                None,
-            )?
-        };
-        Ok(Self {
-            module,
-            layout,
-            device: device.device.clone(),
-            pipelines: Vec::new(),
-        })
-    }
+    // pub fn new(device: &Device, entries: &[&'static crate::ir::GpuFn]) -> Result<Self, Error> {
+
+    // }
 
     pub fn raster(&mut self, desc: &RasterDesc) -> Result<Pipeline, Error> {
         let vertex = std::ffi::CString::new(desc.vertex).unwrap();
@@ -3017,7 +3023,10 @@ impl Pass {
     }
 
     fn color_mut(&mut self, index: usize, message: &str) -> &mut Attachment {
-        assert!(index < self.color_count && self.colors[index].image != vk::Image::null(), "{message}");
+        assert!(
+            index < self.color_count && self.colors[index].image != vk::Image::null(),
+            "{message}"
+        );
         &mut self.colors[index]
     }
 
@@ -3261,10 +3270,7 @@ impl Pass {
         let old_layout = texture
             .layout
             .replace(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        let target = self.color_mut(
-            index,
-            "Pass::resolve_texture before Pass::color_texture",
-        );
+        let target = self.color_mut(index, "Pass::resolve_texture before Pass::color_texture");
         target.resolve_view = texture.attachment_view(level, layer);
         target.resolve_image = texture.image;
         target.resolve_old_layout = old_layout;
@@ -3458,8 +3464,7 @@ impl<'a> Raster<'a> {
         unsafe {
             device.cmd_pipeline_barrier2(
                 command_buffer,
-                &vk::DependencyInfo::default()
-                    .image_memory_barriers(&barriers[..barrier_count]),
+                &vk::DependencyInfo::default().image_memory_barriers(&barriers[..barrier_count]),
             )
         };
 

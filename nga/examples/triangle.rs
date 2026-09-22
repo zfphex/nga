@@ -54,10 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("device: {}", device.name());
 
     let (mut width, mut height) = window.scaled_size();
-    // The platform window handle: an `HWND` on Windows, the `NSView` on macOS.
-    let mut surface = Surface::new(&device, window.handle(), width as u32, height as u32)?;
-
-    let mut shaders = Shaders::new(&device, &nga::compile(triangle::ENTRIES))?;
+    let mut surface = device.surface(window.handle(), width as u32, height as u32)?;
+    let mut shaders = device.shaders(triangle::ENTRIES)?;
     let pipeline = shaders.raster(&RasterDesc::new(
         triangle::VERTEX.name,
         triangle::FRAGMENT.name,

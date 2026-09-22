@@ -10,24 +10,19 @@ use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
 
-#[doc(hidden)]
 pub mod ir;
-#[doc(hidden)]
 pub mod msl;
-#[doc(hidden)]
 pub mod spirv;
-#[doc(hidden)]
 pub mod tlsf;
 pub mod vector;
 
 pub use nga_gpu::{Constants, gpu_mod};
-#[doc(hidden)]
-pub use tlsf::Alloc;
-pub(crate) use tlsf::Tlsf;
+pub use tlsf::*;
 pub use vector::*;
 
 #[cfg(not(target_vendor = "apple"))]
 mod vulkan;
+
 #[cfg(not(target_vendor = "apple"))]
 use vulkan as backend;
 
@@ -37,20 +32,6 @@ mod metal;
 use metal as backend;
 
 pub use backend::*;
-
-/// Everything `Shaders::new` wants, from the shader functions that are the entry points. The
-/// two backends produce different bytes — a SPIR-V module here, MSL source there — and this is
-/// the only place that has to know which.
-///
-/// Emitting a SPIR-V module costs microseconds, so calling this at pipeline creation is not a
-/// cost worth avoiding. Metal costs a `newLibraryWithSource`, which is not; [`dump`] is the
-/// ahead-of-time half.
-pub fn compile(entries: &[&'static ir::GpuFn]) -> Vec<u8> {
-    #[cfg(not(target_vendor = "apple"))]
-    return spirv::module(entries);
-    #[cfg(target_vendor = "apple")]
-    return msl::module(entries).into_bytes();
-}
 
 /// Writes both targets to `dir` as `name.spv` and `name.metal`, and answers with the paths.
 ///
