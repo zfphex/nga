@@ -30,7 +30,7 @@ mod tiles {
 
         #[repr(C, align(16))]
         pub struct Data {
-            pub vertices: Gpu<'static, [Vertex]>,
+            pub vertices: Gpu<[Vertex]>,
             pub mvp: f32x4x4,
         }
 
@@ -52,7 +52,7 @@ mod tiles {
         }
 
         #[vertex]
-        fn tbdr_vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+        fn tbdr_vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut {
             let source = root.vertices[vid];
             VertexOut {
                 position: root.mvp.mul(f32x4::new(
@@ -72,7 +72,7 @@ mod tiles {
 
         #[tile(TileColor)]
         fn tbdr_vignette(
-            root: Gpu<'static, Vignette>,
+            root: Gpu<Vignette>,
             #[thread_id_in_group] tid: u32x3,
             #[group_id] group: u32x3,
         ) {
@@ -147,7 +147,7 @@ mod tiles {
 
         let geometry = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = geometry.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
+        let vertices: Gpu<[Vertex]> = vertices.gpu;
         let count = mesh.len() as u32;
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;

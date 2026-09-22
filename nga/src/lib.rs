@@ -4,7 +4,6 @@
 //! implement the same set of names against `ash` and `minmetal`, neither of which appears in
 //! any public signature. See the contract comment at the top of `vulkan.rs` and `metal.rs`.
 
-use std::cell::Cell;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
@@ -74,22 +73,24 @@ impl std::error::Error for Error {}
 
 // -- device pointers ---------------------------------------------------------------------
 
-/// A device address with a borrow attached. Eight bytes, `Copy`, embeddable in a struct a
-/// shader shares. Covariant, so a `Gpu<'static, T>` coerces into any shorter frame lifetime; the
-/// reverse, storing a frame-arena pointer in a persistent structure, is a compile error.
+/// A device address. Eight bytes, `Copy`, and a legal field of a struct a shader shares.
+///
+/// `Gpu<T>` names the pointee for the shader ABI. [`HeapBuffer::gpu`] returns one, and
+/// [`GpuHeap::free_buffer`] can reclaim that allocation on a later line. The host object owns
+/// the memory. [`GpuHeap::free_later`] keeps it alive until the GPU retires the frame.
 #[repr(transparent)]
 #[derive(Debug)]
-pub struct Gpu<'a, T: ?Sized>(pub(crate) NonZeroU64, PhantomData<&'a T>);
+pub struct Gpu<T: ?Sized>(pub(crate) NonZeroU64, PhantomData<fn() -> *const T>);
 
-pub(crate) fn device_ptr<'a, T: ?Sized>(address: u64) -> Gpu<'a, T> {
+pub(crate) fn device_ptr<T: ?Sized>(address: u64) -> Gpu<T> {
     unsafe { Gpu::new(address) }
 }
 
-pub(crate) fn device_ptr_mut<'a, T: ?Sized>(address: u64) -> GpuMut<'a, T> {
-    unsafe { GpuMut::new(address) }
+pub(crate) fn device_ptr_rw<T: ?Sized>(address: u64) -> GpuRw<T> {
+    unsafe { GpuRw::new(address) }
 }
 
-impl<'a, T: ?Sized> Gpu<'a, T> {
+impl<T: ?Sized> Gpu<T> {
     /// Wrap a device address.
     ///
     /// # Safety
@@ -104,42 +105,40 @@ impl<'a, T: ?Sized> Gpu<'a, T> {
         self.0.get()
     }
 
-    /// Drop the borrow. Honest for a heap allocation that outlives every frame.
-    pub fn into_static(self) -> Gpu<'static, T> {
-        Gpu(self.0, PhantomData)
-    }
-
-    pub fn as_mut(self) -> GpuMut<'a, T> {
-        GpuMut(self.0, PhantomData)
+    /// The same address, marked for GPU writes. See [`GpuRw`].
+    pub fn as_rw(self) -> GpuRw<T> {
+        GpuRw(self.0, PhantomData)
     }
 }
 
-impl<'a, T> Gpu<'a, [T]> {
-    pub fn elements(self) -> Gpu<'a, T> {
+impl<T> Gpu<[T]> {
+    pub fn elements(self) -> Gpu<T> {
         Gpu(self.0, PhantomData)
     }
 }
 
-impl<T: ?Sized> Clone for Gpu<'_, T> {
+impl<T: ?Sized> Clone for Gpu<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: ?Sized> Copy for Gpu<'_, T> {}
+impl<T: ?Sized> Copy for Gpu<T> {}
 
-/// The invariant counterpart of [`Gpu`]. `Cell` in the marker is what kills the covariance:
-/// a shader writing through this pointer must not be handed a longer-lived alias.
+/// The same device address as [`Gpu`], for a shader that writes through it.
+///
+/// The value is `Copy`. Two `GpuRw<T>` can name one allocation, including from different
+/// threads. Barriers on the command recorder order those writes.
 #[repr(transparent)]
 #[derive(Debug)]
-pub struct GpuMut<'a, T: ?Sized>(pub(crate) NonZeroU64, PhantomData<&'a Cell<T>>);
+pub struct GpuRw<T: ?Sized>(pub(crate) NonZeroU64, PhantomData<fn(*mut T)>);
 
-impl<T: ?Sized> GpuMut<'_, T> {
+impl<T: ?Sized> GpuRw<T> {
     /// Wrap a device address for shader writes.
     ///
     /// # Safety
     ///
-    /// Same contract as [`Gpu::new`]. [`DerefMut`] panics on the host, so a `Copy` `GpuMut`
+    /// Same contract as [`Gpu::new`]. [`DerefMut`] panics on the host, so copying a `GpuRw`
     /// cannot produce aliased `&mut T` values.
     pub unsafe fn new(address: u64) -> Self {
         Self(NonZeroU64::new(address).unwrap(), PhantomData)
@@ -148,25 +147,21 @@ impl<T: ?Sized> GpuMut<'_, T> {
     pub fn get(self) -> u64 {
         self.0.get()
     }
+}
 
-    pub fn into_static(self) -> GpuMut<'static, T> {
-        GpuMut(self.0, PhantomData)
+impl<T> GpuRw<[T]> {
+    pub fn elements(self) -> GpuRw<T> {
+        GpuRw(self.0, PhantomData)
     }
 }
 
-impl<'a, T> GpuMut<'a, [T]> {
-    pub fn elements(self) -> GpuMut<'a, T> {
-        GpuMut(self.0, PhantomData)
-    }
-}
-
-impl<T: ?Sized> Clone for GpuMut<'_, T> {
+impl<T: ?Sized> Clone for GpuRw<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: ?Sized> Copy for GpuMut<'_, T> {}
+impl<T: ?Sized> Copy for GpuRw<T> {}
 
 // A shader body reads and writes through these exactly as it would through a reference. The
 // host implementations only make that ordinary Rust type-check. They must not manufacture a
@@ -179,27 +174,27 @@ fn shader_pointer_on_host() -> ! {
     panic!("a GPU device pointer cannot be dereferenced by host code")
 }
 
-impl<T> Deref for Gpu<'_, T> {
+impl<T> Deref for Gpu<T> {
     type Target = T;
     fn deref(&self) -> &T {
         shader_pointer_on_host()
     }
 }
 
-impl<T> Deref for GpuMut<'_, T> {
+impl<T> Deref for GpuRw<T> {
     type Target = T;
     fn deref(&self) -> &T {
         shader_pointer_on_host()
     }
 }
 
-impl<T> DerefMut for GpuMut<'_, T> {
+impl<T> DerefMut for GpuRw<T> {
     fn deref_mut(&mut self) -> &mut T {
         shader_pointer_on_host()
     }
 }
 
-impl<T> Index<u32> for Gpu<'_, [T]> {
+impl<T> Index<u32> for Gpu<[T]> {
     type Output = T;
     fn index(&self, index: u32) -> &T {
         let _ = index;
@@ -207,7 +202,7 @@ impl<T> Index<u32> for Gpu<'_, [T]> {
     }
 }
 
-impl<T> Index<u32> for GpuMut<'_, [T]> {
+impl<T> Index<u32> for GpuRw<[T]> {
     type Output = T;
     fn index(&self, index: u32) -> &T {
         let _ = index;
@@ -215,7 +210,7 @@ impl<T> Index<u32> for GpuMut<'_, [T]> {
     }
 }
 
-impl<T> IndexMut<u32> for GpuMut<'_, [T]> {
+impl<T> IndexMut<u32> for GpuRw<[T]> {
     fn index_mut(&mut self, index: u32) -> &mut T {
         let _ = index;
         shader_pointer_on_host()
@@ -306,9 +301,12 @@ pub fn command_draw(
 
 /// A host-mapped allocation and its device address. Deref writes go straight into mapped
 /// memory; there is no staging step and no flush on either backend.
+///
+/// `'a` is the host mapping. [`GpuBox::gpu`] copies out as a bare [`Gpu`].
 pub struct GpuBox<'a, T: ?Sized> {
     pub cpu: NonNull<T>,
-    pub gpu: Gpu<'a, T>,
+    pub gpu: Gpu<T>,
+    _mapped: PhantomData<&'a mut T>,
 }
 
 impl<T: ?Sized> Deref for GpuBox<'_, T> {
@@ -517,11 +515,11 @@ impl ConstantValue for u64 {
     const SCALAR: Scalar = Scalar::U64;
 }
 
-impl<T: ?Sized> ConstantValue for Gpu<'static, T> {
+impl<T: ?Sized> ConstantValue for Gpu<T> {
     const SCALAR: Scalar = Scalar::U64;
 }
 
-impl<T: ?Sized> ConstantValue for GpuMut<'static, T> {
+impl<T: ?Sized> ConstantValue for GpuRw<T> {
     const SCALAR: Scalar = Scalar::U64;
 }
 

@@ -36,7 +36,7 @@ mod meshlets {
 
         #[repr(C, align(16))]
         pub struct Scene {
-            pub meshlets: Gpu<'static, [Meshlet]>,
+            pub meshlets: Gpu<[Meshlet]>,
             pub mvp: f32x4x4,
             pub cull_radius: f32,
             pub time: f32,
@@ -58,7 +58,7 @@ mod meshlets {
 
         #[object]
         fn meshlet_object(
-            root: Gpu<'static, Scene>,
+            root: Gpu<Scene>,
             #[payload] mut payload: Payload,
             #[group_id] group: u32x3,
             #[thread_index_in_group] lane: u32,
@@ -88,7 +88,7 @@ mod meshlets {
 
         #[mesh(VertexOut, 9, 8)]
         fn meshlet_mesh(
-            root: Gpu<'static, Scene>,
+            root: Gpu<Scene>,
             #[payload] payload: Payload,
             #[group_id] group: u32x3,
             #[thread_index_in_group] lane: u32,
@@ -207,7 +207,7 @@ mod meshlets {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let meshlets = storage.alloc_slice(&list).unwrap();
-        let meshlets: Gpu<'static, [Meshlet]> = meshlets.gpu.into_static();
+        let meshlets: Gpu<[Meshlet]> = meshlets.gpu;
 
         let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
         // Two timestamps around the pass, to show what the culling is buying.

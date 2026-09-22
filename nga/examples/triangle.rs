@@ -19,7 +19,7 @@ mod triangle {
 
     #[repr(C, align(16))]
     pub struct Data {
-        pub vertices: Gpu<'static, [Vertex]>,
+        pub vertices: Gpu<[Vertex]>,
         pub mvp: f32x4x4,
     }
 
@@ -31,7 +31,7 @@ mod triangle {
     }
 
     #[vertex]
-    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+    fn vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
             position: root
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
-    let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
+    let vertices: Gpu<[Vertex]> = vertices.gpu;
 
     let mut angle = 0.0f32;
     let mut resized = false;

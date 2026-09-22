@@ -14,7 +14,7 @@ mod raster {
 
     #[repr(C, align(16))]
     pub struct Data {
-        pub vertices: Gpu<'static, [Vertex]>,
+        pub vertices: Gpu<[Vertex]>,
         pub mvp: f32x4x4,
         pub tint: f32x4,
     }
@@ -35,7 +35,7 @@ mod raster {
     }
 
     #[vertex]
-    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+    fn vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
             position: root
@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index_buffer = heap.alloc_buffer(size_of_val(&indices))?;
     heap.write(&index_buffer, 0, &indices);
     heap.flush()?;
-    let vertices: Gpu<'static, [Vertex]> = vertex_buffer.gpu();
+    let vertices: Gpu<[Vertex]> = vertex_buffer.gpu();
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

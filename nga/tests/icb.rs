@@ -16,14 +16,14 @@ mod shader {
 
     /// Written by the encoding shader, one per command. The host only sizes the buffer.
     pub struct DrawData {
-        pub vertices: Gpu<'static, [Vertex]>,
+        pub vertices: Gpu<[Vertex]>,
         pub offset: f32x2,
         pub color: f32x4,
     }
 
     pub struct EncodeData {
-        pub vertices: Gpu<'static, [Vertex]>,
-        pub draws: GpuMut<'static, [DrawData]>,
+        pub vertices: Gpu<[Vertex]>,
+        pub draws: GpuRw<[DrawData]>,
         pub commands: Commands,
         pub pipeline: PipelineHandle,
         pub count: u32,
@@ -35,7 +35,7 @@ mod shader {
     }
 
     #[compute(64)]
-    fn encode(root: Gpu<'static, EncodeData>, #[thread_id] i: u32x3) {
+    fn encode(root: Gpu<EncodeData>, #[thread_id] i: u32x3) {
         if i.x >= root.count {
             return;
         }
@@ -51,7 +51,7 @@ mod shader {
     }
 
     #[vertex]
-    fn icb_vertex(#[buffer(1)] data: Gpu<'static, DrawData>, #[vertex_id] vid: u32) -> VertexOut {
+    fn icb_vertex(#[buffer(1)] data: Gpu<DrawData>, #[vertex_id] vid: u32) -> VertexOut {
         let source = data.vertices[vid];
         VertexOut {
             position: f32x4::new(
@@ -79,7 +79,7 @@ mod counted {
     }
 
     #[compute(1)]
-    fn encode(root: Gpu<'static, EncodeData>) {
+    fn encode(root: Gpu<EncodeData>) {
         command_draw(root.commands, 0, false, 0, 3, 1, 0);
     }
 }
@@ -149,7 +149,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             .usage(Usage::COLOR | Usage::COPY_SRC),
     )?;
     let draws = heap.alloc_buffer(size_of::<DrawData>() * DRAWS as usize)?;
-    let draw_block: GpuMut<'static, [DrawData]> = draws.gpu_mut();
+    let draw_block: GpuRw<[DrawData]> = draws.gpu_rw();
 
     let white = [1.0, 1.0, 1.0];
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
@@ -169,7 +169,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
+    let vertices: Gpu<[Vertex]> = vertices.gpu;
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     // The render and copy below initialise every byte before the host reads it.
@@ -178,7 +178,7 @@ fn a_shader_encodes_the_draws_it_replays() -> Result<(), Box<dyn std::error::Err
             .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
             .unwrap()
     };
-    let dest: GpuMut<'_, [u8]> = pixels.gpu.as_mut();
+    let dest: GpuRw<[u8]> = pixels.gpu.as_rw();
 
     let mut frame = ctx.begin_frame()?;
     let data = frame

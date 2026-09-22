@@ -17,7 +17,7 @@ mod table {
 
     #[repr(C, align(16))]
     pub struct Data {
-        pub palette: Gpu<'static, Palette>,
+        pub palette: Gpu<Palette>,
     }
 
     pub struct VertexOut {
@@ -37,7 +37,7 @@ mod table {
     }
 
     #[fragment]
-    fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
+    fn fragment(root: Gpu<Data>, input: VertexOut) -> f32x4 {
         let palette = root.palette;
         palette.texture.sample_level(palette.samp, input.uv, 1.0)
     }
@@ -57,7 +57,7 @@ mod table {
     }
 
     #[fragment]
-    fn fragment_offset(root: Gpu<'static, Data>, input: VertexOutSimple) -> f32x4 {
+    fn fragment_offset(root: Gpu<Data>, input: VertexOutSimple) -> f32x4 {
         let palette = root.palette;
         palette
             .texture
@@ -150,7 +150,7 @@ fn a_small_heap_addresses_a_layout_sized_to_the_device() -> Result<(), Box<dyn s
         .ok_or(Error::new("readback arena is full"))?;
     let compute = recorder.compute();
     compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
-    compute.read_texture_at(&target, 1, 1, &readback, unsafe { GpuMut::new(gpu) });
+    compute.read_texture_at(&target, 1, 1, &readback, unsafe { GpuRw::new(gpu) });
     drop(compute);
     drop(recorder);
     frame.submit(None)?;
@@ -256,7 +256,7 @@ fn base_slot_offset_pattern() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or(Error::new("readback arena is full"))?;
     let compute = recorder.compute();
     compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
-    compute.read_texture_at(&target, 0, 0, &readback, unsafe { GpuMut::new(gpu) });
+    compute.read_texture_at(&target, 0, 0, &readback, unsafe { GpuRw::new(gpu) });
     drop(compute);
     drop(recorder);
     frame.submit(None)?;

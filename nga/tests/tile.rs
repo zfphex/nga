@@ -16,7 +16,7 @@ mod shader {
     }
 
     pub struct Data {
-        pub vertices: Gpu<'static, [Vertex]>,
+        pub vertices: Gpu<[Vertex]>,
         pub mvp: f32x4x4,
     }
 
@@ -31,7 +31,7 @@ mod shader {
     }
 
     #[vertex]
-    fn tile_vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+    fn tile_vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut {
         let source = root.vertices[vid];
         VertexOut {
             position: root.mvp.mul(f32x4::new(
@@ -128,7 +128,7 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
             },
         ])
         .unwrap();
-    let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
+    let vertices: Gpu<[Vertex]> = vertices.gpu;
 
     let readback = Arena::new(&device, 1024 * 1024, Memory::Readback)?;
     // The render and copy below initialise every byte before the host reads it.
@@ -137,7 +137,7 @@ fn a_tile_pipeline_edits_the_imageblock() -> Result<(), Box<dyn std::error::Erro
             .alloc_scratch::<u8>((SIZE * SIZE * 4) as usize)
             .unwrap()
     };
-    let dest: GpuMut<'_, [u8]> = pixels.gpu.as_mut();
+    let dest: GpuRw<[u8]> = pixels.gpu.as_rw();
 
     let mut frame = ctx.begin_frame()?;
     let data = frame

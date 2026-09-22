@@ -127,7 +127,7 @@ fn parse_struct(tokens: &[TokenTree]) -> Result<(Ident, Vec<Field>), Fail> {
 /// mod triangle {
 ///     use nga::*;
 ///     pub struct Vertex { pub position: f32x3, pub color: f32x3 }
-///     #[vertex] fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut { .. }
+///     #[vertex] fn vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut { .. }
 ///     #[fragment] fn fragment(input: VertexOut) -> f32x4 { .. }
 ///     fn saturate(x: f32) -> f32 { .. }   // no stage attribute: a helper
 /// }

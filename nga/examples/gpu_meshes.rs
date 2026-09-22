@@ -46,9 +46,9 @@ mod commands {
 
         #[repr(C, align(16))]
         pub struct EncodeData {
-            pub objects: Gpu<'static, [Object]>,
-            pub vertices: Gpu<'static, [Vertex]>,
-            pub draws: GpuMut<'static, [DrawData]>,
+            pub objects: Gpu<[Object]>,
+            pub vertices: Gpu<[Vertex]>,
+            pub draws: GpuRw<[DrawData]>,
             pub commands: Commands,
             pub pipelines: [PipelineHandle; 2],
             pub viewproj: f32x4x4,
@@ -63,7 +63,7 @@ mod commands {
 
         #[repr(C, align(16))]
         pub struct DrawData {
-            pub vertices: Gpu<'static, [Vertex]>,
+            pub vertices: Gpu<[Vertex]>,
             pub mvp: f32x4x4,
             pub model: f32x4x4,
             pub color: f32x4,
@@ -76,7 +76,7 @@ mod commands {
         }
 
         #[compute(64)]
-        fn encode(root: Gpu<'static, EncodeData>, #[thread_id] tid: u32x3) {
+        fn encode(root: Gpu<EncodeData>, #[thread_id] tid: u32x3) {
             let i = tid.x;
             if i >= root.count {
                 return;
@@ -120,7 +120,7 @@ mod commands {
 
         #[vertex]
         fn solid_vertex(
-            #[buffer(1)] data: Gpu<'static, DrawData>,
+            #[buffer(1)] data: Gpu<DrawData>,
             #[vertex_id] vid: u32,
         ) -> VertexOut {
             let source = data.vertices[vid];
@@ -146,7 +146,7 @@ mod commands {
 
         #[vertex]
         fn wire_vertex(
-            #[buffer(1)] data: Gpu<'static, DrawData>,
+            #[buffer(1)] data: Gpu<DrawData>,
             #[vertex_id] vid: u32,
         ) -> VertexOut {
             let source = data.vertices[vid];
@@ -305,9 +305,9 @@ mod commands {
 
         let storage = Arena::new(&device, 1 << 20, Memory::Device)?;
         let vertices = storage.alloc_slice(&mesh).unwrap();
-        let vertices: Gpu<'static, [Vertex]> = vertices.gpu.into_static();
+        let vertices: Gpu<[Vertex]> = vertices.gpu;
         let object_list = storage.alloc_slice(&objects).unwrap();
-        let object_list: Gpu<'static, [Object]> = object_list.gpu.into_static();
+        let object_list: Gpu<[Object]> = object_list.gpu;
 
         let mut heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
         let draws = heap.alloc_buffer(size_of::<DrawData>() * OBJECTS as usize)?;
@@ -380,7 +380,7 @@ mod commands {
                     .alloc(EncodeData {
                         objects: object_list,
                         vertices,
-                        draws: draws.gpu_mut(),
+                        draws: draws.gpu_rw(),
                         commands: commands.handle(),
                         pipelines: [solid.handle(), wire.handle()],
                         viewproj,

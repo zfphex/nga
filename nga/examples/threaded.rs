@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let sim_root = rec
                             .arena()
                             .alloc(SimData {
-                                instances: unsafe { GpuMut::new(instance_base) },
+                                instances: unsafe { GpuRw::new(instance_base) },
                                 time: time + index as f32 * 0.35,
                                 count: SLICE as u32,
                             })
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .arena()
                             .alloc(BuildData {
                                 instances: unsafe { Gpu::new(instance_base) },
-                                vertices: unsafe { GpuMut::new(vertex_base) },
+                                vertices: unsafe { GpuRw::new(vertex_base) },
                                 count: SLICE as u32,
                                 pad: 0,
                             })

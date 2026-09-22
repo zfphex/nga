@@ -25,26 +25,26 @@ pub mod shader {
     }
 
     pub struct SimData {
-        pub instances: GpuMut<'static, [Instance]>,
+        pub instances: GpuRw<[Instance]>,
         pub time: f32,
         pub count: u32,
     }
 
     pub struct BuildData {
-        pub instances: Gpu<'static, [Instance]>,
-        pub vertices: GpuMut<'static, [Vertex]>,
+        pub instances: Gpu<[Instance]>,
+        pub vertices: GpuRw<[Vertex]>,
         pub count: u32,
         pub pad: u32,
     }
 
     #[repr(C, align(16))]
     pub struct DrawData {
-        pub vertices: Gpu<'static, [Vertex]>,
+        pub vertices: Gpu<[Vertex]>,
         pub mvp: f32x4x4,
     }
 
     #[compute(64)]
-    fn simulate(root: Gpu<'static, SimData>, #[thread_id] tid: u32x3) {
+    fn simulate(root: Gpu<SimData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.count {
             return;
@@ -64,7 +64,7 @@ pub mod shader {
     }
 
     #[compute(64)]
-    fn build_vertices(root: Gpu<'static, BuildData>, #[thread_id] tid: u32x3) {
+    fn build_vertices(root: Gpu<BuildData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.count {
             return;
@@ -87,7 +87,7 @@ pub mod shader {
     }
 
     #[vertex]
-    fn vertex(root: Gpu<'static, DrawData>, #[vertex_id] vid: u32) -> VertexOut {
+    fn vertex(root: Gpu<DrawData>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
             position: root

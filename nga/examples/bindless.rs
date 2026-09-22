@@ -20,8 +20,8 @@ mod bindless {
 
     #[repr(C, align(16))]
     pub struct Data {
-        pub vertices: Gpu<'static, [Vertex]>,
-        pub materials: Gpu<'static, [Material]>,
+        pub vertices: Gpu<[Vertex]>,
+        pub materials: Gpu<[Material]>,
         pub mvp: f32x4x4,
     }
 
@@ -32,7 +32,7 @@ mod bindless {
     }
 
     #[compute(8, 8, 1)]
-    fn paint(root: Gpu<'static, Paint>, #[thread_id] tid: u32x3) {
+    fn paint(root: Gpu<Paint>, #[thread_id] tid: u32x3) {
         if tid.x >= root.size || tid.y >= root.size {
             return;
         }
@@ -55,7 +55,7 @@ mod bindless {
     }
 
     #[vertex]
-    fn vertex(root: Gpu<'static, Data>, #[vertex_id] vid: u32) -> VertexOut {
+    fn vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut {
         let v = root.vertices[vid];
         VertexOut {
             position: root
@@ -67,7 +67,7 @@ mod bindless {
     }
 
     #[fragment]
-    fn fragment(root: Gpu<'static, Data>, input: VertexOut) -> f32x4 {
+    fn fragment(root: Gpu<Data>, input: VertexOut) -> f32x4 {
         let m = root.materials[input.material];
         let layer = ((input.uv.x * 3.0) as u32).min(2);
         let c = m.base_layer.offset(layer).sample(m.samp, input.uv).xyz() * m.tint;

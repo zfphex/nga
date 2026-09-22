@@ -18,7 +18,7 @@ Sebastian Aaltonen's Metal-vs-Vulkan post is the comparison point.
 
 ## Vulkan is better
 
-- **Pointers.** Aaltonen says BDA stays niche until HLSL/GLSL have native pointers. Rust `Gpu<'static, T>` emits `PhysicalStorageBuffer` and reads like MSL `device const Data*`. Pointer atomics come with it (`GpuMut<AtomicU32>` → `OpAtomicIAdd`). One host struct, not two.
+- **Pointers.** Aaltonen says BDA stays niche until HLSL/GLSL have native pointers. Rust `Gpu<T>` emits `PhysicalStorageBuffer` and reads like MSL `device const Data*`. Pointer atomics come with it (`GpuRw<AtomicU32>` → `OpAtomicIAdd`). One host struct, not two.
 - **Root pointer.** Metal needs an `MTL4ArgumentTable`: sized at creation, allocated per frame/thread, bound per encoder. Vulkan is a 16-byte push constant and one `vkCmdPushConstants`.
 - **Residency.** Metal's `MTLResidencySet` is what makes raw pointers work. Vulkan memory is resident by construction, so that whole subsystem is gone.
 - **`maintenance4`.** The post's "create the object, then ask which heaps work" is fixed. `vkGetDeviceBufferMemoryRequirements` / `vkGetDeviceImageMemoryRequirements` answer from create-info. `GpuHeap` never makes a throwaway object.

@@ -56,21 +56,22 @@ pub fn ir_ty_collect(mut tokens: &[TokenTree], users: &mut Vec<String>) -> Resul
             }
             let mutable = match name.as_str() {
                 "Gpu" => "false",
-                "GpuMut" => "true",
+                "GpuRw" => "true",
                 _ => return Err((span, format!("`{name}` cannot cross to the GPU"))),
             };
             let generics = &tokens[1..];
             if !punct(generics.first(), '<') || !punct(generics.last(), '>') {
-                return Err((span, format!("expected `{name}<'static, T>`")));
+                return Err((span, format!("expected `{name}<T>`")));
             }
-            let [lifetime, static_, comma, pointee @ ..] = &generics[1..generics.len() - 1] else {
-                return Err((span, format!("expected `{name}<'static, T>`")));
-            };
-            if !punct(Some(lifetime), '\'')
-                || !matches!(static_, TokenTree::Ident(id) if id.to_string() == "static")
-                || !punct(Some(comma), ',')
-            {
-                return Err((span, format!("`{name}` must use the `'static` lifetime")));
+            let pointee = &generics[1..generics.len() - 1];
+            if pointee.first().is_some_and(|token| punct(Some(token), '\'')) {
+                return Err((
+                    span,
+                    format!("`{name}` carries no lifetime; write `{name}<T>`"),
+                ));
+            }
+            if pointee.is_empty() {
+                return Err((span, format!("expected `{name}<T>`")));
             }
             Ok(format!(
                 "::nga::ir::Ty::Ptr {{ mutable: {mutable}, pointee: &{} }}",
@@ -79,11 +80,11 @@ pub fn ir_ty_collect(mut tokens: &[TokenTree], users: &mut Vec<String>) -> Resul
         }
         TokenTree::Punct(p) if p.as_char() == '&' => Err((
             span,
-            "references cannot cross to the GPU; use Gpu<'static, T>".into(),
+            "references cannot cross to the GPU; use Gpu<T>".into(),
         )),
         TokenTree::Punct(p) if p.as_char() == '*' => Err((
             span,
-            "raw pointers cannot be shared with the GPU; use Gpu<'static, T>".into(),
+            "raw pointers cannot be shared with the GPU; use Gpu<T>".into(),
         )),
         TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis => {
             Err((span, "tuple types cannot be shared with the GPU".into()))
@@ -323,7 +324,7 @@ fn span_at(t: &[TokenTree], i: usize) -> Span {
 
 /// Splits a comma-separated stream. Groups are single tokens already, so the only nesting that
 /// can hide a comma is `<..>`, which is a type's and never an expression's: `a < b, c > d` is
-/// two arguments and `Gpu<'static, T>` is one parameter.
+/// two arguments and `Gpu<T>` is one parameter.
 fn commas(t: &[TokenTree], angles: bool) -> Vec<Vec<TokenTree>> {
     let mut out = Vec::new();
     let mut current = Vec::new();

@@ -39,10 +39,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let vertices = heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
-    let instances_rw: GpuMut<'static, [Instance]> = instances.gpu_mut();
-    let instances_ro: Gpu<'static, [Instance]> = instances.gpu();
-    let vertices_rw: GpuMut<'static, [Vertex]> = vertices.gpu_mut();
-    let vertices_ro: Gpu<'static, [Vertex]> = vertices.gpu();
+    let instances_rw: GpuRw<[Instance]> = instances.gpu_rw();
+    let instances_ro: Gpu<[Instance]> = instances.gpu();
+    let vertices_rw: GpuRw<[Vertex]> = vertices.gpu_rw();
+    let vertices_ro: Gpu<[Vertex]> = vertices.gpu();
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;
 

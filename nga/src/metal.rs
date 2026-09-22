@@ -30,7 +30,7 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, Constant,
     Constants, Cull, DepthState, DrawIndexed, Error, FRAMES_IN_FLIGHT, Feature, Filter, Format,
-    Gpu, GpuBox, GpuMut, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
+    Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat, Memory, MeshDesc, PipelineHandle, RasterDesc,
     ResolveMode, Sampler, SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d,
     Texture2dRW, TileDesc, Tlsf, Topology, Usage, Viewport, Winding,
 };
@@ -669,6 +669,7 @@ impl Arena {
         Some(GpuBox {
             cpu: unsafe { NonNull::new_unchecked(cpu as *mut T) },
             gpu: crate::device_ptr(gpu),
+            _mapped: PhantomData,
         })
     }
 
@@ -681,6 +682,7 @@ impl Arena {
                 values.len(),
             ),
             gpu: crate::device_ptr(gpu),
+            _mapped: PhantomData,
         })
     }
 
@@ -702,6 +704,7 @@ impl Arena {
                 len,
             ),
             gpu: crate::device_ptr(gpu),
+            _mapped: PhantomData,
         })
     }
 
@@ -721,19 +724,21 @@ pub struct HeapBuffer {
 }
 
 impl HeapBuffer {
-    /// The device address, for putting in a struct a shader dereferences. A heap allocation
-    /// outlives every frame, so the lifetime is `'static`.
-    pub fn gpu<T: ?Sized>(&self) -> Gpu<'static, T> {
+    /// The device address, for a field of a struct a shader dereferences.
+    ///
+    /// Copying it does not keep this buffer alive. [`GpuHeap::free_later`] is what waits
+    /// until the frame that still reads the address has retired.
+    pub fn gpu<T: ?Sized>(&self) -> Gpu<T> {
         crate::device_ptr(self.gpu)
     }
 
-    /// The raw address, for the cases where the borrow has to be discarded.
+    /// The raw device address.
     pub fn address(&self) -> u64 {
         self.gpu
     }
 
-    pub fn gpu_mut<T: ?Sized>(&self) -> GpuMut<'static, T> {
-        crate::device_ptr_mut(self.gpu)
+    pub fn gpu_rw<T: ?Sized>(&self) -> GpuRw<T> {
+        crate::device_ptr_rw(self.gpu)
     }
 
     pub fn len(&self) -> usize {
@@ -1087,9 +1092,8 @@ impl GpuHeap {
 
     /// Hand a resource over to be released once the frame that last used it has finished.
     ///
-    /// `frame` is [`Context::frame`] at the point of the hand-over. Freeing something the GPU is
-    /// still reading is the one lifetime error `Gpu<'a, T>` cannot catch: the borrow ends when
-    /// recording does, not when the command buffer retires.
+    /// `frame` is [`Context::frame`] at the point of the hand-over. A [`Gpu`] copied out of the
+    /// resource does not delay this. Pass the frame that is still reading it.
     pub fn free_later(&mut self, frame: u64, retired: Retired) {
         self.retired.push_back((frame, retired));
     }
@@ -1911,7 +1915,7 @@ impl<'a> Raster<'a> {
     /// a `constant nga_push* [[buffer(0)]]` parameter, so what the argument table holds
     /// is the address of a struct, not the root itself, so a bind costs one 16-byte arena
     /// allocation.
-    fn bind<T>(&self, root: Gpu<'_, T>) {
+    fn bind<T>(&self, root: Gpu<T>) {
         let (resources, resources_stride) = self.resources.get();
         bind_push(
             self.table,
@@ -1974,7 +1978,7 @@ impl<'a> Raster<'a> {
 
     pub fn draw_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<'_, T>,
+        root: Gpu<T>,
         indices: &HeapBuffer,
         count: u32,
     ) {
@@ -1993,10 +1997,10 @@ impl<'a> Raster<'a> {
 
     pub fn draw_indexed_indirect<I: IndexFormat, T>(
         &self,
-        root: Gpu<'_, T>,
+        root: Gpu<T>,
         indices: &HeapBuffer,
         _arena: &Arena,
-        draws: Gpu<'_, [DrawIndexed]>,
+        draws: Gpu<[DrawIndexed]>,
         count: u32,
     ) {
         self.bind(root);
@@ -2022,7 +2026,7 @@ impl<'a> Raster<'a> {
     /// `draws` is the parallel Vulkan argument array and is unused on Metal.
     pub fn draw_indirect_count<T>(
         &self,
-        root: Gpu<'_, T>,
+        root: Gpu<T>,
         commands: &IndirectCommands,
         _draws: &HeapBuffer,
         range: &HeapBuffer,
@@ -2039,7 +2043,7 @@ impl<'a> Raster<'a> {
     /// is a loop and `Device::supports(Feature::MultiDraw)` answers `false`. The result is
     /// identical, which is why the method exists at all. Portable code should not have to
     /// carry two spellings of the same draw.
-    pub fn draw_multi<T>(&self, root: Gpu<'_, T>, draws: &[MultiDraw]) {
+    pub fn draw_multi<T>(&self, root: Gpu<T>, draws: &[MultiDraw]) {
         self.bind(root);
         for draw in draws {
             self.encoder.draw_primitives(
@@ -2057,7 +2061,7 @@ impl<'a> Raster<'a> {
     /// vertex, and silently ignoring the field would be worse than refusing it.
     pub fn draw_multi_indexed<T, I: IndexFormat>(
         &self,
-        root: Gpu<'_, T>,
+        root: Gpu<T>,
         indices: &HeapBuffer,
         draws: &[MultiDrawIndexed],
     ) {
@@ -2092,7 +2096,7 @@ impl<'a> Raster<'a> {
     /// Metal-only; ask [`Device::supports`] with [`Feature::MeshShaders`] first.
     pub fn draw_mesh<T>(
         &self,
-        root: Gpu<'_, T>,
+        root: Gpu<T>,
         groups: [u32; 3],
         object_group: [u32; 3],
         mesh_group: [u32; 3],
@@ -2104,7 +2108,7 @@ impl<'a> Raster<'a> {
 
     /// Runs a tile pipeline over the pass's imageblock. One dispatch covers one tile, so the
     /// grid is the tile size the pass was given, not the render target. Apple-only.
-    pub fn dispatch_tile<T>(&self, root: Gpu<'_, T>, width: u32, height: u32) {
+    pub fn dispatch_tile<T>(&self, root: Gpu<T>, width: u32, height: u32) {
         self.bind(root);
         self.encoder
             .dispatch_threads_per_tile(Size::new(width as usize, height as usize, 1));
@@ -2147,7 +2151,7 @@ impl<'a> Raster<'a> {
         );
     }
 
-    pub fn draw<T>(&self, root: Gpu<'_, T>, start: u32, count: u32) {
+    pub fn draw<T>(&self, root: Gpu<T>, start: u32, count: u32) {
         self.bind(root);
         self.encoder
             .draw_primitives(self.primitive.get(), start as usize, count as usize);
@@ -2185,7 +2189,7 @@ impl<'a> Compute<'a> {
         }
     }
 
-    fn bind<T>(&self, root: Gpu<'_, T>) {
+    fn bind<T>(&self, root: Gpu<T>) {
         let (resources, resources_stride) = self.resources.get();
         bind_push(
             self.table,
@@ -2205,13 +2209,13 @@ impl<'a> Compute<'a> {
         self.resources.set((heap.base_id, heap.stride));
     }
 
-    pub fn dispatch<T>(&self, root: Gpu<'_, T>, threads: usize, group: usize) {
+    pub fn dispatch<T>(&self, root: Gpu<T>, threads: usize, group: usize) {
         self.bind(root);
         self.encoder
             .dispatch_threads(Size::new(threads, 1, 1), Size::new(group, 1, 1));
     }
 
-    pub fn dispatch_2d<T>(&self, root: Gpu<'_, T>, width: u32, height: u32, group: u32) {
+    pub fn dispatch_2d<T>(&self, root: Gpu<T>, width: u32, height: u32, group: u32) {
         self.bind(root);
         self.encoder.dispatch_threads(
             Size::new(width as usize, height as usize, 1),
@@ -2280,7 +2284,7 @@ impl<'a> Compute<'a> {
 
     /// Reads a whole texture back into host-visible memory, tightly packed. The counterpart of
     /// `GpuHeap::upload`, and what makes a headless render checkable without a screenshot.
-    pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuMut<'_, [u8]>) {
+    pub fn read_texture(&self, texture: &HeapTexture, arena: &Arena, dest: GpuRw<[u8]>) {
         self.read_texture_at(texture, 0, 0, arena, dest)
     }
 
@@ -2291,7 +2295,7 @@ impl<'a> Compute<'a> {
         level: u32,
         layer: u32,
         arena: &Arena,
-        dest: GpuMut<'_, [u8]>,
+        dest: GpuRw<[u8]>,
     ) {
         assert!(level < texture.mips, "mip level is outside the texture");
         assert!(layer < texture.layers, "array layer is outside the texture");
@@ -2533,8 +2537,9 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    /// This frame's per-thread arena. Everything allocated here is valid until the frame is
-    /// submitted and its slot comes round again, which is what the `Gpu<'a, T>` lifetime says.
+    /// This frame's per-thread arena. The bump is reset when this slot is recorded again, after
+    /// the frames in flight have retired. A [`GpuBox`] borrows the mapping for as long as the
+    /// arena does. Copying [`GpuBox::gpu`] out does not.
     ///
     /// The returned borrow is tied to the context, not to `self`, so allocating from it does
     /// not lock the frame. Recording can still take `&mut self` afterwards.

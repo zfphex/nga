@@ -25,15 +25,15 @@ mod gpu_driven {
     }
 
     pub struct SimData {
-        pub instances: GpuMut<'static, [Instance]>,
+        pub instances: GpuRw<[Instance]>,
         pub time: f32,
         pub count: u32,
     }
 
     pub struct EncodeData {
-        pub instances: Gpu<'static, [Instance]>,
-        pub draws: GpuMut<'static, [DrawArgs]>,
-        pub range: GpuMut<'static, ExecutionRange>,
+        pub instances: Gpu<[Instance]>,
+        pub draws: GpuRw<[DrawArgs]>,
+        pub range: GpuRw<ExecutionRange>,
         pub commands: Commands,
         pub cull_radius: f32,
         pub total: u32,
@@ -47,7 +47,7 @@ mod gpu_driven {
 
     #[repr(C, align(16))]
     pub struct DrawData {
-        pub instances: Gpu<'static, [Instance]>,
+        pub instances: Gpu<[Instance]>,
         pub mvp: f32x4x4,
     }
 
@@ -59,7 +59,7 @@ mod gpu_driven {
     }
 
     #[compute(64)]
-    fn simulate(root: Gpu<'static, SimData>, #[thread_id] tid: u32x3) {
+    fn simulate(root: Gpu<SimData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.count {
             return;
@@ -85,7 +85,7 @@ mod gpu_driven {
     /// smuggles the instance index through `first_instance`, which the vertex stage reads back
     /// as the base instance.
     #[compute(64)]
-    fn encode(root: Gpu<'static, EncodeData>, #[thread_id] tid: u32x3) {
+    fn encode(root: Gpu<EncodeData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
         if i >= root.total {
             return;
@@ -115,7 +115,7 @@ mod gpu_driven {
 
     #[vertex]
     fn vertex(
-        root: Gpu<'static, DrawData>,
+        root: Gpu<DrawData>,
         #[vertex_id] vid: u32,
         #[base_instance] base: u32,
     ) -> VertexOut {
@@ -135,7 +135,7 @@ mod gpu_driven {
 
     /// A vertex stage that returns a bare `f32x4` is returning clip space and nothing else.
     #[vertex]
-    fn boundary(root: Gpu<'static, BoundaryData>, #[vertex_id] vid: u32) -> f32x4 {
+    fn boundary(root: Gpu<BoundaryData>, #[vertex_id] vid: u32) -> f32x4 {
         let a = (vid / 2) as f32 / root.segments as f32 * TAU;
         let mut r = root.radius + 0.004;
         if vid % 2 == 0 {
@@ -242,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sim_root = rec
                 .arena()
                 .alloc(SimData {
-                    instances: instances.gpu_mut(),
+                    instances: instances.gpu_rw(),
                     time,
                     count: COUNT as u32,
                 })
@@ -252,8 +252,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .arena()
                 .alloc(EncodeData {
                     instances: instances.gpu(),
-                    draws: draws.gpu_mut(),
-                    range: range.gpu_mut(),
+                    draws: draws.gpu_rw(),
+                    range: range.gpu_rw(),
                     commands: commands.handle(),
                     cull_radius,
                     total: COUNT as u32,

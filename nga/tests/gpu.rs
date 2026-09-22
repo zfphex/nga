@@ -13,14 +13,14 @@ mod shader {
     use nga::*;
 
     pub struct Scene {
-        pub pixels: GpuMut<'static, [f32x4]>,
+        pub pixels: GpuRw<[f32x4]>,
         pub width: u32,
         pub height: u32,
         pub tint: f32x4,
     }
 
     #[compute(8, 8, 1)]
-    fn clear(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
+    fn clear(mut root: GpuRw<Scene>, #[thread_id] id: u32x3) {
         if id.x >= root.width || id.y >= root.height {
             return;
         }
@@ -35,7 +35,7 @@ mod shader {
     }
 
     #[compute(64)]
-    fn grey(mut root: GpuMut<'static, Scene>, #[thread_id] id: u32x3) {
+    fn grey(mut root: GpuRw<Scene>, #[thread_id] id: u32x3) {
         let mut total = 0.0;
         for i in 0..4 {
             total += luma(root.pixels[id.x * 4 + i]);
@@ -49,7 +49,7 @@ mod shader {
     }
 
     #[vertex]
-    fn vertex_main(root: Gpu<'static, Scene>, #[vertex_id] vid: u32) -> Varyings {
+    fn vertex_main(root: Gpu<Scene>, #[vertex_id] vid: u32) -> Varyings {
         let uv = f32x2::new((vid & 1) as f32, (vid >> 1) as f32);
         Varyings {
             position: f32x4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0),
@@ -71,12 +71,12 @@ mod shader {
     /// emitters have to reproduce it: SPIR-V as an `Offset` decoration, MSL as a padding member.
     #[repr(C, align(16))]
     pub struct Transform {
-        pub scene: Gpu<'static, Scene>,
+        pub scene: Gpu<Scene>,
         pub mvp: f32x4x4,
     }
 
     #[compute(64)]
-    fn transform(root: Gpu<'static, Transform>, #[thread_id] id: u32x3) {
+    fn transform(root: Gpu<Transform>, #[thread_id] id: u32x3) {
         let scene = root.scene;
         let mut out = scene.pixels;
         out[id.x] = root.mvp.mul(scene.tint);
@@ -124,7 +124,7 @@ fn device_pointers_cannot_be_dereferenced_on_the_host() {
     })
     .is_err());
 
-    let mut pointer = unsafe { GpuMut::<[u32]>::new(1) };
+    let mut pointer = unsafe { GpuRw::<[u32]>::new(1) };
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pointer[0] = 7;
     }))
@@ -142,7 +142,7 @@ mod inner_attribute {
     }
 
     #[compute(1)]
-    fn double(mut root: GpuMut<'static, Value>) {
+    fn double(mut root: GpuRw<Value>) {
         root.x = root.x * 2.0;
     }
 }
@@ -173,7 +173,7 @@ mod mixed {
     }
 
     #[compute(32)]
-    fn scale(mut root: GpuMut<'static, Params>, #[thread_id] id: u32x3) {
+    fn scale(mut root: GpuRw<Params>, #[thread_id] id: u32x3) {
         root.scale = root.scale * id.x as f32;
     }
 }
@@ -194,7 +194,7 @@ mod nested_shader_data {
 
         #[repr(C, align(16))]
         pub struct Camera {
-            pub corners: Gpu<'static, Corner>,
+            pub corners: Gpu<Corner>,
             pub mvp: f32x4x4,
         }
     }
@@ -289,7 +289,7 @@ mod packed {
     }
 
     #[compute(64)]
-    fn packed_math(root: Gpu<'static, Mesh>, #[thread_id] id: u32x3) {
+    fn packed_math(root: Gpu<Mesh>, #[thread_id] id: u32x3) {
         let n = root.transform.mul(root.normal.unpack());
         let scale = n.length().max(1e-4);
         let mut acc = n.x * id.x as f32;
@@ -531,12 +531,12 @@ mod handle_offset {
 
     #[repr(C, align(16))]
     pub struct Data {
-        pub material: Gpu<'static, Material>,
+        pub material: Gpu<Material>,
         pub uv: f32x2,
     }
 
     #[fragment]
-    fn sample_offset(root: Gpu<'static, Data>) -> f32x4 {
+    fn sample_offset(root: Gpu<Data>) -> f32x4 {
         let mat = root.material;
         mat.base_texture.offset(1).sample(mat.samp, root.uv)
     }
