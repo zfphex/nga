@@ -6,8 +6,6 @@ using namespace metal;
 struct nga_push {
     ulong root;
     ulong resources;
-    uint resources_stride;
-    uint samplers;
 };
 
 template<typename T>
@@ -35,7 +33,7 @@ inline H nga_offset(H h, uint off) {
 
 template<typename T, typename H>
 inline T nga_deref(constant nga_push* push, H h) {
-    ulong addr = push->resources_stride != 0 ? (push->resources + (ulong)h.slot * push->resources_stride) : h.slot;
+    ulong addr = push->resources != 0 ? ((device const ulong*)push->resources)[h.slot] : h.slot;
     return (*(thread const nga_desc<T>*)&addr).t;
 }
 

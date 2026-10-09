@@ -6,7 +6,6 @@ Deliberately left out, not oversights. Design is in the code and the backend con
 
 - **Vulkan mesh shaders.** `Feature::MeshShaders` is false: `Device::new` does not request `VK_EXT_mesh_shader`. Pipeline path, `Shaders::mesh`, and `Raster::draw_mesh` already exist and error. Wiring the extension is the job.
 - **`execute_indirect`.** Metal can take an ICB execution range from GPU memory (`executeCommandsInBuffer:indirectBuffer:`). `IndirectCommands` replays a host-known range instead. `gpu_meshes` resets every slot so empty ones replay as nothing, one command per empty slot.
-- **`draw_multi_indexed` base vertex on Metal.** Refused, not ignored. `MTL4RenderCommandEncoder` indexed draw has no base vertex; only the indirect-command encoder has the full form. Bake the offset into the indices, or extend `minmetal`.
 - **Indexed indirect commands.** `IndirectCommands::draws(.., indexed: true)` builds the buffer. No shader in the tree encodes `draw_indexed_primitives`.
 
 ## Vocabulary that comes back with the code that needs it
