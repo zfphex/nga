@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut recorder = frame.recorder();
             {
                 let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
-                let raster = recorder.raster(&pass, surface.width(), surface.height());
+                let raster = recorder.raster(&pass);
                 raster
                     .draw(
                         pipeline,
@@ -128,8 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 [0.0, 0.0, 0.0, 1.0],
                             ]),
                         },
-                        0,
-                        3,
+                        0..3,
                     )
                     .unwrap();
             }

@@ -5,7 +5,6 @@ mod sync;
 use sync::{BuildData, DrawData, Instance, SimData, Vertex};
 
 const COUNT: usize = 1024;
-const GROUP: usize = 64;
 const DEPTH_FORMAT: Format = Format::D32Float;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -109,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             time,
                             count: COUNT as u32,
                         },
-                        Dispatch::x(COUNT, GROUP),
+                        Dispatch::x(COUNT),
                     )
                     .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
@@ -122,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             count: COUNT as u32,
                             pad: 0,
                         },
-                        Dispatch::x(COUNT, GROUP),
+                        Dispatch::x(COUNT),
                     )
                     .unwrap();
                 // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
@@ -135,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pass = Pass::new()
                     .color(0, &drawable, Some([0.03, 0.03, 0.05, 1.0]))
                     .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
-                let raster = rec.raster(&pass, surface.width(), surface.height());
+                let raster = rec.raster(&pass);
                 raster.depth(&depth_write);
                 raster
                     .draw(
@@ -144,8 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             vertices: vertices_ro,
                             mvp,
                         },
-                        0,
-                        (COUNT * 3) as u32,
+                        0..(COUNT * 3) as u32,
                     )
                     .unwrap();
             }

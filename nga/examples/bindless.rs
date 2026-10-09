@@ -129,8 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
     }
-    let vertex_buffer = heap.alloc_buffer(size_of_val(quads.as_slice()))?;
-    heap.write(&vertex_buffer, 0, &quads);
+    let vertex_buffer = heap.alloc_slice(&quads)?;
 
     let sampler = device.sampler(&SamplerDesc::nearest())?;
     let sampler_range = textures.alloc_range(1)?;
@@ -204,8 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         eprintln!("material {quad}: base_layer {base_layer:?}");
     }
-    let material_buffer = heap.alloc_buffer(size_of_val(materials.as_slice()))?;
-    heap.write(&material_buffer, 0, &materials);
+    let material_buffer = heap.alloc_slice(&materials)?;
 
     // Every copy and transition above was recorded, not submitted. One flush lands the lot,
     // where the old path drained the device once per texture.
@@ -254,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             size: TEX,
                             time,
                         },
-                        Dispatch::xy(TEX, TEX, 8),
+                        Dispatch::xy(TEX, TEX),
                     )
                     .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::TEXTURES);
@@ -262,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             {
                 let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
-                let raster = rec.raster(&pass, surface.width(), surface.height());
+                let raster = rec.raster(&pass);
                 raster.heap(&textures);
                 raster
                     .draw(
@@ -277,8 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 [0.0, 0.0, 0.0, 1.0],
                             ]),
                         },
-                        0,
-                        QUADS * 6,
+                        0..QUADS * 6,
                     )
                     .unwrap();
             }

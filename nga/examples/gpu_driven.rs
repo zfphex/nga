@@ -148,7 +148,6 @@ mod gpu_driven {
 }
 
 const COUNT: usize = 4096;
-const GROUP: usize = 64;
 const SEGMENTS: u32 = 128;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -242,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             time,
                             count: COUNT as u32,
                         },
-                        Dispatch::x(COUNT, GROUP),
+                        Dispatch::x(COUNT),
                     )
                     .unwrap();
                 compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
@@ -258,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             cull_radius,
                             total: COUNT as u32,
                         },
-                        Dispatch::x(COUNT, GROUP),
+                        Dispatch::x(COUNT),
                     )
                     .unwrap();
                 compute.barrier(
@@ -270,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             {
                 let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
-                let raster = rec.raster(&pass, surface.width(), surface.height());
+                let raster = rec.raster(&pass);
                 raster
                     .draw_indirect_count(
                         draw,
@@ -292,8 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             radius: cull_radius,
                             segments: SEGMENTS,
                         },
-                        0,
-                        SEGMENTS * 2 + 2,
+                        0..SEGMENTS * 2 + 2,
                     )
                     .unwrap();
             }

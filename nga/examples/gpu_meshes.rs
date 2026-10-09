@@ -167,7 +167,6 @@ mod commands {
 
     const SIDE: usize = 6;
     const OBJECTS: u32 = (SIDE * SIDE * SIDE) as u32;
-    const GROUP: usize = 64;
     /// The eight corners of a unit cube, as triangles then as lines. One vertex array serves
     /// both pipelines; the encoded command picks the range and the primitive.
     fn cube() -> Vec<Vertex> {
@@ -384,7 +383,7 @@ mod commands {
                                 line_start: tri_count,
                                 line_count,
                             },
-                            Dispatch::x(OBJECTS as usize, GROUP),
+                            Dispatch::x(OBJECTS as usize),
                         )
                         .unwrap();
                     compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::DRAW_ARGUMENTS);
@@ -393,7 +392,7 @@ mod commands {
                     let pass = Pass::new()
                         .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
                         .depth(&depth, Some(1.0), false);
-                    let raster = rec.raster(&pass, surface.width(), surface.height());
+                    let raster = rec.raster(&pass);
                     raster.depth(&DepthState::new(CompareOp::LessEqual, true));
                     // Every command the shader wrote, pipeline choice included.
                     raster.execute(&commands, commands.all());

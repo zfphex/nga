@@ -7,7 +7,6 @@ use sync::{BuildData, DrawData, Instance, SimData, Vertex};
 const THREADS: usize = 4;
 const SLICE: usize = 256;
 const COUNT: usize = THREADS * SLICE;
-const GROUP: usize = 64;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = create_window(
@@ -74,7 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ]);
 
             let slot = (ctx.frame() % FRAMES_IN_FLIGHT) as usize * COUNT;
-            let (sw, sh) = (surface.width(), surface.height());
             let mut frame = ctx.begin_frame().unwrap();
             let recorders = frame.recorders(&[THREADS]);
 
@@ -97,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         time: time + index as f32 * 0.35,
                                         count: SLICE as u32,
                                     },
-                                    Dispatch::x(SLICE, GROUP),
+                                    Dispatch::x(SLICE),
                                 )
                                 .unwrap();
                             compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
@@ -110,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         count: SLICE as u32,
                                         pad: 0,
                                     },
-                                    Dispatch::x(SLICE, GROUP),
+                                    Dispatch::x(SLICE),
                                 )
                                 .unwrap();
                             compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
@@ -124,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => None,
                         };
                         let pass = Pass::new().color(0, drawable, clear);
-                        let raster = rec.raster(&pass, sw, sh);
+                        let raster = rec.raster(&pass);
                         raster
                             .draw(
                                 draw,
@@ -132,8 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     vertices: unsafe { Gpu::new(vertex_base) },
                                     mvp,
                                 },
-                                0,
-                                (SLICE * 3) as u32,
+                                0..(SLICE * 3) as u32,
                             )
                             .unwrap();
                     });

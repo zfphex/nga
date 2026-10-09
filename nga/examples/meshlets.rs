@@ -252,7 +252,7 @@ mod meshlets {
 
                 {
                     let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
-                    let raster = rec.raster(&pass, surface.width(), surface.height());
+                    let raster = rec.raster(&pass);
                     raster.timestamp(&timers, 0);
                     // One object threadgroup per `PER_GROUP` candidates, each amplifying into
                     // as many mesh threadgroups as survived. `RING + 1` mesh threads emit the

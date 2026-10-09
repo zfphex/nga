@@ -194,8 +194,8 @@ mod tiles {
                     let pass = Pass::new()
                         .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
                         .tile(TILE, TILE, IMAGEBLOCK_BYTES);
-                    let raster = rec.raster(&pass, surface.width(), surface.height());
-                    raster.draw(draw, Data { vertices, mvp }, 0, count).unwrap();
+                    let raster = rec.raster(&pass);
+                    raster.draw(draw, Data { vertices, mvp }, 0..count).unwrap();
 
                     // Same encoder, same tile memory. On any other backend this would be a
                     // second pass over a stored texture.

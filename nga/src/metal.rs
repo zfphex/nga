@@ -68,6 +68,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pipeline {
     raw: id,
+    group: [u32; 3],
     /// Metal picks the primitive at draw time, Vulkan at pipeline creation. Carrying it here is
     /// what lets `RasterDesc::topology` mean the same thing on both.
     primitive: PrimitiveType,
@@ -977,6 +978,18 @@ impl GpuHeap {
         })
     }
 
+    pub fn alloc_slice<T: Copy>(&mut self, values: &[T]) -> Result<HeapBuffer, Error> {
+        if size_of_val(values) == 0 {
+            return Err(Error::new("a GPU buffer must contain at least one byte"));
+        }
+        let buffer = self.alloc_buffer(size_of_val(values))?;
+        if let Err(error) = self.write(&buffer, 0, values) {
+            self.free_buffer(buffer);
+            return Err(error);
+        }
+        Ok(buffer)
+    }
+
     pub fn alloc_texture(&mut self, desc: &TextureDesc) -> Result<HeapTexture, Error> {
         let descriptor = desc.descriptor();
         descriptor.set_storage_mode(StorageMode::Shared);
@@ -1000,19 +1013,16 @@ impl GpuHeap {
 
     /// A memcpy. This is the half of unified memory Vulkan cannot give back: there, the same
     /// call stages through a ring and records a copy.
-    pub fn write<T: Copy>(&mut self, buffer: &HeapBuffer, offset: usize, values: &[T]) {
-        self.try_write(buffer, offset, values)
-            .expect("buffer write failed")
-    }
-
-    pub fn try_write<T: Copy>(
+    pub fn write<T: Copy>(
         &mut self,
         buffer: &HeapBuffer,
         offset: usize,
         values: &[T],
     ) -> Result<(), Error> {
         let bytes = size_of_val(values);
-        debug_assert!(offset + bytes <= buffer.len);
+        if offset > buffer.len || bytes > buffer.len - offset {
+            return Err(Error::new("buffer write is out of bounds"));
+        }
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr() as *const u8,
@@ -1263,24 +1273,6 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(device: &Device, view: isize, width: u32, height: u32) -> Result<Self, Error> {
-        let layer = unsafe {
-            MetalLayer::attach_to_view(
-                id(view as *mut std::ffi::c_void),
-                &device.device,
-                PixelFormat::Bgra8Unorm,
-                width as usize,
-                height as usize,
-                1.0,
-            )?
-        };
-        Ok(Self {
-            layer,
-            width,
-            height,
-        })
-    }
-
     /// Resizing a `CAMetalLayer` is a property write, where Vulkan rebuilds the whole swapchain.
     pub fn rebuild(&mut self, _device: &Device, width: u32, height: u32) -> Result<(), Error> {
         self.layer
@@ -1422,6 +1414,7 @@ impl Shaders {
         self.render.push(state);
         Ok(Pipeline {
             raw,
+            group: [0; 3],
             primitive: topology(desc.topology),
             handle,
         })
@@ -1457,6 +1450,7 @@ impl Shaders {
         self.render.push(state);
         Ok(Pipeline {
             raw,
+            group: [0; 3],
             // A mesh pipeline declares its own topology in the shader, so nothing is picked here.
             primitive: PrimitiveType::Triangle,
             handle,
@@ -1484,6 +1478,7 @@ impl Shaders {
         self.render.push(state);
         Ok(Pipeline {
             raw,
+            group: [0; 3],
             primitive: PrimitiveType::Triangle,
             handle: PipelineHandle(Handle(0)),
         })
@@ -1498,6 +1493,12 @@ impl Shaders {
         entry: ComputeShader,
         constants: Option<&dyn Constants>,
     ) -> Result<Pipeline, Error> {
+        let crate::ir::Stage::Compute(group) = entry.0.stage else {
+            return Err(Error::new("expected a compute shader"));
+        };
+        if group.contains(&0) {
+            return Err(Error::new("a compute group has size zero"));
+        }
         let pipeline = M4ComputePipelineDescriptor::new();
         pipeline.set_label(entry.0.name);
         pipeline.set_compute_function_descriptor(Some(&self.function(entry.0.name, constants)));
@@ -1506,6 +1507,7 @@ impl Shaders {
         self.compute.push(state);
         Ok(Pipeline {
             raw,
+            group,
             primitive: PrimitiveType::Triangle,
             handle: PipelineHandle(Handle(0)),
         })
@@ -1575,6 +1577,9 @@ fn color_targets(
 }
 
 pub struct Pass {
+    sizes: [[u32; 2]; 9],
+    resolve_sizes: [[u32; 2]; 9],
+    area: Option<[u32; 2]>,
     pub(crate) desc: M4RenderPassDescriptor,
     pub(crate) occlusion_base: u32,
     pub(crate) layers: u32,
@@ -1592,11 +1597,20 @@ impl Pass {
         let desc = M4RenderPassDescriptor::new();
         desc.set_render_target_array_length(1);
         Self {
+            sizes: [[u32::MAX; 2]; 9],
+            resolve_sizes: [[u32::MAX; 2]; 9],
+            area: None,
             desc,
             occlusion_base: 0,
             layers: 1,
             available_layers: u32::MAX,
         }
+    }
+
+    pub fn render_area(mut self, width: u32, height: u32) -> Self {
+        assert!(width > 0 && height > 0, "a render area must be nonempty");
+        self.area = Some([width, height]);
+        self
     }
 
     /// Render each primitive into one of `layers` consecutive attachment slices. The vertex
@@ -1697,6 +1711,11 @@ impl Pass {
         available_layers: u32,
         clear: Option<[f32; 4]>,
     ) -> Self {
+        assert!(index < 8, "a pass supports at most 8 color attachments");
+        self.sizes[index] = [
+            ((texture.width() as u32) >> level).max(1),
+            ((texture.height() as u32) >> level).max(1),
+        ];
         self = self.use_attachment(available_layers);
         let attachment = self
             .desc
@@ -1762,6 +1781,11 @@ impl Pass {
         layer: u32,
         available_layers: u32,
     ) -> Self {
+        assert!(index < 8, "a pass supports at most 8 color attachments");
+        self.resolve_sizes[index] = [
+            ((texture.width() as u32) >> level).max(1),
+            ((texture.height() as u32) >> level).max(1),
+        ];
         self = self.use_attachment(available_layers);
         let attachment = self
             .desc
@@ -1793,6 +1817,10 @@ impl Pass {
     ) -> Self {
         assert!(level < texture.mips, "mip level is outside the texture");
         assert!(layer < texture.layers, "array layer is outside the texture");
+        self.resolve_sizes[8] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
         self = self.use_attachment(texture.layers - layer);
         let attachment = self.desc.depth_attachment();
         attachment
@@ -1827,6 +1855,10 @@ impl Pass {
     ) -> Self {
         assert!(level < texture.mips, "mip level is outside the texture");
         assert!(layer < texture.layers, "array layer is outside the texture");
+        self.sizes[8] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
         self = self.use_attachment(texture.layers - layer);
         let attachment = self.desc.depth_attachment();
         attachment.base().set_texture(Some(&texture.texture));
@@ -1919,6 +1951,8 @@ impl<'a> Raster<'a> {
         width: u32,
         height: u32,
     ) -> Self {
+        pass.desc.set_render_target_width(width as usize);
+        pass.desc.set_render_target_height(height as usize);
         let encoder = command_buffer
             .render_command_encoder_with_descriptor(&pass.desc)
             .expect("render command encoder");
@@ -2222,17 +2256,22 @@ impl<'a> Raster<'a> {
         );
     }
 
-    /// Copies `root` into this recorder's frame arena and draws `count` vertices from `start`.
     pub fn draw<T>(
         &self,
         pipeline: Pipeline,
         root: T,
-        start: u32,
-        count: u32,
+        vertices: std::ops::Range<u32>,
     ) -> Result<(), Error> {
+        if vertices.start > vertices.end {
+            return Err(Error::new("vertex range ends before it starts"));
+        }
+        let count = vertices.end - vertices.start;
         self.prepare(pipeline, root)?;
-        self.encoder
-            .draw_primitives(self.primitive.get(), start as usize, count as usize);
+        self.encoder.draw_primitives(
+            self.primitive.get(),
+            vertices.start as usize,
+            count as usize,
+        );
         Ok(())
     }
 }
@@ -2302,7 +2341,11 @@ impl<'a> Compute<'a> {
         root: T,
         launch: DispatchThreads,
     ) -> Result<(), Error> {
-        let (threads, group) = launch.grid();
+        let threads = launch.threads;
+        let group = pipeline.group;
+        if group.contains(&0) {
+            return Err(Error::new("dispatch requires a compute pipeline"));
+        }
         self.prepare(pipeline, root)?;
         self.encoder.dispatch_threads(
             Size::new(
@@ -2729,7 +2772,21 @@ impl Recorder<'_> {
         Compute::new(self.command_buffer, self.table, self.arena)
     }
 
-    pub fn raster(&mut self, pass: &Pass, width: u32, height: u32) -> Raster<'_> {
+    pub fn raster(&mut self, pass: &Pass) -> Raster<'_> {
+        let mut extent = [u32::MAX; 2];
+        for size in pass.sizes.iter().chain(&pass.resolve_sizes) {
+            extent[0] = extent[0].min(size[0]);
+            extent[1] = extent[1].min(size[1]);
+        }
+        let [width, height] = pass.area.unwrap_or(extent);
+        assert!(
+            width > 0 && height > 0 && width < u32::MAX && height < u32::MAX,
+            "a pass needs an attachment or an explicit render area"
+        );
+        assert!(
+            width <= extent[0] && height <= extent[1],
+            "the render area exceeds an attachment"
+        );
         Raster::new(
             self.command_buffer,
             self.table,

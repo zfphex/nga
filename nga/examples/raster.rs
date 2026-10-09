@@ -143,10 +143,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         2, 6, 7, 2, 7, 3,
     ];
 
-    let vertex_buffer = heap.alloc_buffer(size_of_val(corners.as_slice()))?;
-    heap.write(&vertex_buffer, 0, &corners);
-    let index_buffer = heap.alloc_buffer(size_of_val(&indices))?;
-    heap.write(&index_buffer, 0, &indices);
+    let vertex_buffer = heap.alloc_slice(&corners)?;
+    let index_buffer = heap.alloc_slice(&indices)?;
     heap.flush()?;
     let vertices: Gpu<[Vertex]> = vertex_buffer.gpu();
 
@@ -231,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pass = Pass::new()
                     .color(0, &drawable, Some([0.04, 0.04, 0.06, 1.0]))
                     .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
-                let raster = recorder.raster(&pass, surface.width(), surface.height());
+                let raster = recorder.raster(&pass);
                 raster.cull(Cull::Back, Winding::Clockwise);
 
                 raster.depth(&depth_write);

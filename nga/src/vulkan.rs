@@ -35,7 +35,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// A compiled pipeline. Opaque so that `VkPipeline` never reaches a caller, and `Copy` so it
 /// can be passed around as freely as the `MTLRenderPipelineState` the Metal side hands out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pipeline(vk::Pipeline);
+pub struct Pipeline {
+    raw: vk::Pipeline,
+    group: [u32; 3],
+}
 
 impl Pipeline {
     /// Always zero. Only Metal lets a shader name a pipeline in a command it encodes; see
@@ -1873,6 +1876,21 @@ impl GpuHeap {
         })
     }
 
+    pub fn alloc_slice<T: Copy>(&mut self, values: &[T]) -> Result<HeapBuffer, Error> {
+        if size_of_val(values) == 0 {
+            return Err(Error::new("a GPU buffer must contain at least one byte"));
+        }
+        let buffer = self.alloc_buffer(size_of_val(values))?;
+        if let Err(error) = self.write(&buffer, 0, values) {
+            match self.flush() {
+                Ok(()) => self.free_buffer(buffer),
+                Err(_) => self.free_later(u64::MAX, Retired::Buffer(buffer)),
+            }
+            return Err(error);
+        }
+        Ok(buffer)
+    }
+
     pub fn alloc_texture(&mut self, desc: &TextureDesc) -> Result<HeapTexture, Error> {
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -1973,19 +1991,16 @@ impl GpuHeap {
     ///
     /// Writes at or below `UPDATE_LIMIT` skip the ring entirely: `vkCmdUpdateBuffer` embeds the
     /// data in the command buffer itself, which is both fewer moving parts and no ring pressure.
-    pub fn write<T: Copy>(&mut self, buffer: &HeapBuffer, offset: usize, values: &[T]) {
-        self.try_write(buffer, offset, values)
-            .expect("staged buffer write failed")
-    }
-
-    pub fn try_write<T: Copy>(
+    pub fn write<T: Copy>(
         &mut self,
         buffer: &HeapBuffer,
         offset: usize,
         values: &[T],
     ) -> Result<(), Error> {
         let bytes = size_of_val(values);
-        debug_assert!(offset + bytes <= buffer.len);
+        if offset > buffer.len || bytes > buffer.len - offset {
+            return Err(Error::new("buffer write is out of bounds"));
+        }
         if bytes == 0 {
             return Ok(());
         }
@@ -2683,6 +2698,7 @@ impl Surface {
         };
         self.cursor = (self.cursor + 1) % self.acquired.len();
         Some(Drawable {
+            size: [self.width, self.height],
             index,
             image: self.images[index as usize],
             view: self.views[index as usize],
@@ -2755,6 +2771,7 @@ impl Drop for Surface {
 
 #[derive(Clone, Copy)]
 pub struct Drawable {
+    pub(crate) size: [u32; 2],
     pub(crate) index: u32,
     pub(crate) image: vk::Image,
     pub(crate) view: vk::ImageView,
@@ -2884,7 +2901,10 @@ impl Shaders {
                 .map_err(|(_, result)| Error::from(result))?
         };
         self.pipelines.push(pipelines[0]);
-        Ok(Pipeline(pipelines[0]))
+        Ok(Pipeline {
+            raw: pipelines[0],
+            group: [0; 3],
+        })
     }
 
     /// Mesh pipelines need `VK_EXT_mesh_shader`, which `Device::new` does not request. The
@@ -2913,6 +2933,12 @@ impl Shaders {
         entry: ComputeShader,
         constants: Option<&dyn Constants>,
     ) -> Result<Pipeline, Error> {
+        let crate::ir::Stage::Compute(group) = entry.0.stage else {
+            return Err(Error::new("expected a compute shader"));
+        };
+        if group.contains(&0) {
+            return Err(Error::new("a compute group has size zero"));
+        }
         let entry = std::ffi::CString::new(entry.0.name).unwrap();
         let specialization = constants.map(|c| specialize(&c.values()));
         let info = specialization.as_ref().map(|(entries, data)| {
@@ -2937,7 +2963,10 @@ impl Shaders {
                 .map_err(|(_, result)| Error::from(result))?
         };
         self.pipelines.push(pipelines[0]);
-        Ok(Pipeline(pipelines[0]))
+        Ok(Pipeline {
+            raw: pipelines[0],
+            group,
+        })
     }
 }
 
@@ -3010,6 +3039,9 @@ impl Attachment {
 }
 
 pub struct Pass {
+    sizes: [[u32; 2]; 9],
+    resolve_sizes: [[u32; 2]; 9],
+    area: Option<[u32; 2]>,
     pub(crate) colors: [Attachment; MAX_COLOR_ATTACHMENTS],
     pub(crate) color_count: usize,
     pub(crate) depth: Option<Attachment>,
@@ -3026,6 +3058,9 @@ impl Default for Pass {
 impl Pass {
     pub fn new() -> Self {
         Self {
+            sizes: [[u32::MAX; 2]; 9],
+            resolve_sizes: [[u32::MAX; 2]; 9],
+            area: None,
             colors: [Attachment::unused(); MAX_COLOR_ATTACHMENTS],
             color_count: 0,
             depth: None,
@@ -3053,6 +3088,12 @@ impl Pass {
             "{message}"
         );
         &mut self.colors[index]
+    }
+
+    pub fn render_area(mut self, width: u32, height: u32) -> Self {
+        assert!(width > 0 && height > 0, "a render area must be nonempty");
+        self.area = Some([width, height]);
+        self
     }
 
     /// Render each primitive into one of `layers` consecutive attachment slices. The vertex
@@ -3106,6 +3147,8 @@ impl Pass {
             resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
+        self.sizes[index] = drawable.size;
+        self.resolve_sizes[index] = [u32::MAX; 2];
         self.set_color(index, attachment);
         self
     }
@@ -3168,6 +3211,11 @@ impl Pass {
             resolve_available_layers: 0,
             resolve_mode: vk::ResolveModeFlags::NONE,
         };
+        self.sizes[index] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
+        self.resolve_sizes[index] = [u32::MAX; 2];
         self.set_color(index, attachment);
         self
     }
@@ -3200,6 +3248,11 @@ impl Pass {
             false => vk::ImageAspectFlags::DEPTH,
         };
         let old_layout = texture.layout.replace(layout);
+        self.sizes[8] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
+        self.resolve_sizes[8] = [u32::MAX; 2];
         self.depth = Some(Attachment {
             view: texture.attachment_view(level, layer),
             image: texture.image,
@@ -3271,6 +3324,7 @@ impl Pass {
         target.resolve_layers = 1;
         target.resolve_available_layers = 1;
         target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
+        self.resolve_sizes[index] = drawable.size;
         self
     }
 
@@ -3303,6 +3357,10 @@ impl Pass {
         target.resolve_layers = texture.layers;
         target.resolve_available_layers = texture.layers - layer;
         target.resolve_mode = vk::ResolveModeFlags::AVERAGE;
+        self.resolve_sizes[index] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
         self
     }
 
@@ -3346,6 +3404,10 @@ impl Pass {
             ResolveMode::Min => vk::ResolveModeFlags::MIN,
             ResolveMode::Max => vk::ResolveModeFlags::MAX,
         };
+        self.resolve_sizes[8] = [
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        ];
         self
     }
 
@@ -3603,7 +3665,7 @@ impl<'a> Raster<'a> {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline.0,
+                pipeline.raw,
             )
         };
     }
@@ -3953,18 +4015,20 @@ impl<'a> Raster<'a> {
         };
     }
 
-    /// Copies `root` into this recorder's frame arena and draws `count` vertices from `start`.
     pub fn draw<T>(
         &self,
         pipeline: Pipeline,
         root: T,
-        start: u32,
-        count: u32,
+        vertices: std::ops::Range<u32>,
     ) -> Result<(), Error> {
+        if vertices.start > vertices.end {
+            return Err(Error::new("vertex range ends before it starts"));
+        }
+        let count = vertices.end - vertices.start;
         self.prepare(pipeline, root)?;
         unsafe {
             self.device
-                .cmd_draw(self.command_buffer, count, 1, start, 0)
+                .cmd_draw(self.command_buffer, count, 1, vertices.start, 0)
         };
         Ok(())
     }
@@ -4009,7 +4073,7 @@ impl<'a> Compute<'a> {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                pipeline.0,
+                pipeline.raw,
             )
         };
     }
@@ -4048,7 +4112,11 @@ impl<'a> Compute<'a> {
         root: T,
         launch: DispatchThreads,
     ) -> Result<(), Error> {
-        let (threads, group) = launch.grid();
+        let threads = launch.threads;
+        let group = pipeline.group;
+        if group.contains(&0) {
+            return Err(Error::new("dispatch requires a compute pipeline"));
+        }
         self.prepare(pipeline, root)?;
         unsafe {
             self.device.cmd_dispatch(
@@ -4593,7 +4661,21 @@ impl Recorder<'_> {
         Compute::new(self.device, self.command_buffer, self.layout, self.arena)
     }
 
-    pub fn raster(&mut self, pass: &Pass, width: u32, height: u32) -> Raster<'_> {
+    pub fn raster(&mut self, pass: &Pass) -> Raster<'_> {
+        let mut extent = [u32::MAX; 2];
+        for size in pass.sizes.iter().chain(&pass.resolve_sizes) {
+            extent[0] = extent[0].min(size[0]);
+            extent[1] = extent[1].min(size[1]);
+        }
+        let [width, height] = pass.area.unwrap_or(extent);
+        assert!(
+            width > 0 && height > 0 && width < u32::MAX && height < u32::MAX,
+            "a pass needs an attachment or an explicit render area"
+        );
+        assert!(
+            width <= extent[0] && height <= extent[1],
+            "the render area exceeds an attachment"
+        );
         Raster::new(
             self.device,
             self.commands,
