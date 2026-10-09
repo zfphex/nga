@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let depth_write = DepthState::new(CompareOp::Less, true);
 
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let vertices = heap.alloc_buffer(COUNT * 3 * size_of::<Vertex>())?;
     let instances_rw: GpuRw<[Instance]> = instances.gpu_rw();
@@ -74,9 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_none_or(|&(_, w, h)| w != surface.width() || h != surface.height())
             {
                 device.wait_idle().unwrap();
-                if let Some((old, _, _)) = depth.take() {
-                    heap.free_texture(old);
-                }
+                depth = None;
                 let texture = heap
                     .alloc_texture(&TextureDesc::depth(
                         DEPTH_FORMAT,
@@ -96,59 +94,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ]);
 
             let mut frame = ctx.begin_frame().unwrap();
-            let mut rec = frame.recorder();
+            let rec = frame.recorder();
 
-            {
-                let compute = rec.compute();
-                compute
-                    .dispatch(
-                        simulate,
-                        SimData {
-                            instances: instances_rw,
-                            time,
-                            count: COUNT as u32,
-                        },
-                        Dispatch::x(COUNT),
-                    )
-                    .unwrap();
-                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
-                compute
-                    .dispatch(
-                        build,
-                        BuildData {
-                            instances: instances_ro,
-                            vertices: vertices_rw,
-                            count: COUNT as u32,
-                            pad: 0,
-                        },
-                        Dispatch::x(COUNT),
-                    )
-                    .unwrap();
-                // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
-                // cross-encoder fence inside one command buffer: a barrier on the queue is the
-                // whole mechanism, so the compute -> vertex handoff is one more `barrier`.
-                compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
-            }
+            let compute = rec.compute();
+            compute
+                .dispatch(
+                    simulate,
+                    SimData {
+                        instances: instances_rw,
+                        time,
+                        count: COUNT as u32,
+                    },
+                    Dispatch::x(COUNT),
+                )
+                .unwrap();
+            compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
+            compute
+                .dispatch(
+                    build,
+                    BuildData {
+                        instances: instances_ro,
+                        vertices: vertices_rw,
+                        count: COUNT as u32,
+                        pad: 0,
+                    },
+                    Dispatch::x(COUNT),
+                )
+                .unwrap();
+            // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
+            // cross-encoder fence inside one command buffer: a barrier on the queue is the
+            // whole mechanism, so the compute -> vertex handoff is one more `barrier`.
+            compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
 
-            {
-                let pass = Pass::new()
-                    .color(0, &drawable, Some([0.03, 0.03, 0.05, 1.0]))
-                    .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
-                let raster = rec.raster(&pass);
-                raster.depth(&depth_write);
-                raster
-                    .draw(
-                        draw,
-                        DrawData {
-                            vertices: vertices_ro,
-                            mvp,
-                        },
-                        0..(COUNT * 3) as u32,
-                    )
-                    .unwrap();
-            }
+            let pass = Pass::new()
+                .color(0, &drawable, Some([0.03, 0.03, 0.05, 1.0]))
+                .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
+            let raster = rec.raster(&pass);
+            raster.depth(&depth_write);
+            raster
+                .draw(
+                    draw,
+                    DrawData {
+                        vertices: vertices_ro,
+                        mvp,
+                    },
+                    0..(COUNT * 3) as u32,
+                )
+                .unwrap();
 
-            drop(rec);
             frame.submit(Some(&drawable)).unwrap();
 
             resized = surface.present(&device, &drawable);
@@ -160,10 +153,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    if let Some((texture, _, _)) = depth.take() {
-        heap.free_texture(texture);
-    }
-    heap.free_buffer(vertices);
-    heap.free_buffer(instances);
     Ok(())
 }

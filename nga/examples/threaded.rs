@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .color(surface.format())
         .build()?;
 
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(FRAMES_IN_FLIGHT as usize * COUNT * size_of::<Instance>())?;
     let vertices =
         heap.alloc_buffer(FRAMES_IN_FLIGHT as usize * COUNT * 3 * size_of::<Vertex>())?;
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let recorders = frame.recorders(&[THREADS]);
 
             std::thread::scope(|scope| {
-                for (index, mut rec) in recorders.into_iter().enumerate() {
+                for (index, rec) in recorders.into_iter().enumerate() {
                     let (simulate, build, draw, drawable) = (simulate, build, draw, &drawable);
                     let instance_base = instances.address()
                         + ((slot + index * SLICE) * size_of::<Instance>()) as u64;
@@ -85,34 +85,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         + ((slot + index * SLICE) * 3 * size_of::<Vertex>()) as u64;
 
                     scope.spawn(move || {
-                        {
-                            let compute = rec.compute();
-                            compute
-                                .dispatch(
-                                    simulate,
-                                    SimData {
-                                        instances: unsafe { GpuRw::new(instance_base) },
-                                        time: time + index as f32 * 0.35,
-                                        count: SLICE as u32,
-                                    },
-                                    Dispatch::x(SLICE),
-                                )
-                                .unwrap();
-                            compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
-                            compute
-                                .dispatch(
-                                    build,
-                                    BuildData {
-                                        instances: unsafe { Gpu::new(instance_base) },
-                                        vertices: unsafe { GpuRw::new(vertex_base) },
-                                        count: SLICE as u32,
-                                        pad: 0,
-                                    },
-                                    Dispatch::x(SLICE),
-                                )
-                                .unwrap();
-                            compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
-                        }
+                        let compute = rec.compute();
+                        compute
+                            .dispatch(
+                                simulate,
+                                SimData {
+                                    instances: unsafe { GpuRw::new(instance_base) },
+                                    time: time + index as f32 * 0.35,
+                                    count: SLICE as u32,
+                                },
+                                Dispatch::x(SLICE),
+                            )
+                            .unwrap();
+                        compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
+                        compute
+                            .dispatch(
+                                build,
+                                BuildData {
+                                    instances: unsafe { Gpu::new(instance_base) },
+                                    vertices: unsafe { GpuRw::new(vertex_base) },
+                                    count: SLICE as u32,
+                                    pad: 0,
+                                },
+                                Dispatch::x(SLICE),
+                            )
+                            .unwrap();
+                        compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
 
                         // Only the first thread clears; the rest load. `Raster::new` turns that
                         // into the right layout transition, which is what keeps four separately
@@ -148,7 +146,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    heap.free_buffer(vertices);
-    heap.free_buffer(instances);
     Ok(())
 }

@@ -112,27 +112,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (sin, cos) = angle.sin_cos();
             let aspect = surface.height() as f32 / surface.width() as f32;
 
-            let mut recorder = frame.recorder();
-            {
-                let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
-                let raster = recorder.raster(&pass);
-                raster
-                    .draw(
-                        pipeline,
-                        Data {
-                            vertices,
-                            mvp: f32x4x4([
-                                [cos * aspect, sin, 0.0, 0.0],
-                                [-sin * aspect, cos, 0.0, 0.0],
-                                [0.0, 0.0, 1.0, 0.0],
-                                [0.0, 0.0, 0.0, 1.0],
-                            ]),
-                        },
-                        0..3,
-                    )
-                    .unwrap();
-            }
-            drop(recorder);
+            let recorder = frame.recorder();
+            let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
+            let raster = recorder.raster(&pass);
+            raster
+                .draw(
+                    pipeline,
+                    Data {
+                        vertices,
+                        mvp: f32x4x4([
+                            [cos * aspect, sin, 0.0, 0.0],
+                            [-sin * aspect, cos, 0.0, 0.0],
+                            [0.0, 0.0, 1.0, 0.0],
+                            [0.0, 0.0, 0.0, 1.0],
+                        ]),
+                    },
+                    0..3,
+                )
+                .unwrap();
+
             frame.submit(Some(&drawable)).unwrap();
 
             resized = surface.present(&device, &drawable);
@@ -143,9 +141,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    drop(mesh);
-    drop(ctx);
-    drop(shaders);
-    surface.destroy(&device);
     Ok(())
 }

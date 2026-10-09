@@ -293,7 +293,7 @@ mod commands {
         let object_list = storage.alloc_slice(&objects).unwrap();
         let object_list: Gpu<[Object]> = object_list.gpu;
 
-        let mut heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
+        let heap = GpuHeap::new(&device, 128 * 1024 * 1024)?;
         let draws = heap.alloc_buffer(size_of::<DrawData>() * OBJECTS as usize)?;
         let mut depth = heap.alloc_texture(&TextureDesc::depth(
             Format::D32Float,
@@ -357,48 +357,43 @@ mod commands {
                 ]);
 
                 let mut frame = ctx.begin_frame().unwrap();
-                let mut rec = frame.recorder();
+                let rec = frame.recorder();
 
-                {
-                    let compute = rec.compute();
-                    // A slot the encode pass does not claim keeps whatever it last held, so the
-                    // buffer is cleared first. A reset slot replays as nothing, which is what
-                    // makes "execute everything" safe without a GPU-side count.
-                    compute.reset(&commands, commands.all());
-                    compute
-                        .dispatch(
-                            encode,
-                            EncodeData {
-                                objects: object_list,
-                                vertices,
-                                draws: draws.gpu_rw(),
-                                commands: commands.handle(),
-                                pipelines: [solid.handle(), wire.handle()],
-                                viewproj,
-                                time,
-                                cull_radius: 0.9 + 0.5 * (time * 0.4).sin(),
-                                count: OBJECTS,
-                                tri_start: 0,
-                                tri_count,
-                                line_start: tri_count,
-                                line_count,
-                            },
-                            Dispatch::x(OBJECTS as usize),
-                        )
-                        .unwrap();
-                    compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::DRAW_ARGUMENTS);
-                }
-                {
-                    let pass = Pass::new()
-                        .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
-                        .depth(&depth, Some(1.0), false);
-                    let raster = rec.raster(&pass);
-                    raster.depth(&DepthState::new(CompareOp::LessEqual, true));
-                    // Every command the shader wrote, pipeline choice included.
-                    raster.execute(&commands, commands.all());
-                }
+                let compute = rec.compute();
+                // A slot the encode pass does not claim keeps whatever it last held, so the
+                // buffer is cleared first. A reset slot replays as nothing, which is what
+                // makes "execute everything" safe without a GPU-side count.
+                compute.reset(&commands, commands.all());
+                compute
+                    .dispatch(
+                        encode,
+                        EncodeData {
+                            objects: object_list,
+                            vertices,
+                            draws: draws.gpu_rw(),
+                            commands: commands.handle(),
+                            pipelines: [solid.handle(), wire.handle()],
+                            viewproj,
+                            time,
+                            cull_radius: 0.9 + 0.5 * (time * 0.4).sin(),
+                            count: OBJECTS,
+                            tri_start: 0,
+                            tri_count,
+                            line_start: tri_count,
+                            line_count,
+                        },
+                        Dispatch::x(OBJECTS as usize),
+                    )
+                    .unwrap();
+                compute.barrier(Stage::COMPUTE, Stage::INDIRECT, Hazard::DRAW_ARGUMENTS);
+                let pass = Pass::new()
+                    .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
+                    .depth(&depth, Some(1.0), false);
+                let raster = rec.raster(&pass);
+                raster.depth(&DepthState::new(CompareOp::LessEqual, true));
+                // Every command the shader wrote, pipeline choice included.
+                raster.execute(&commands, commands.all());
 
-                drop(rec);
                 frame.submit(Some(&drawable)).unwrap();
                 surface.present(&device, &drawable);
                 time += 1.0 / 60.0;
@@ -407,8 +402,6 @@ mod commands {
 
         device.wait_idle()?;
         heap.retire(u64::MAX);
-        heap.free_buffer(draws);
-        heap.free_texture(depth);
         surface.destroy(&device);
         Ok(())
     }

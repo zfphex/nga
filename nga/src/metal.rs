@@ -55,10 +55,10 @@ use minmetal::{
     Texture, TextureDescriptor, TextureType, TextureUsage, TextureViewPool, VisibilityResultMode,
     VisibilityResultType, id, retain,
 };
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -739,15 +739,15 @@ impl Arena {
 
 // -- heaps -------------------------------------------------------------------------------
 
-pub struct HeapBuffer {
+pub struct HeapBuffer<'heap> {
     pub(crate) buffer: Buffer,
     pub(crate) gpu: u64,
     pub(crate) cpu: *mut u8,
     pub(crate) len: usize,
-    pub(crate) alloc: Alloc,
+    _allocation: HeapAllocation<'heap>,
 }
 
-impl HeapBuffer {
+impl HeapBuffer<'_> {
     /// The device address, for a field of a struct a shader dereferences.
     ///
     /// Copying it does not keep this buffer alive. [`GpuHeap::free_later`] is what waits
@@ -774,17 +774,17 @@ impl HeapBuffer {
     }
 }
 
-pub struct HeapTexture {
+pub struct HeapTexture<'heap> {
     pub(crate) texture: Texture,
     pub(crate) format: Format,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
-    pub(crate) alloc: Alloc,
+    _allocation: HeapAllocation<'heap>,
 }
 
-impl HeapTexture {
+impl HeapTexture<'_> {
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -921,15 +921,35 @@ impl TextureDesc {
     }
 }
 
+enum PendingResource {
+    Buffer(Buffer),
+    Texture(Texture),
+}
+
+struct HeapStorage {
+    tlsf: UnsafeCell<Tlsf>,
+    heap: Heap,
+}
+
+struct HeapAllocation<'heap> {
+    block: u32,
+    storage: &'heap HeapStorage,
+}
+
+impl Drop for HeapAllocation<'_> {
+    fn drop(&mut self) {
+        unsafe { (*self.storage.tlsf.get()).free(self.block) };
+    }
+}
+
 /// One placement heap with a TLSF allocator over it. Unlike the Vulkan heap this is host
 /// visible, so there is no upload ring and no staging. `write` is a memcpy and `flush` is a
 /// no-op kept only so the two backends match.
 pub struct GpuHeap {
     pub(crate) device: minmetal::Device,
-    pub(crate) heap: Heap,
-    pub(crate) tlsf: Tlsf,
+    storage: HeapStorage,
     pub(crate) options: ResourceOptions,
-    pub(crate) retired: VecDeque<(u64, Retired)>,
+    retired: UnsafeCell<VecDeque<(u64, u32, PendingResource)>>,
 }
 
 impl GpuHeap {
@@ -953,32 +973,38 @@ impl GpuHeap {
         device.make_resident(&Allocation::from_heap(&heap))?;
         Ok(Self {
             device: device.device.clone(),
-            heap,
-            tlsf: Tlsf::new(size, 256),
+            storage: HeapStorage {
+                heap,
+                tlsf: UnsafeCell::new(Tlsf::new(size, 256)),
+            },
             options,
-            retired: VecDeque::new(),
+            retired: UnsafeCell::new(VecDeque::new()),
         })
     }
 
-    pub fn alloc_buffer(&mut self, len: usize) -> Result<HeapBuffer, Error> {
+    pub fn alloc_buffer(&self, len: usize) -> Result<HeapBuffer<'_>, Error> {
         let need = self.device.heap_buffer_size_and_align(len, self.options);
-        let alloc = self
-            .tlsf
+        let alloc = unsafe { &mut *self.storage.tlsf.get() }
             .alloc(need.size as u64, need.align as u64)
             .ok_or(Error::new("gpu heap is full"))?;
-        let buffer = self
-            .heap
-            .new_buffer_at_offset(len, self.options, alloc.offset as usize)?;
+        let allocation = HeapAllocation {
+            block: alloc.block,
+            storage: &self.storage,
+        };
+        let buffer =
+            self.storage
+                .heap
+                .new_buffer_at_offset(len, self.options, alloc.offset as usize)?;
         Ok(HeapBuffer {
             gpu: buffer.gpu_address()?,
             cpu: buffer.contents() as *mut u8,
             len,
-            alloc,
+            _allocation: allocation,
             buffer,
         })
     }
 
-    pub fn alloc_slice<T: Copy>(&mut self, values: &[T]) -> Result<HeapBuffer, Error> {
+    pub fn alloc_slice<T: Copy>(&self, values: &[T]) -> Result<HeapBuffer<'_>, Error> {
         if size_of_val(values) == 0 {
             return Err(Error::new("a GPU buffer must contain at least one byte"));
         }
@@ -990,16 +1016,20 @@ impl GpuHeap {
         Ok(buffer)
     }
 
-    pub fn alloc_texture(&mut self, desc: &TextureDesc) -> Result<HeapTexture, Error> {
+    pub fn alloc_texture(&self, desc: &TextureDesc) -> Result<HeapTexture<'_>, Error> {
         let descriptor = desc.descriptor();
         descriptor.set_storage_mode(StorageMode::Shared);
         let need = self.device.heap_texture_size_and_align(&descriptor);
-        let alloc = self
-            .tlsf
+        let alloc = unsafe { &mut *self.storage.tlsf.get() }
             .alloc(need.size as u64, need.align as u64)
             .ok_or(Error::new("gpu heap is full"))?;
+        let allocation = HeapAllocation {
+            block: alloc.block,
+            storage: &self.storage,
+        };
         Ok(HeapTexture {
             texture: self
+                .storage
                 .heap
                 .new_texture_at_offset(&descriptor, alloc.offset as usize)?,
             format: desc.format,
@@ -1007,14 +1037,14 @@ impl GpuHeap {
             height: desc.height,
             mips: desc.mips,
             layers: desc.layers,
-            alloc,
+            _allocation: allocation,
         })
     }
 
     /// A memcpy. This is the half of unified memory Vulkan cannot give back: there, the same
     /// call stages through a ring and records a copy.
     pub fn write<T: Copy>(
-        &mut self,
+        &self,
         buffer: &HeapBuffer,
         offset: usize,
         values: &[T],
@@ -1035,13 +1065,13 @@ impl GpuHeap {
 
     /// `replaceRegion` writes straight into the texture. No staging buffer, no command buffer.
     /// This is the call `VK_EXT_host_image_copy` was meant to be.
-    pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+    pub fn upload(&self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
         self.upload_layer(texture, level, 0, bytes)
     }
 
     /// Upload one complete mip level of one array layer.
     pub fn upload_layer(
-        &mut self,
+        &self,
         texture: &HeapTexture,
         level: u32,
         layer: u32,
@@ -1098,59 +1128,91 @@ impl GpuHeap {
     }
 
     /// Nothing is staged, so there is nothing to submit.
-    pub fn flush(&mut self) -> Result<(), Error> {
+    pub fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
 
     /// The timeline value a frame would wait on. Zero: an upload here is already visible.
-    pub fn flush_async(&mut self) -> Result<u64, Error> {
+    pub fn flush_async(&self) -> Result<u64, Error> {
         Ok(0)
     }
 
-    pub fn free(&mut self, alloc: Alloc) {
-        self.tlsf.free(alloc.block);
+    pub fn free(&self, alloc: Alloc) {
+        unsafe { (*self.storage.tlsf.get()).free(alloc.block) };
     }
 
     /// Metal has no image layouts, so there is nothing to transition into. The method exists
     /// because Vulkan cannot do without it.
-    pub fn transition(&mut self, _texture: &HeapTexture, _usage: Usage) {}
+    pub fn transition(&self, _texture: &HeapTexture, _usage: Usage) {}
 
-    pub fn free_buffer(&mut self, buffer: HeapBuffer) {
-        self.tlsf.free(buffer.alloc.block);
+    pub fn free_buffer(&self, buffer: HeapBuffer) {
+        drop(buffer);
     }
 
-    pub fn free_texture(&mut self, texture: HeapTexture) {
-        self.tlsf.free(texture.alloc.block);
+    pub fn free_texture(&self, texture: HeapTexture) {
+        drop(texture);
     }
 
     /// Hand a resource over to be released once the frame that last used it has finished.
     ///
     /// `frame` is [`Context::frame`] at the point of the hand-over. A [`Gpu`] copied out of the
     /// resource does not delay this. Pass the frame that is still reading it.
-    pub fn free_later(&mut self, frame: u64, retired: Retired) {
-        self.retired.push_back((frame, retired));
+    pub fn free_later(&self, frame: u64, retired: Retired<'_>) {
+        let (block, resource) = match retired {
+            Retired::Buffer(buffer) => {
+                assert!(std::ptr::eq(buffer._allocation.storage, &self.storage));
+                let HeapBuffer {
+                    buffer,
+                    _allocation,
+                    ..
+                } = buffer;
+                let block = _allocation.block;
+                std::mem::forget(_allocation);
+                (block, PendingResource::Buffer(buffer))
+            }
+            Retired::Texture(texture) => {
+                assert!(std::ptr::eq(texture._allocation.storage, &self.storage));
+                let HeapTexture {
+                    texture,
+                    _allocation,
+                    ..
+                } = texture;
+                let block = _allocation.block;
+                std::mem::forget(_allocation);
+                (block, PendingResource::Texture(texture))
+            }
+        };
+        unsafe { &mut *self.retired.get() }.push_back((frame, block, resource));
     }
 
     /// Release everything handed over during a frame that has since completed. `completed` is
     /// [`Context::completed`]; call this once a frame, before allocating.
-    pub fn retire(&mut self, completed: u64) {
-        while self
-            .retired
-            .front()
-            .is_some_and(|&(frame, _)| frame < completed)
-        {
-            match self.retired.pop_front().unwrap().1 {
-                Retired::Buffer(buffer) => self.free_buffer(buffer),
-                Retired::Texture(texture) => self.free_texture(texture),
+    pub fn retire(&self, completed: u64) {
+        let retired = unsafe { &mut *self.retired.get() };
+        while let Some(&(frame, _, _)) = retired.front() {
+            if frame >= completed && completed != u64::MAX {
+                break;
             }
+            let (_, block, resource) = retired.pop_front().unwrap();
+            match resource {
+                PendingResource::Buffer(buffer) => drop(buffer),
+                PendingResource::Texture(texture) => drop(texture),
+            }
+            unsafe { (*self.storage.tlsf.get()).free(block) };
         }
     }
 }
 
+impl Drop for GpuHeap {
+    fn drop(&mut self) {
+        self.retire(u64::MAX);
+    }
+}
+
 /// A resource waiting for the GPU to be done with it. See [`GpuHeap::free_later`].
-pub enum Retired {
-    Buffer(HeapBuffer),
-    Texture(HeapTexture),
+pub enum Retired<'heap> {
+    Buffer(HeapBuffer<'heap>),
+    Texture(HeapTexture<'heap>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2548,6 +2610,7 @@ pub struct Context {
     pub(crate) depth_states: [MetalDepthStencilState; 16],
     pub(crate) threads: usize,
     pub(crate) frame: u64,
+    recorders: Box<[MaybeUninit<Recorder<'static>>]>,
 }
 
 impl Context {
@@ -2622,6 +2685,7 @@ impl Context {
             depth_states,
             threads,
             frame: 0,
+            recorders: Box::new_uninit_slice(threads),
         })
     }
 
@@ -2639,7 +2703,6 @@ impl Context {
 
     pub fn begin_frame(&mut self) -> Result<Frame<'_>, Error> {
         let index = self.frame;
-        self.frame += 1;
         if index >= FRAMES_IN_FLIGHT
             && !self
                 .event
@@ -2664,6 +2727,10 @@ impl Context {
             tables: &self.tables[slots],
             depth_states: &self.depth_states,
             recording: 0,
+            recorders: unsafe {
+                std::slice::from_raw_parts_mut(self.recorders.as_mut_ptr().cast(), self.threads)
+            },
+            frame: &mut self.frame,
             value: index + 1,
         })
     }
@@ -2678,7 +2745,9 @@ pub struct Frame<'a> {
     pub(crate) tables: &'a [M4ArgumentTable],
     pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) recording: usize,
+    recorders: &'a mut [MaybeUninit<Recorder<'a>>],
     pub(crate) value: u64,
+    frame: &'a mut u64,
 }
 
 impl<'a> Frame<'a> {
@@ -2693,40 +2762,37 @@ impl<'a> Frame<'a> {
     }
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
     /// One recorder per thread, each with its own command buffer, argument table and arena
     /// slot. `nga` takes a count per queue; with one queue this is `&[n]`.
-    pub fn recorders(&mut self, counts: &[usize]) -> Vec<Recorder<'_>> {
-        debug_assert!(
+    pub fn recorders(&mut self, counts: &[usize]) -> &mut [Recorder<'a>] {
+        assert!(
             self.recording == 0,
             "recorders already taken for this frame"
         );
         let count: usize = counts.iter().sum();
-        debug_assert!(
-            count <= self.command_buffers.len(),
-            "{count} recorders requested, Context::new was given {}",
-            self.command_buffers.len()
-        );
-        self.recording = count;
-        (0..count).map(|index| self.record(index)).collect()
+        assert!(count <= self.command_buffers.len());
+        for _ in 0..count {
+            self.recorder();
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.recorders.as_mut_ptr().cast(), count) }
     }
 
-    pub fn recorder(&mut self) -> Recorder<'_> {
+    pub fn recorder(&mut self) -> &mut Recorder<'a> {
         let index = self.recording;
-        self.recording += 1;
-        debug_assert!(index < self.command_buffers.len());
-        self.record(index)
-    }
-
-    fn record(&self, index: usize) -> Recorder<'_> {
+        assert!(index < self.command_buffers.len());
         self.command_buffers[index].begin_command_buffer_with_allocator(&self.allocators[index]);
-        Recorder {
+        let recorder = self.recorders[index].write(Recorder {
             arena: &self.arenas[index],
             command_buffer: &self.command_buffers[index],
             table: &self.tables[index],
             depth_states: self.depth_states,
             not_sync: PhantomData,
-        }
+            compute: None,
+            raster: None,
+        });
+        self.recording += 1;
+        recorder
     }
 
     /// Uploads are memcpys here, so there is nothing for the GPU to wait on.
@@ -2734,17 +2800,32 @@ impl Frame<'_> {
 
     /// Unlike Vulkan, presenting is part of submission: the queue has to signal the drawable
     /// after the work that draws into it, and only then can it be presented.
-    pub fn submit(self, drawable: Option<&Drawable>) -> Result<(), Error> {
+    pub fn submit(mut self, drawable: Option<&Drawable>) -> Result<(), Error> {
+        let recording = self.recording;
+        while self.recording > 0 {
+            self.recording -= 1;
+            unsafe { self.recorders[self.recording].assume_init_drop() };
+        }
         if let Some(drawable) = drawable {
             self.queue.wait_for_drawable(&drawable.drawable);
         }
-        self.queue.commit(&self.command_buffers[..self.recording]);
+        self.queue.commit(&self.command_buffers[..recording]);
         self.queue.signal_event(&self.event.as_event(), self.value);
         if let Some(drawable) = drawable {
             self.queue.signal_drawable(&drawable.drawable);
             drawable.drawable.present();
         }
+        *self.frame = self.value;
         Ok(())
+    }
+}
+
+impl Drop for Frame<'_> {
+    fn drop(&mut self) {
+        while self.recording > 0 {
+            self.recording -= 1;
+            unsafe { self.recorders[self.recording].assume_init_drop() };
+        }
     }
 }
 
@@ -2754,6 +2835,8 @@ pub struct Recorder<'a> {
     pub(crate) table: &'a M4ArgumentTable,
     pub(crate) depth_states: &'a [MetalDepthStencilState; 16],
     pub(crate) not_sync: PhantomData<Cell<()>>,
+    compute: Option<Compute<'a>>,
+    raster: Option<Raster<'a>>,
 }
 
 impl<'a> Recorder<'a> {
@@ -2767,12 +2850,17 @@ impl<'a> Recorder<'a> {
     }
 }
 
-impl Recorder<'_> {
-    pub fn compute(&mut self) -> Compute<'_> {
-        Compute::new(self.command_buffer, self.table, self.arena)
+impl<'a> Recorder<'a> {
+    pub fn compute(&mut self) -> &Compute<'a> {
+        self.raster = None;
+        self.compute = None;
+        self.compute
+            .insert(Compute::new(self.command_buffer, self.table, self.arena))
     }
 
-    pub fn raster(&mut self, pass: &Pass) -> Raster<'_> {
+    pub fn raster(&mut self, pass: &Pass) -> &Raster<'a> {
+        self.compute = None;
+        self.raster = None;
         let mut extent = [u32::MAX; 2];
         for size in pass.sizes.iter().chain(&pass.resolve_sizes) {
             extent[0] = extent[0].min(size[0]);
@@ -2787,7 +2875,7 @@ impl Recorder<'_> {
             width <= extent[0] && height <= extent[1],
             "the render area exceeds an attachment"
         );
-        Raster::new(
+        self.raster.insert(Raster::new(
             self.command_buffer,
             self.table,
             self.arena,
@@ -2795,12 +2883,14 @@ impl Recorder<'_> {
             pass,
             width,
             height,
-        )
+        ))
     }
 }
 
 impl Drop for Recorder<'_> {
     fn drop(&mut self) {
+        self.compute = None;
+        self.raster = None;
         self.command_buffer.end_command_buffer();
     }
 }

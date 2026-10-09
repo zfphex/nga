@@ -248,36 +248,33 @@ mod meshlets {
 
                 let mut frame = ctx.begin_frame().unwrap();
                 timers.begin(&frame);
-                let mut rec = frame.recorder();
+                let rec = frame.recorder();
 
-                {
-                    let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
-                    let raster = rec.raster(&pass);
-                    raster.timestamp(&timers, 0);
-                    // One object threadgroup per `PER_GROUP` candidates, each amplifying into
-                    // as many mesh threadgroups as survived. `RING + 1` mesh threads emit the
-                    // fan; the object group is one thread per candidate.
-                    raster
-                        .draw_mesh(
-                            pipeline,
-                            Scene {
-                                meshlets,
-                                mvp,
-                                // Sweeps in and out, so the number of surviving meshlets, and with it
-                                // the size of the mesh grid, changes every frame.
-                                cull_radius: 0.55 + 0.45 * (time * 0.5).sin(),
-                                time,
-                                meshlet_count: MESHLETS,
-                            },
-                            [MESHLETS.div_ceil(PER_GROUP), 1, 1],
-                            [PER_GROUP, 1, 1],
-                            [16, 1, 1],
-                        )
-                        .unwrap();
-                    raster.timestamp(&timers, 1);
-                }
+                let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
+                let raster = rec.raster(&pass);
+                raster.timestamp(&timers, 0);
+                // One object threadgroup per `PER_GROUP` candidates, each amplifying into
+                // as many mesh threadgroups as survived. `RING + 1` mesh threads emit the
+                // fan; the object group is one thread per candidate.
+                raster
+                    .draw_mesh(
+                        pipeline,
+                        Scene {
+                            meshlets,
+                            mvp,
+                            // Sweeps in and out, so the number of surviving meshlets, and with it
+                            // the size of the mesh grid, changes every frame.
+                            cull_radius: 0.55 + 0.45 * (time * 0.5).sin(),
+                            time,
+                            meshlet_count: MESHLETS,
+                        },
+                        [MESHLETS.div_ceil(PER_GROUP), 1, 1],
+                        [PER_GROUP, 1, 1],
+                        [16, 1, 1],
+                    )
+                    .unwrap();
+                raster.timestamp(&timers, 1);
 
-                drop(rec);
                 frame.submit(Some(&drawable)).unwrap();
                 surface.present(&device, &drawable);
 

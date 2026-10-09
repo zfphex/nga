@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let paint_pipeline = shaders.compute(bindless::PAINT)?;
 
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     // One sampler plus one range of layers per quad. A heap costs descriptor bytes for the
     // slots it is asked for, so this asks for what it uses rather than for the ceiling.
     let mut textures = ResourceHeap::new(&device, 1 + QUADS * LAYERS)?;
@@ -239,48 +239,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let aspect = surface.height() as f32 / surface.width() as f32;
             let mut frame = ctx.begin_frame().unwrap();
-            let mut rec = frame.recorder();
+            let rec = frame.recorder();
 
-            {
-                let compute = rec.compute();
-                compute.heap(&textures);
-                compute
-                    .dispatch(
-                        paint_pipeline,
-                        Paint {
-                            target: paint_target,
-                            size: TEX,
-                            time,
-                        },
-                        Dispatch::xy(TEX, TEX),
-                    )
-                    .unwrap();
-                compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::TEXTURES);
-            }
+            let compute = rec.compute();
+            compute.heap(&textures);
+            compute
+                .dispatch(
+                    paint_pipeline,
+                    Paint {
+                        target: paint_target,
+                        size: TEX,
+                        time,
+                    },
+                    Dispatch::xy(TEX, TEX),
+                )
+                .unwrap();
+            compute.barrier(Stage::COMPUTE, Stage::PIXEL, Hazard::TEXTURES);
 
-            {
-                let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
-                let raster = rec.raster(&pass);
-                raster.heap(&textures);
-                raster
-                    .draw(
-                        pipeline,
-                        Data {
-                            vertices: vertex_buffer.gpu(),
-                            materials: material_buffer.gpu(),
-                            mvp: f32x4x4([
-                                [aspect.min(1.0), 0.0, 0.0, 0.0],
-                                [0.0, (1.0 / aspect).min(1.0), 0.0, 0.0],
-                                [0.0, 0.0, 1.0, 0.0],
-                                [0.0, 0.0, 0.0, 1.0],
-                            ]),
-                        },
-                        0..QUADS * 6,
-                    )
-                    .unwrap();
-            }
+            let pass = Pass::new().color(0, &drawable, Some([0.05, 0.05, 0.07, 1.0]));
+            let raster = rec.raster(&pass);
+            raster.heap(&textures);
+            raster
+                .draw(
+                    pipeline,
+                    Data {
+                        vertices: vertex_buffer.gpu(),
+                        materials: material_buffer.gpu(),
+                        mvp: f32x4x4([
+                            [aspect.min(1.0), 0.0, 0.0, 0.0],
+                            [0.0, (1.0 / aspect).min(1.0), 0.0, 0.0],
+                            [0.0, 0.0, 1.0, 0.0],
+                            [0.0, 0.0, 0.0, 1.0],
+                        ]),
+                    },
+                    0..QUADS * 6,
+                )
+                .unwrap();
 
-            drop(rec);
             frame.submit(Some(&drawable)).unwrap();
 
             resized = surface.present(&device, &drawable);
@@ -292,11 +287,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    for texture in live {
-        heap.free_texture(texture);
-    }
-    heap.free_buffer(material_buffer);
-    heap.free_buffer(vertex_buffer);
     // The sampler destroys itself; nothing here has to name a Vulkan call to tear down.
     drop(sampler);
     Ok(())

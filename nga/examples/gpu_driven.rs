@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .topology(Topology::TriangleStrip)
         .build()?;
 
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
     let instances = heap.alloc_buffer(COUNT * size_of::<Instance>())?;
     let draws = heap.alloc_buffer(COUNT * size_of::<DrawArgs>())?;
     let range = heap.alloc_buffer(size_of::<ExecutionRange>())?;
@@ -224,79 +224,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cull_radius = 0.55 + 0.35 * (time * 0.6).sin();
 
             let mut frame = ctx.begin_frame().unwrap();
-            let mut rec = frame.recorder();
+            let rec = frame.recorder();
 
-            {
-                let compute = rec.compute();
-                // Clear `{ location, length }`. Only compact slots below the new length execute,
-                // so neither backend needs the entire draw array cleared.
-                compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
-                compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::BUFFERS);
+            let compute = rec.compute();
+            // Clear `{ location, length }`. Only compact slots below the new length execute,
+            // so neither backend needs the entire draw array cleared.
+            compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
+            compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::BUFFERS);
 
-                compute
-                    .dispatch(
-                        simulate,
-                        SimData {
-                            instances: instances.gpu_rw(),
-                            time,
-                            count: COUNT as u32,
-                        },
-                        Dispatch::x(COUNT),
-                    )
-                    .unwrap();
-                compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
+            compute
+                .dispatch(
+                    simulate,
+                    SimData {
+                        instances: instances.gpu_rw(),
+                        time,
+                        count: COUNT as u32,
+                    },
+                    Dispatch::x(COUNT),
+                )
+                .unwrap();
+            compute.barrier(Stage::COMPUTE, Stage::COMPUTE, Hazard::BUFFERS);
 
-                compute
-                    .dispatch(
-                        encode,
-                        EncodeData {
-                            instances: instances.gpu(),
-                            draws: draws.gpu_rw(),
-                            range: range.gpu_rw(),
-                            commands: commands.handle(),
-                            cull_radius,
-                            total: COUNT as u32,
-                        },
-                        Dispatch::x(COUNT),
-                    )
-                    .unwrap();
-                compute.barrier(
-                    Stage::COMPUTE,
-                    Stage::INDIRECT | Stage::VERTEX,
-                    Hazard::BUFFERS | Hazard::DRAW_ARGUMENTS,
-                );
-            }
+            compute
+                .dispatch(
+                    encode,
+                    EncodeData {
+                        instances: instances.gpu(),
+                        draws: draws.gpu_rw(),
+                        range: range.gpu_rw(),
+                        commands: commands.handle(),
+                        cull_radius,
+                        total: COUNT as u32,
+                    },
+                    Dispatch::x(COUNT),
+                )
+                .unwrap();
+            compute.barrier(
+                Stage::COMPUTE,
+                Stage::INDIRECT | Stage::VERTEX,
+                Hazard::BUFFERS | Hazard::DRAW_ARGUMENTS,
+            );
 
-            {
-                let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
-                let raster = rec.raster(&pass);
-                raster
-                    .draw_indirect_count(
-                        draw,
-                        DrawData {
-                            instances: instances.gpu(),
-                            mvp,
-                        },
-                        &commands,
-                        &draws,
-                        &range,
-                    )
-                    .unwrap();
+            let pass = Pass::new().color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]));
+            let raster = rec.raster(&pass);
+            raster
+                .draw_indirect_count(
+                    draw,
+                    DrawData {
+                        instances: instances.gpu(),
+                        mvp,
+                    },
+                    &commands,
+                    &draws,
+                    &range,
+                )
+                .unwrap();
 
-                raster
-                    .draw(
-                        boundary,
-                        BoundaryData {
-                            mvp,
-                            radius: cull_radius,
-                            segments: SEGMENTS,
-                        },
-                        0..SEGMENTS * 2 + 2,
-                    )
-                    .unwrap();
-            }
+            raster
+                .draw(
+                    boundary,
+                    BoundaryData {
+                        mvp,
+                        radius: cull_radius,
+                        segments: SEGMENTS,
+                    },
+                    0..SEGMENTS * 2 + 2,
+                )
+                .unwrap();
 
-            drop(rec);
             frame.submit(Some(&drawable)).unwrap();
 
             resized = surface.present(&device, &drawable);
@@ -308,8 +303,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    heap.free_buffer(range);
-    heap.free_buffer(draws);
-    heap.free_buffer(instances);
     Ok(())
 }

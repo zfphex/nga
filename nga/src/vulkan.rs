@@ -25,10 +25,11 @@ use crate::{
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char};
 use std::marker::PhantomData;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -1349,23 +1350,25 @@ impl Drop for Arena {
     }
 }
 
-pub struct HeapBuffer {
+pub struct HeapBuffer<'heap> {
     pub(crate) buffer: vk::Buffer,
     pub(crate) gpu: u64,
     pub(crate) len: usize,
-    pub(crate) alloc: Alloc,
-    pub(crate) device: ash::Device,
+    _allocation: HeapAllocation<'heap>,
 }
 
-impl Drop for HeapBuffer {
+impl Drop for HeapBuffer<'_> {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_buffer(self.buffer, None);
+            self._allocation
+                .storage
+                .device
+                .destroy_buffer(self.buffer, None);
         }
     }
 }
 
-impl HeapBuffer {
+impl HeapBuffer<'_> {
     /// The device address, for a field of a struct a shader dereferences.
     ///
     /// Copying it does not keep this buffer alive. [`GpuHeap::free_later`] is what waits
@@ -1392,7 +1395,7 @@ impl HeapBuffer {
     }
 }
 
-pub struct HeapTexture {
+pub struct HeapTexture<'heap> {
     pub(crate) image: vk::Image,
     pub(crate) view: vk::ImageView,
     pub(crate) attachment_views: Vec<vk::ImageView>,
@@ -1401,24 +1404,32 @@ pub struct HeapTexture {
     pub(crate) height: u32,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
-    pub(crate) alloc: Alloc,
+    _allocation: HeapAllocation<'heap>,
     pub(crate) layout: Cell<vk::ImageLayout>,
-    pub(crate) device: ash::Device,
 }
 
-impl Drop for HeapTexture {
+impl Drop for HeapTexture<'_> {
     fn drop(&mut self) {
         unsafe {
             for &view in &self.attachment_views {
-                self.device.destroy_image_view(view, None);
+                self._allocation
+                    .storage
+                    .device
+                    .destroy_image_view(view, None);
             }
-            self.device.destroy_image_view(self.view, None);
-            self.device.destroy_image(self.image, None);
+            self._allocation
+                .storage
+                .device
+                .destroy_image_view(self.view, None);
+            self._allocation
+                .storage
+                .device
+                .destroy_image(self.image, None);
         }
     }
 }
 
-impl HeapTexture {
+impl HeapTexture<'_> {
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -1765,6 +1776,34 @@ impl Drop for Uploader {
     }
 }
 
+enum PendingResource {
+    Buffer(vk::Buffer),
+    Texture(vk::Image, vk::ImageView, Vec<vk::ImageView>),
+}
+
+struct HeapStorage {
+    tlsf: UnsafeCell<Tlsf>,
+    memory: vk::DeviceMemory,
+    device: ash::Device,
+}
+
+impl Drop for HeapStorage {
+    fn drop(&mut self) {
+        unsafe { self.device.free_memory(self.memory, None) };
+    }
+}
+
+struct HeapAllocation<'heap> {
+    block: u32,
+    storage: &'heap HeapStorage,
+}
+
+impl Drop for HeapAllocation<'_> {
+    fn drop(&mut self) {
+        unsafe { (*self.storage.tlsf.get()).free(self.block) };
+    }
+}
+
 /// `MTLHeap` + TLSF, rebuilt on one `VkDeviceMemory`.
 ///
 /// Two Vulkan-only concerns that `nga` never meets: every allocation is aligned to
@@ -1777,12 +1816,11 @@ impl Drop for Uploader {
 /// Every staged copy is recorded, not submitted. Call `flush` (or `flush_wait`) once the
 /// batch is built; nothing reaches the GPU before that.
 pub struct GpuHeap {
-    pub(crate) memory: vk::DeviceMemory,
-    pub(crate) tlsf: Tlsf,
+    storage: HeapStorage,
     pub(crate) granularity: u64,
     pub(crate) device: ash::Device,
-    pub(crate) uploader: Uploader,
-    pub(crate) retired: VecDeque<(u64, Retired)>,
+    uploader: UnsafeCell<Uploader>,
+    retired: UnsafeCell<VecDeque<(u64, u32, PendingResource)>>,
 }
 
 impl GpuHeap {
@@ -1832,16 +1870,19 @@ impl GpuHeap {
         };
         let granularity = device.limits.buffer_image_granularity.max(256);
         Ok(Self {
-            memory,
-            tlsf: Tlsf::new(size, granularity),
+            storage: HeapStorage {
+                memory,
+                tlsf: UnsafeCell::new(Tlsf::new(size, granularity)),
+                device: device.device.clone(),
+            },
             granularity,
             device: device.device.clone(),
-            uploader: Uploader::new(device, ring)?,
-            retired: VecDeque::new(),
+            uploader: UnsafeCell::new(Uploader::new(device, ring)?),
+            retired: UnsafeCell::new(VecDeque::new()),
         })
     }
 
-    pub fn alloc_buffer(&mut self, len: usize) -> Result<HeapBuffer, Error> {
+    pub fn alloc_buffer(&self, len: usize) -> Result<HeapBuffer<'_>, Error> {
         let info = vk::BufferCreateInfo::default()
             .size(len as u64)
             .usage(Self::BUFFER_USAGE);
@@ -1854,29 +1895,30 @@ impl GpuHeap {
         };
         let requirements = requirements.memory_requirements;
 
-        let alloc = self
-            .tlsf
+        let alloc = unsafe { &mut *self.storage.tlsf.get() }
             .alloc(requirements.size.max(1), self.granularity)
             .ok_or(Error::new("GPU heap is out of space"))?;
-        let buffer = unsafe { self.device.create_buffer(&info, None)? };
+        let allocation = HeapAllocation {
+            block: alloc.block,
+            storage: &self.storage,
+        };
+        let mut buffer = HeapBuffer {
+            buffer: unsafe { self.device.create_buffer(&info, None)? },
+            gpu: 0,
+            len,
+            _allocation: allocation,
+        };
         unsafe {
             self.device
-                .bind_buffer_memory(buffer, self.memory, alloc.offset)?
-        };
-        let gpu = unsafe {
-            self.device
-                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
-        };
-        Ok(HeapBuffer {
-            buffer,
-            gpu,
-            len,
-            alloc,
-            device: self.device.clone(),
-        })
+                .bind_buffer_memory(buffer.buffer, self.storage.memory, alloc.offset)?;
+            buffer.gpu = self.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer),
+            );
+        }
+        Ok(buffer)
     }
 
-    pub fn alloc_slice<T: Copy>(&mut self, values: &[T]) -> Result<HeapBuffer, Error> {
+    pub fn alloc_slice<T: Copy>(&self, values: &[T]) -> Result<HeapBuffer<'_>, Error> {
         if size_of_val(values) == 0 {
             return Err(Error::new("a GPU buffer must contain at least one byte"));
         }
@@ -1891,7 +1933,7 @@ impl GpuHeap {
         Ok(buffer)
     }
 
-    pub fn alloc_texture(&mut self, desc: &TextureDesc) -> Result<HeapTexture, Error> {
+    pub fn alloc_texture(&self, desc: &TextureDesc) -> Result<HeapTexture<'_>, Error> {
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
@@ -1915,26 +1957,40 @@ impl GpuHeap {
         };
         let requirements = requirements.memory_requirements;
 
-        let alloc = self
-            .tlsf
+        let alloc = unsafe { &mut *self.storage.tlsf.get() }
             .alloc(
                 requirements.size,
                 requirements.alignment.max(self.granularity),
             )
             .ok_or(Error::new("GPU heap is out of space"))?;
-        let image = unsafe { self.device.create_image(&info, None)? };
+        let allocation = HeapAllocation {
+            block: alloc.block,
+            storage: &self.storage,
+        };
+        let mut texture = HeapTexture {
+            image: unsafe { self.device.create_image(&info, None)? },
+            view: vk::ImageView::null(),
+            attachment_views: Vec::with_capacity((desc.mips * desc.layers) as usize),
+            format: desc.format,
+            width: desc.width,
+            height: desc.height,
+            mips: desc.mips,
+            layers: desc.layers,
+            _allocation: allocation,
+            layout: Cell::new(vk::ImageLayout::UNDEFINED),
+        };
         unsafe {
             self.device
-                .bind_image_memory(image, self.memory, alloc.offset)?
+                .bind_image_memory(texture.image, self.storage.memory, alloc.offset)?
         };
         let view_type = match desc.layers {
             1 => vk::ImageViewType::TYPE_2D,
             _ => vk::ImageViewType::TYPE_2D_ARRAY,
         };
-        let view = unsafe {
+        texture.view = unsafe {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
-                    .image(image)
+                    .image(texture.image)
                     .view_type(view_type)
                     .format(desc.format)
                     .subresource_range(
@@ -1946,13 +2002,12 @@ impl GpuHeap {
                 None,
             )?
         };
-        let mut attachment_views = Vec::with_capacity((desc.mips * desc.layers) as usize);
         for level in 0..desc.mips {
             for layer in 0..desc.layers {
-                attachment_views.push(unsafe {
+                texture.attachment_views.push(unsafe {
                     self.device.create_image_view(
                         &vk::ImageViewCreateInfo::default()
-                            .image(image)
+                            .image(texture.image)
                             .view_type(view_type)
                             .format(desc.format)
                             .subresource_range(
@@ -1968,19 +2023,7 @@ impl GpuHeap {
                 });
             }
         }
-        Ok(HeapTexture {
-            image,
-            view,
-            attachment_views,
-            format: desc.format,
-            width: desc.width,
-            height: desc.height,
-            mips: desc.mips,
-            layers: desc.layers,
-            alloc,
-            layout: Cell::new(vk::ImageLayout::UNDEFINED),
-            device: self.device.clone(),
-        })
+        Ok(texture)
     }
 
     /// `nga`'s `HeapBuffer::write` is a memcpy, because Metal heaps are host-visible under UMA.
@@ -1992,11 +2035,12 @@ impl GpuHeap {
     /// Writes at or below `UPDATE_LIMIT` skip the ring entirely: `vkCmdUpdateBuffer` embeds the
     /// data in the command buffer itself, which is both fewer moving parts and no ring pressure.
     pub fn write<T: Copy>(
-        &mut self,
+        &self,
         buffer: &HeapBuffer,
         offset: usize,
         values: &[T],
     ) -> Result<(), Error> {
+        let uploader = unsafe { &mut *self.uploader.get() };
         let bytes = size_of_val(values);
         if offset > buffer.len || bytes > buffer.len - offset {
             return Err(Error::new("buffer write is out of bounds"));
@@ -2007,7 +2051,7 @@ impl GpuHeap {
         let source = unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, bytes) };
 
         if bytes <= UPDATE_LIMIT && bytes.is_multiple_of(4) && offset.is_multiple_of(4) {
-            let command_buffer = self.uploader.open()?;
+            let command_buffer = uploader.open()?;
             unsafe {
                 self.device
                     .cmd_update_buffer(command_buffer, buffer.buffer, offset as u64, source)
@@ -2019,14 +2063,14 @@ impl GpuHeap {
         // through it rather than failing. The old path simply panicked past 8 MiB.
         let mut written = 0;
         while written < bytes {
-            let chunk = self.uploader.chunk(bytes - written);
-            let (staged, cpu) = self.uploader.stage(chunk, 16)?;
+            let chunk = uploader.chunk(bytes - written);
+            let (staged, cpu) = uploader.stage(chunk, 16)?;
             unsafe { std::ptr::copy_nonoverlapping(source.as_ptr().add(written), cpu, chunk) };
-            let command_buffer = self.uploader.open()?;
+            let command_buffer = uploader.open()?;
             unsafe {
                 self.device.cmd_copy_buffer(
                     command_buffer,
-                    self.uploader.ring.buffer,
+                    uploader.ring.buffer,
                     buffer.buffer,
                     &[vk::BufferCopy {
                         src_offset: staged,
@@ -2046,18 +2090,19 @@ impl GpuHeap {
     /// `HOST_TRANSFER_EXT` reports `memoryTypeBits == 0`, so no memory can back it, even though
     /// the extension is advertised and `R8G8B8A8_UNORM` claims `HOST_IMAGE_TRANSFER` support.
     /// See `examples/probe.rs`. So uploads stage through a buffer, exactly like `write`.
-    pub fn upload(&mut self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
+    pub fn upload(&self, texture: &HeapTexture, level: u32, bytes: &[u8]) -> Result<(), Error> {
         self.upload_layer(texture, level, 0, bytes)
     }
 
     /// Upload one complete mip level of one array layer.
     pub fn upload_layer(
-        &mut self,
+        &self,
         texture: &HeapTexture,
         level: u32,
         layer: u32,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        let uploader = unsafe { &mut *self.uploader.get() };
         if level >= texture.mips {
             return Err(Error::new(format!(
                 "mip level {level} is outside the {} this texture has",
@@ -2085,16 +2130,16 @@ impl GpuHeap {
         // The texel size comes from the caller's own slice rather than a format table: an upload
         // is by definition a whole level, so the division is exact and every format works.
         let row = bytes.len() / height as usize;
-        if row > self.uploader.ring.size {
+        if row > uploader.ring.size {
             return Err(Error::new(format!(
                 "one image row is {row} bytes, larger than the {} byte upload ring",
-                self.uploader.ring.size
+                uploader.ring.size
             )));
         }
 
         let image = texture.image;
         let old = texture.layout.get();
-        let command_buffer = self.uploader.open()?;
+        let command_buffer = uploader.open()?;
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 command_buffer,
@@ -2113,17 +2158,17 @@ impl GpuHeap {
         let mut first = 0u32;
         while first < height {
             let remaining = (height - first) as usize * row;
-            let rows = ((self.uploader.chunk(remaining) / row).max(1) as u32).min(height - first);
+            let rows = ((uploader.chunk(remaining) / row).max(1) as u32).min(height - first);
             let size = rows as usize * row;
-            let (staged, cpu) = self.uploader.stage(size, 16)?;
+            let (staged, cpu) = uploader.stage(size, 16)?;
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr().add(first as usize * row), cpu, size)
             };
-            let command_buffer = self.uploader.open()?;
+            let command_buffer = uploader.open()?;
             unsafe {
                 self.device.cmd_copy_buffer_to_image(
                     command_buffer,
-                    self.uploader.ring.buffer,
+                    uploader.ring.buffer,
                     image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::BufferImageCopy {
@@ -2155,14 +2200,14 @@ impl GpuHeap {
 
     /// Submit the recorded batch and block until it lands. The load-time entry point: one wait
     /// for a whole scene, where the old path drained the device once per resource.
-    pub fn flush(&mut self) -> Result<(), Error> {
-        self.uploader.flush_wait()
+    pub fn flush(&self) -> Result<(), Error> {
+        unsafe { &mut *self.uploader.get() }.flush_wait()
     }
 
     /// Submit without blocking, returning the timeline value to wait on. Pair with
     /// `Frame::after_uploads` to let the GPU do the waiting instead of the CPU.
-    pub fn flush_async(&mut self) -> Result<u64, Error> {
-        self.uploader.flush()
+    pub fn flush_async(&self) -> Result<u64, Error> {
+        unsafe { &mut *self.uploader.get() }.flush()
     }
 
     /// Metal has no image layouts, so this method has no counterpart at all. Without
@@ -2194,8 +2239,8 @@ impl GpuHeap {
             )
     }
 
-    pub fn free(&mut self, alloc: Alloc) {
-        self.tlsf.free(alloc.block);
+    pub fn free(&self, alloc: Alloc) {
+        unsafe { (*self.storage.tlsf.get()).free(alloc.block) };
     }
 
     /// Moves a texture into the layout `usage` implies, on the upload queue rather than in a
@@ -2203,13 +2248,14 @@ impl GpuHeap {
     ///
     /// Metal needs no equivalent, because there is no layout to choose, which is why the argument
     /// is a `Usage` and not something more Vulkan-shaped.
-    pub fn transition(&mut self, texture: &HeapTexture, usage: Usage) {
+    pub fn transition(&self, texture: &HeapTexture, usage: Usage) {
+        let uploader = unsafe { &mut *self.uploader.get() };
         let layout = image_layout(usage);
         let old = texture.layout.get();
         if old == layout {
             return;
         }
-        let command_buffer = self.uploader.open().expect("upload batch");
+        let command_buffer = uploader.open().expect("upload batch");
         let barriers = [image_barrier(texture, old, layout)];
         unsafe {
             self.device.cmd_pipeline_barrier2(
@@ -2221,51 +2267,80 @@ impl GpuHeap {
     }
 
     /// The buffer counterpart of [`GpuHeap::free_texture`].
-    pub fn free_buffer(&mut self, buffer: HeapBuffer) {
-        self.tlsf.free(buffer.alloc.block);
+    pub fn free_buffer(&self, buffer: HeapBuffer) {
+        drop(buffer);
     }
 
-    /// Releases the TLSF block. The image and views are destroyed when `texture` drops.
-    pub fn free_texture(&mut self, texture: HeapTexture) {
-        self.tlsf.free(texture.alloc.block);
+    pub fn free_texture(&self, texture: HeapTexture) {
+        drop(texture);
     }
 
     /// Hand a resource over to be released once the frame that last used it has finished.
     ///
     /// `frame` is [`Context::frame`] at the point of the hand-over. A [`Gpu`] copied out of the
     /// resource does not delay this. Pass the frame that is still reading it.
-    pub fn free_later(&mut self, frame: u64, retired: Retired) {
-        self.retired.push_back((frame, retired));
+    pub fn free_later(&self, frame: u64, retired: Retired<'_>) {
+        let (block, resource) = match retired {
+            Retired::Buffer(buffer) => {
+                assert!(std::ptr::eq(buffer._allocation.storage, &self.storage));
+                let buffer = ManuallyDrop::new(buffer);
+                (
+                    buffer._allocation.block,
+                    PendingResource::Buffer(buffer.buffer),
+                )
+            }
+            Retired::Texture(texture) => {
+                assert!(std::ptr::eq(texture._allocation.storage, &self.storage));
+                let mut texture = ManuallyDrop::new(texture);
+                (
+                    texture._allocation.block,
+                    PendingResource::Texture(
+                        texture.image,
+                        texture.view,
+                        std::mem::take(&mut texture.attachment_views),
+                    ),
+                )
+            }
+        };
+        unsafe { &mut *self.retired.get() }.push_back((frame, block, resource));
     }
 
     /// Release everything handed over during a frame that has since completed. `completed` is
     /// [`Context::completed`]; call this once a frame, before allocating.
-    pub fn retire(&mut self, completed: u64) {
-        while self
-            .retired
-            .front()
-            .is_some_and(|&(frame, _)| frame < completed)
-        {
-            match self.retired.pop_front().unwrap().1 {
-                Retired::Buffer(buffer) => self.free_buffer(buffer),
-                Retired::Texture(texture) => self.free_texture(texture),
+    pub fn retire(&self, completed: u64) {
+        let retired = unsafe { &mut *self.retired.get() };
+        while let Some(&(frame, _, _)) = retired.front() {
+            if frame >= completed && completed != u64::MAX {
+                break;
             }
+            let (_, block, resource) = retired.pop_front().unwrap();
+            match resource {
+                PendingResource::Buffer(buffer) => unsafe {
+                    self.device.destroy_buffer(buffer, None)
+                },
+                PendingResource::Texture(image, view, views) => unsafe {
+                    for view in views {
+                        self.device.destroy_image_view(view, None);
+                    }
+                    self.device.destroy_image_view(view, None);
+                    self.device.destroy_image(image, None);
+                },
+            }
+            unsafe { (*self.storage.tlsf.get()).free(block) };
         }
     }
-}
-
-/// A resource waiting for the GPU to be done with it. See [`GpuHeap::free_later`].
-pub enum Retired {
-    Buffer(HeapBuffer),
-    Texture(HeapTexture),
 }
 
 impl Drop for GpuHeap {
     fn drop(&mut self) {
-        unsafe {
-            self.device.free_memory(self.memory, None);
-        }
+        self.retire(u64::MAX);
     }
+}
+
+/// A resource waiting for the GPU to be done with it. See [`GpuHeap::free_later`].
+pub enum Retired<'heap> {
+    Buffer(HeapBuffer<'heap>),
+    Texture(HeapTexture<'heap>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4291,6 +4366,7 @@ pub struct Context {
     pub(crate) layout: vk::PipelineLayout,
     pub(crate) threads: usize,
     pub(crate) frame: u64,
+    recorders: Box<[MaybeUninit<Recorder<'static>>]>,
 }
 
 impl Context {
@@ -4391,6 +4467,7 @@ impl Context {
             layout,
             threads,
             frame: 0,
+            recorders: Box::new_uninit_slice(threads),
         })
     }
 
@@ -4412,7 +4489,6 @@ impl Context {
 
     pub fn begin_frame(&mut self) -> Result<Frame<'_>, Error> {
         let index = self.frame;
-        self.frame += 1;
         if index >= FRAMES_IN_FLIGHT {
             let value = [index + 1 - FRAMES_IN_FLIGHT];
             let semaphores = [self.timeline];
@@ -4446,6 +4522,10 @@ impl Context {
             timeline: self.timeline,
             layout: self.layout,
             recording: 0,
+            recorders: unsafe {
+                std::slice::from_raw_parts_mut(self.recorders.as_mut_ptr().cast(), self.threads)
+            },
+            frame: &mut self.frame,
             value: index + 1,
             upload: None,
         })
@@ -4474,8 +4554,10 @@ pub struct Frame<'a> {
     pub(crate) timeline: vk::Semaphore,
     pub(crate) layout: vk::PipelineLayout,
     pub(crate) recording: usize,
+    recorders: &'a mut [MaybeUninit<Recorder<'a>>],
     pub(crate) value: u64,
     pub(crate) upload: Option<(vk::Semaphore, u64)>,
+    frame: &'a mut u64,
 }
 
 impl<'a> Frame<'a> {
@@ -4490,49 +4572,25 @@ impl<'a> Frame<'a> {
     }
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
     /// One recorder per thread, each with its own `VkCommandPool`-backed command buffer and
     /// its own arena slot. `nga` takes a count per queue; with one queue this is `&[n]`.
-    pub fn recorders(&mut self, counts: &[usize]) -> Vec<Recorder<'_>> {
-        debug_assert!(
+    pub fn recorders(&mut self, counts: &[usize]) -> &mut [Recorder<'a>] {
+        assert!(
             self.recording == 0,
             "recorders already taken for this frame"
         );
         let count: usize = counts.iter().sum();
-        debug_assert!(
-            count <= self.command_buffers.len(),
-            "{count} recorders requested, Context::new was given {}",
-            self.command_buffers.len()
-        );
-        self.recording = count;
-        (0..count)
-            .map(|index| {
-                let command_buffer = self.command_buffers[index];
-                unsafe {
-                    self.device
-                        .begin_command_buffer(
-                            command_buffer,
-                            &vk::CommandBufferBeginInfo::default()
-                                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                        )
-                        .unwrap()
-                };
-                Recorder {
-                    device: self.device,
-                    commands: self.commands,
-                    arena: &self.arenas[index],
-                    command_buffer,
-                    layout: self.layout,
-                    not_sync: PhantomData,
-                }
-            })
-            .collect()
+        assert!(count <= self.command_buffers.len());
+        for _ in 0..count {
+            self.recorder();
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.recorders.as_mut_ptr().cast(), count) }
     }
 
-    pub fn recorder(&mut self) -> Recorder<'_> {
+    pub fn recorder(&mut self) -> &mut Recorder<'a> {
         let index = self.recording;
-        self.recording += 1;
-        debug_assert!(index < self.command_buffers.len());
+        assert!(index < self.command_buffers.len());
         let command_buffer = self.command_buffers[index];
         unsafe {
             self.device
@@ -4543,26 +4601,35 @@ impl Frame<'_> {
                 )
                 .unwrap()
         };
-        Recorder {
+        let recorder = self.recorders[index].write(Recorder {
             device: self.device,
             commands: self.commands,
             arena: &self.arenas[index],
             command_buffer,
             layout: self.layout,
             not_sync: PhantomData,
-        }
+            compute: None,
+            raster: None,
+        });
+        self.recording += 1;
+        recorder
     }
 
     /// Make this frame wait on an upload batch on the GPU rather than on the CPU. Pair with
     /// `GpuHeap::flush_async`: the uploads are in flight while the frame is being recorded, and
     /// nothing blocks. `GpuHeap::flush` is the blocking equivalent, for load time.
     pub fn after_uploads(&mut self, value: u64, heap: &GpuHeap) {
-        self.upload = Some((heap.uploader.timeline, value));
+        self.upload = Some((unsafe { (*heap.uploader.get()).timeline }, value));
     }
 
-    pub fn submit(self, drawable: Option<&Drawable>) -> Result<(), Error> {
+    pub fn submit(mut self, drawable: Option<&Drawable>) -> Result<(), Error> {
+        let recording = self.recording;
+        while self.recording > 0 {
+            self.recording -= 1;
+            unsafe { self.recorders[self.recording].assume_init_drop() };
+        }
         if let Some(drawable) = drawable {
-            let command_buffer = self.command_buffers[self.recording - 1];
+            let command_buffer = self.command_buffers[recording - 1];
             unsafe {
                 self.device.cmd_pipeline_barrier2(
                     command_buffer,
@@ -4584,17 +4651,17 @@ impl Frame<'_> {
                 )
             };
         }
-        for &command_buffer in &self.command_buffers[..self.recording] {
+        for &command_buffer in &self.command_buffers[..recording] {
             unsafe { self.device.end_command_buffer(command_buffer)? };
         }
 
-        for (info, &command_buffer) in self.submit_infos[..self.recording]
+        for (info, &command_buffer) in self.submit_infos[..recording]
             .iter_mut()
-            .zip(&self.command_buffers[..self.recording])
+            .zip(&self.command_buffers[..recording])
         {
             *info = vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer);
         }
-        let command_infos = &self.submit_infos[..self.recording];
+        let command_infos = &self.submit_infos[..recording];
 
         let mut waits = [vk::SemaphoreSubmitInfo::default(); 2];
         let mut wait_count = 0;
@@ -4632,7 +4699,17 @@ impl Frame<'_> {
                 vk::Fence::null(),
             )?
         };
+        *self.frame = self.value;
         Ok(())
+    }
+}
+
+impl Drop for Frame<'_> {
+    fn drop(&mut self) {
+        while self.recording > 0 {
+            self.recording -= 1;
+            unsafe { self.recorders[self.recording].assume_init_drop() };
+        }
     }
 }
 
@@ -4643,6 +4720,8 @@ pub struct Recorder<'a> {
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) layout: vk::PipelineLayout,
     pub(crate) not_sync: PhantomData<Cell<()>>,
+    compute: Option<Compute<'a>>,
+    raster: Option<Raster<'a>>,
 }
 
 impl<'a> Recorder<'a> {
@@ -4656,12 +4735,21 @@ impl<'a> Recorder<'a> {
     }
 }
 
-impl Recorder<'_> {
-    pub fn compute(&mut self) -> Compute<'_> {
-        Compute::new(self.device, self.command_buffer, self.layout, self.arena)
+impl<'a> Recorder<'a> {
+    pub fn compute(&mut self) -> &Compute<'a> {
+        self.raster = None;
+        self.compute = None;
+        self.compute.insert(Compute::new(
+            self.device,
+            self.command_buffer,
+            self.layout,
+            self.arena,
+        ))
     }
 
-    pub fn raster(&mut self, pass: &Pass) -> Raster<'_> {
+    pub fn raster(&mut self, pass: &Pass) -> &Raster<'a> {
+        self.compute = None;
+        self.raster = None;
         let mut extent = [u32::MAX; 2];
         for size in pass.sizes.iter().chain(&pass.resolve_sizes) {
             extent[0] = extent[0].min(size[0]);
@@ -4676,7 +4764,7 @@ impl Recorder<'_> {
             width <= extent[0] && height <= extent[1],
             "the render area exceeds an attachment"
         );
-        Raster::new(
+        self.raster.insert(Raster::new(
             self.device,
             self.commands,
             self.command_buffer,
@@ -4685,7 +4773,7 @@ impl Recorder<'_> {
             pass,
             width,
             height,
-        )
+        ))
     }
 }
 

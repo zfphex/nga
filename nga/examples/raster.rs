@@ -124,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let depth_test = DepthState::new(CompareOp::Less, false);
     let depth_off = DepthState::new(CompareOp::Always, false);
 
-    let mut heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
+    let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
 
     let mut corners = Vec::new();
     for i in 0..8u32 {
@@ -182,9 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_none_or(|&(_, w, h)| w != surface.width() || h != surface.height())
             {
                 device.wait_idle().unwrap();
-                if let Some((old, _, _)) = depth.take() {
-                    heap.free_texture(old);
-                }
+                depth = None;
                 let texture = heap
                     .alloc_texture(&TextureDesc::depth(
                         DEPTH_FORMAT,
@@ -224,57 +222,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut frame = ctx.begin_frame().unwrap();
-            let mut recorder = frame.recorder();
-            {
-                let pass = Pass::new()
-                    .color(0, &drawable, Some([0.04, 0.04, 0.06, 1.0]))
-                    .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
-                let raster = recorder.raster(&pass);
-                raster.cull(Cull::Back, Winding::Clockwise);
+            let recorder = frame.recorder();
+            let pass = Pass::new()
+                .color(0, &drawable, Some([0.04, 0.04, 0.06, 1.0]))
+                .depth(&depth.as_ref().unwrap().0, Some(1.0), false);
+            let raster = recorder.raster(&pass);
+            raster.cull(Cull::Back, Winding::Clockwise);
 
-                raster.depth(&depth_write);
-                raster
-                    .draw_indexed::<_, u16>(
-                        opaque,
-                        Data {
-                            vertices,
-                            mvp: f32x4x4(scaled(1.0)),
-                            tint: f32x4([1.0, 1.0, 1.0, 1.0]),
-                        },
-                        &index_buffer,
-                        indices.len() as u32,
-                    )
-                    .unwrap();
+            raster.depth(&depth_write);
+            raster
+                .draw_indexed::<_, u16>(
+                    opaque,
+                    Data {
+                        vertices,
+                        mvp: f32x4x4(scaled(1.0)),
+                        tint: f32x4([1.0, 1.0, 1.0, 1.0]),
+                    },
+                    &index_buffer,
+                    indices.len() as u32,
+                )
+                .unwrap();
 
-                raster.depth(&depth_test);
-                raster
-                    .draw_indexed::<_, u16>(
-                        translucent,
-                        Data {
-                            vertices,
-                            mvp: f32x4x4(scaled(1.6)),
-                            tint: f32x4([0.4, 0.8, 1.0, 0.35]),
-                        },
-                        &index_buffer,
-                        indices.len() as u32,
-                    )
-                    .unwrap();
+            raster.depth(&depth_test);
+            raster
+                .draw_indexed::<_, u16>(
+                    translucent,
+                    Data {
+                        vertices,
+                        mvp: f32x4x4(scaled(1.6)),
+                        tint: f32x4([0.4, 0.8, 1.0, 0.35]),
+                    },
+                    &index_buffer,
+                    indices.len() as u32,
+                )
+                .unwrap();
 
-                raster.depth(&depth_off);
-                raster
-                    .draw_indexed::<_, u16>(
-                        screen,
-                        Data {
-                            vertices,
-                            mvp: f32x4x4(scaled(2.1)),
-                            tint: f32x4([1.0, 0.5, 0.2, 0.6]),
-                        },
-                        &index_buffer,
-                        indices.len() as u32,
-                    )
-                    .unwrap();
-            }
-            drop(recorder);
+            raster.depth(&depth_off);
+            raster
+                .draw_indexed::<_, u16>(
+                    screen,
+                    Data {
+                        vertices,
+                        mvp: f32x4x4(scaled(2.1)),
+                        tint: f32x4([1.0, 0.5, 0.2, 0.6]),
+                    },
+                    &index_buffer,
+                    indices.len() as u32,
+                )
+                .unwrap();
+
             frame.submit(Some(&drawable)).unwrap();
 
             resized = surface.present(&device, &drawable);
@@ -286,10 +282,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    if let Some((texture, _, _)) = depth.take() {
-        heap.free_texture(texture);
-    }
-    heap.free_buffer(index_buffer);
-    heap.free_buffer(vertex_buffer);
     Ok(())
 }
