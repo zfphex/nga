@@ -287,7 +287,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     device.wait_idle()?;
-    // The sampler destroys itself; nothing here has to name a Vulkan call to tear down.
-    drop(sampler);
     Ok(())
 }

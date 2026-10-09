@@ -401,8 +401,6 @@ mod commands {
         }
 
         device.wait_idle()?;
-        heap.retire(u64::MAX);
-        surface.destroy(&device);
         Ok(())
     }
 }

@@ -220,7 +220,6 @@ mod tiles {
         }
 
         device.wait_idle()?;
-        surface.destroy(&device);
         Ok(())
     }
 }

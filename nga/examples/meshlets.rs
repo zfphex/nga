@@ -286,7 +286,6 @@ mod meshlets {
         }
 
         device.wait_idle()?;
-        surface.destroy(&device);
         Ok(())
     }
 }
