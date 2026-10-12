@@ -36,6 +36,17 @@ mod shader {
     fn fragment(_input: VertexOut) -> f32x4 {
         f32x4::new(0.0, 1.0, 0.0, 1.0)
     }
+
+    pub struct CopyData {
+        pub positions: Gpu<[f32x4]>,
+        pub source: Texture2d,
+        pub sampler: Sampler,
+    }
+
+    #[fragment]
+    fn copy(root: Gpu<CopyData>, input: VertexOut) -> f32x4 {
+        root.source.sample(root.sampler, input.position.xy() / 4.0)
+    }
 }
 
 #[test]
@@ -47,11 +58,15 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
         .raster(shader::VERTEX, shader::FRAGMENT)
         .color(Format::Rgba8Unorm)
         .build()?;
+    let copy = shaders
+        .raster(shader::VERTEX, shader::COPY)
+        .color(Format::Rgba8Unorm)
+        .build()?;
     let paint = shaders.compute(shader::PAINT)?;
     let heap = GpuHeap::new(&device, 1024 * 1024)?;
     let target = heap.alloc_texture(
         &TextureDesc::texture_2d(Format::Rgba8Unorm, 4, 4)
-            .usage(Usage::COLOR | Usage::STORAGE | Usage::COPY_SRC),
+            .usage(Usage::COLOR | Usage::STORAGE | Usage::SAMPLED | Usage::COPY_SRC),
     )?;
     let other = heap
         .alloc_texture(&TextureDesc::texture_2d(Format::Rgba8Unorm, 4, 4).usage(Usage::STORAGE))?;
@@ -66,6 +81,12 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
     let range = resources.alloc_range(4)?;
     let texture = resources.write_storage(range, 2, &other);
     resources.write_storage(range, 3, &target);
+    let copied = heap.alloc_texture(
+        &TextureDesc::texture_2d(Format::Rgba8Unorm, 4, 4).usage(Usage::COLOR | Usage::COPY_SRC),
+    )?;
+    let source = resources.write_texture(range, 0, &target);
+    let sampler_state = device.sampler(&SamplerDesc::nearest())?;
+    let sampler = resources.write_sampler(range, 1, &sampler_state);
     let readback = Arena::new(&device, 4096, Memory::Readback)?;
     let pixels = readback.alloc_slice(&[0u8; 64]).unwrap();
     let mut context = Context::new(&device, &shaders, 4096, 1)?;
@@ -103,9 +124,26 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
                 vertex_offset,
             }],
         )?;
+        recorder
+            .compute()
+            .barrier(Stage::COLOR_OUT, Stage::PIXEL, Hazard::TEXTURES);
+        let pass = Pass::new().color_texture(0, &copied, Some([1.0, 0.0, 0.0, 1.0]));
+        let raster = recorder.raster(&pass);
+        raster.heap(&resources);
+        raster.draw(
+            copy,
+            shader::CopyData {
+                positions: unsafe {
+                    Gpu::new(positions.gpu::<f32x4>().get() + size_of::<f32x4>() as u64)
+                },
+                source,
+                sampler,
+            },
+            0..3,
+        )?;
         let compute = recorder.compute();
         compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
-        compute.read_texture(&target, &readback, pixels.gpu.as_rw());
+        compute.read_texture(&copied, &readback, pixels.gpu.as_rw());
         if frame_index < FRAMES_IN_FLIGHT {
             compute.timestamp(&timers, 1);
         }

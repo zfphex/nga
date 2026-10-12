@@ -48,10 +48,10 @@ use minmetal::{
     M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor, M4TimestampGranularity,
     M4VisibilityOptions, MetalError, MetalLayer, MultisampleDepthResolveFilter, Origin,
     PixelFormat, PrimitiveTopologyClass, PrimitiveType, Region, RenderStages, ResidencySet,
-    ResidencySetDescriptor, ResourceOptions, ResourceViewPoolDescriptor, SamplerAddressMode,
+    ResidencySetDescriptor, ResourceOptions, SamplerAddressMode,
     SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages,
     StencilDescriptor, StencilOperation, StorageMode, Texture, TextureDescriptor, TextureType,
-    TextureUsage, TextureViewPool, VisibilityResultMode, VisibilityResultType, id,
+    TextureUsage, VisibilityResultMode, VisibilityResultType, id,
 };
 use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
@@ -1212,22 +1212,15 @@ pub struct HeapRange {
     pub(crate) len: u32,
 }
 
-/// A texture-view pool and a GPU table of its returned resource IDs.
-/// Bindless handles index the table; direct handles work when no heap is bound.
 pub struct ResourceHeap {
     pub(crate) cap: u32,
     pub(crate) head: u32,
-    pub(crate) pool: TextureViewPool,
     ids: Buffer,
     address: u64,
 }
 
 impl ResourceHeap {
     pub fn new(device: &Device, cap: u32) -> Result<Self, Error> {
-        let desc = ResourceViewPoolDescriptor::new()
-            .map_err(|e| Error::new(format!("failed to create pool descriptor: {e:?}")))?;
-        desc.set_resource_view_count(cap.max(1) as usize);
-        let pool = device.device.new_texture_view_pool_with_descriptor(&desc)?;
         let ids = device.device.new_buffer(
             cap.max(1) as usize * size_of::<u64>(),
             ResourceOptions::new(
@@ -1237,12 +1230,10 @@ impl ResourceHeap {
             ),
         )?;
         unsafe { std::ptr::write_bytes(ids.contents().cast::<u64>(), 0, cap.max(1) as usize) };
-        device.make_resident(&Allocation::from_texture_view_pool(&pool))?;
         device.make_resident(&Allocation::from_buffer(&ids))?;
         Ok(Self {
             cap,
             head: 0,
-            pool,
             address: ids.gpu_address()?,
             ids,
         })
@@ -1263,10 +1254,7 @@ impl ResourceHeap {
     pub fn write_texture(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2d {
         assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
         let index = (range.base + slot) as usize;
-        let resource_id = self
-            .pool
-            .set_texture_view(&texture.texture, index)
-            .expect("failed to set texture view in pool");
+        let resource_id = texture.texture.gpu_resource_id().expect("texture resource id");
         unsafe {
             self.ids
                 .contents()
@@ -1292,10 +1280,7 @@ impl ResourceHeap {
     pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
         assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
         let index = (range.base + slot) as usize;
-        let resource_id = self
-            .pool
-            .set_texture_view(&texture.texture, index)
-            .expect("failed to set storage texture view in pool");
+        let resource_id = texture.texture.gpu_resource_id().expect("texture resource id");
         unsafe {
             self.ids
                 .contents()
@@ -1339,9 +1324,10 @@ impl Surface {
         Ok(())
     }
 
-    pub fn acquire(&mut self, _device: &Device) -> Option<Drawable> {
+    pub fn acquire(&mut self, device: &Device) -> Option<Drawable> {
         let drawable = self.layer.next_drawable()?;
         let texture = drawable.texture().ok()?;
+        device.make_resident(&Allocation::from_texture(&texture)).ok()?;
         Some(Drawable { drawable, texture })
     }
 
@@ -2434,7 +2420,7 @@ impl<'a> Compute<'a> {
         }
         if after.0 & !compute.0 != 0 {
             self.encoder
-                .barrier_before_queue_stages(local_before, after, hazard);
+                .barrier_before_queue_stages(before, after, hazard);
         }
     }
 
@@ -2582,6 +2568,7 @@ pub struct Context {
     feedback_handler: M4CommitFeedbackHandler,
     submission_error: Arc<OnceLock<String>>,
     pub(crate) queue: M4CommandQueue,
+    pub(crate) residency: ResidencySet,
     pub(crate) event: SharedEvent,
     pub(crate) command_buffers: Vec<M4CommandBuffer>,
     pub(crate) allocators: Vec<M4CommandAllocator>,
@@ -2666,6 +2653,7 @@ impl Context {
 
         Ok(Self {
             queue: device.queue.clone(),
+            residency: device.residency.clone(),
             commit_options,
             feedback_handler,
             submission_error: device.submission_error.clone(),
@@ -2716,6 +2704,7 @@ impl Context {
             feedback_handler: &self.feedback_handler,
             submission_error: &self.submission_error,
             queue: &self.queue,
+            residency: &self.residency,
             event: &self.event,
             arenas: &self.arenas[slots.clone()],
             allocators: &self.allocators[slots.clone()],
@@ -2737,6 +2726,7 @@ pub struct Frame<'a> {
     feedback_handler: &'a M4CommitFeedbackHandler,
     submission_error: &'a OnceLock<String>,
     pub(crate) queue: &'a M4CommandQueue,
+    pub(crate) residency: &'a ResidencySet,
     pub(crate) event: &'a SharedEvent,
     pub(crate) arenas: &'a [Arena],
     pub(crate) allocators: &'a [M4CommandAllocator],
@@ -2781,6 +2771,7 @@ impl<'a> Frame<'a> {
         let index = self.recording;
         assert!(index < self.command_buffers.len());
         self.command_buffers[index].begin_command_buffer_with_allocator(&self.allocators[index]);
+        self.command_buffers[index].use_residency_set(self.residency);
         let recorder = self.recorders[index].write(Recorder {
             arena: &self.arenas[index],
             command_buffer: &self.command_buffers[index],

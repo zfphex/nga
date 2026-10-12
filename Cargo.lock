@@ -12,9 +12,9 @@ dependencies = [
 
 [[package]]
 name = "cfg-if"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "libloading"
@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "minmetal"
 version = "0.1.0"
-source = "git+https://github.com/zfphex/minmetal.git#c4a3dd3b855f377d17a4f91b3202ee68a067e488"
+source = "git+https://github.com/zfphex/minmetal.git#74c124a5c87adf9806c89d4712a4f6df17a04655"
 
 [[package]]
 name = "minwin"

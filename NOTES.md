@@ -22,7 +22,7 @@ Sebastian Aaltonen's Metal-vs-Vulkan post is the comparison point.
 - **Root pointer.** Metal needs an `MTL4ArgumentTable`: sized at creation, allocated per frame/thread, bound per encoder. Vulkan is a 16-byte push constant and one `vkCmdPushConstants`.
 - **Residency.** Metal's `MTLResidencySet` is what makes raw pointers work. Vulkan memory is resident by construction, so that whole subsystem is gone.
 - **`maintenance4`.** The post's "create the object, then ask which heaps work" is fixed. `vkGetDeviceBufferMemoryRequirements` / `vkGetDeviceImageMemoryRequirements` answer from create-info. `GpuHeap` never makes a throwaway object.
-- **Bindless.** The post prefers 32-bit heap indices over Metal's 64-bit `ResourceID`. Metal now backs `ResourceHeap` with `MTLTextureViewPool` and measures descriptor stride on creation. The shader synthesizes `MTLResourceID` on the fly via `base + index * stride`, matching Vulkan's 32-bit slot indices without passing 64-bit handles per resource.
+- **Bindless.** The post prefers 32-bit heap indices over Metal's 64-bit `ResourceID`. Metal backs `ResourceHeap` with a contiguous GPU-visible table of texture resource IDs. Texture handles select slots, and shaders load the resource ID from the table. The shared handle wrappers are still 64-bit; this does not yet provide compact 32-bit handles.
 
 ## Vulkan is worse
 
@@ -83,7 +83,7 @@ MSL has `static_assert(__builtin_offsetof(...))`. SPIR-V has no offsetof, and st
 
 ### 6. One bindless heap becomes three
 
-Metal backs `ResourceHeap` with `MTLTextureViewPool`, measuring descriptor stride on creation, and synthesizes `MTLResourceID`s inside MSL intrinsics (`base + slot * stride`). Vulkan needs `SAMPLER_DESCRIPTOR_BUFFER_BIT` vs `RESOURCE_DESCRIPTOR_BUFFER_BIT`. One heap becomes sampled images, storage images, and samplers across two buffers. Unified index space so `range.base + slot` still works, at the cost of reserving a slot in all three.
+Metal backs `ResourceHeap` with a GPU-visible table of texture resource IDs, indexed by slot inside MSL intrinsics. Sampled and storage textures use the same table; samplers carry their resource IDs directly rather than loading from the table. Vulkan needs `SAMPLER_DESCRIPTOR_BUFFER_BIT` vs `RESOURCE_DESCRIPTOR_BUFFER_BIT`. One heap becomes sampled images, storage images, and samplers across two buffers. Unified index space so `range.base + slot` still works, at the cost of reserving a slot in all three.
 
 Descriptor size is driver-defined (4 bytes here, not Metal's 8). A texture written and sampled in the same frame stays `GENERAL`, so the sampled descriptor must record that layout. `write_texture_in` exists only because of layouts.
 
