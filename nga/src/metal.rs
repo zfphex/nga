@@ -619,8 +619,14 @@ impl Device {
                 1.0,
             )?
         };
+        let Some(residency) = layer.residency_set()? else {
+            return Err(Error::new("surface has no residency set"));
+        };
+        self.queue.add_residency_set(&residency);
         Ok(Surface {
             layer,
+            residency,
+            queue: self.queue.clone(),
             width,
             height,
         })
@@ -1310,6 +1316,8 @@ impl ResourceHeap {
 /// one signature.
 pub struct Surface {
     pub(crate) layer: MetalLayer,
+    residency: ResidencySet,
+    queue: M4CommandQueue,
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
@@ -1324,10 +1332,9 @@ impl Surface {
         Ok(())
     }
 
-    pub fn acquire(&mut self, device: &Device) -> Option<Drawable> {
+    pub fn acquire(&mut self, _device: &Device) -> Option<Drawable> {
         let drawable = self.layer.next_drawable()?;
         let texture = drawable.texture().ok()?;
-        device.make_resident(&Allocation::from_texture(&texture)).ok()?;
         Some(Drawable { drawable, texture })
     }
 
@@ -1351,6 +1358,12 @@ impl Surface {
     }
 
     pub fn destroy(&mut self, _device: &Device) {}
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        self.queue.remove_residency_set(&self.residency);
+    }
 }
 
 pub struct Drawable {

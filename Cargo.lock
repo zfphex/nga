@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "minmetal"
 version = "0.1.0"
-source = "git+https://github.com/zfphex/minmetal.git#74c124a5c87adf9806c89d4712a4f6df17a04655"
+source = "git+https://github.com/zfphex/minmetal.git#3a2b09d62fb66343647723f716d3d30a36fe6621"
 
 [[package]]
 name = "minwin"
