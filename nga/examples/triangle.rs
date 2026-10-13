@@ -80,7 +80,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mesh = Arena::new(&device, 64 * 1024, Memory::Device)?;
     let vertices = mesh.alloc_slice(&triangle).unwrap();
-    let vertices: Gpu<[Vertex]> = vertices.gpu;
 
     let mut angle = 0.0f32;
     let mut resized = false;
@@ -119,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .draw(
                     pipeline,
                     Data {
-                        vertices,
+                        vertices: vertices.gpu,
                         mvp: f32x4x4([
                             [cos * aspect, sin, 0.0, 0.0],
                             [-sin * aspect, cos, 0.0, 0.0],
