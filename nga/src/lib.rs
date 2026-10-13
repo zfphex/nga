@@ -32,6 +32,20 @@ use metal as backend;
 
 pub use backend::*;
 
+impl Timers {
+    pub fn checked_ns(&self, start: usize, end: usize) -> Option<f64> {
+        let (&start_tick, &end_tick) = (self.ticks.get(start)?, self.ticks.get(end)?);
+        if !self.written(start) || !self.written(end) || end_tick < start_tick {
+            return None;
+        }
+        Some((end_tick - start_tick) as f64 * self.ns_per_tick)
+    }
+
+    pub fn checked_ms(&self, start: usize, end: usize) -> Option<f64> {
+        Some(self.checked_ns(start, end)? / 1e6)
+    }
+}
+
 /// Writes both targets to `dir` as `name.spv` and `name.metal`, and answers with the paths.
 ///
 /// This is what an ahead-of-time build runs: a bin target in the workspace links the crate its
@@ -582,11 +596,68 @@ pub enum Format {
     D32Float,
     D32FloatS8,
     D16Unorm,
+    Bc1RgbaUnorm,
+    Bc1RgbaUnormSrgb,
+    Bc2RgbaUnorm,
+    Bc2RgbaUnormSrgb,
+    Bc3RgbaUnorm,
+    Bc3RgbaUnormSrgb,
+    Bc4RUnorm,
+    Bc4RSnorm,
+    Bc5RgUnorm,
+    Bc5RgSnorm,
+    Bc6hRgbFloat,
+    Bc6hRgbUfloat,
+    Bc7RgbaUnorm,
+    Bc7RgbaUnormSrgb,
+    Astc4x4Unorm,
+    Astc4x4UnormSrgb,
 }
 
 impl Format {
-    /// Bytes per texel. Block-compressed formats are not in the enum yet, so this is exact.
     pub fn size(self) -> usize {
+        assert!(
+            !self.is_compressed(),
+            "compressed formats have no whole-byte texel size"
+        );
+        self.block_size()
+    }
+
+    pub fn block_extent(self) -> (u32, u32) {
+        match self {
+            Format::Bc1RgbaUnorm
+            | Format::Bc1RgbaUnormSrgb
+            | Format::Bc2RgbaUnorm
+            | Format::Bc2RgbaUnormSrgb
+            | Format::Bc3RgbaUnorm
+            | Format::Bc3RgbaUnormSrgb
+            | Format::Bc4RUnorm
+            | Format::Bc4RSnorm
+            | Format::Bc5RgUnorm
+            | Format::Bc5RgSnorm
+            | Format::Bc6hRgbFloat
+            | Format::Bc6hRgbUfloat
+            | Format::Bc7RgbaUnorm
+            | Format::Bc7RgbaUnormSrgb
+            | Format::Astc4x4Unorm
+            | Format::Astc4x4UnormSrgb => (4, 4),
+            _ => (1, 1),
+        }
+    }
+
+    pub fn is_compressed(self) -> bool {
+        self.block_extent() != (1, 1)
+    }
+
+    pub fn row_size(self, width: u32) -> usize {
+        width.div_ceil(self.block_extent().0) as usize * self.block_size()
+    }
+
+    pub fn image_size(self, width: u32, height: u32) -> usize {
+        self.row_size(width) * height.div_ceil(self.block_extent().1) as usize
+    }
+
+    pub fn block_size(self) -> usize {
         match self {
             Format::R8Unorm => 1,
             Format::Rg8Unorm | Format::R16Float | Format::D16Unorm => 2,
@@ -603,6 +674,22 @@ impl Format {
             Format::D32FloatS8 => 5,
             Format::Rgba16Float | Format::Rg32Uint => 8,
             Format::Rgba32Float | Format::Rgba32Uint => 16,
+            Format::Bc1RgbaUnorm
+            | Format::Bc1RgbaUnormSrgb
+            | Format::Bc4RUnorm
+            | Format::Bc4RSnorm => 8,
+            Format::Bc2RgbaUnorm
+            | Format::Bc2RgbaUnormSrgb
+            | Format::Bc3RgbaUnorm
+            | Format::Bc3RgbaUnormSrgb
+            | Format::Bc5RgUnorm
+            | Format::Bc5RgSnorm
+            | Format::Bc6hRgbFloat
+            | Format::Bc6hRgbUfloat
+            | Format::Bc7RgbaUnorm
+            | Format::Bc7RgbaUnormSrgb
+            | Format::Astc4x4Unorm
+            | Format::Astc4x4UnormSrgb => 16,
         }
     }
 
@@ -662,6 +749,8 @@ pub enum Feature {
     Occlusion,
     /// Runs of draws issued in one call: `VK_EXT_multi_draw`.
     MultiDraw,
+    TextureCompressionBc,
+    TextureCompressionAstc,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

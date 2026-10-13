@@ -114,6 +114,22 @@ pub(crate) fn format(format: Format) -> vk::Format {
         Format::D32Float => vk::Format::D32_SFLOAT,
         Format::D32FloatS8 => vk::Format::D32_SFLOAT_S8_UINT,
         Format::D16Unorm => vk::Format::D16_UNORM,
+        Format::Bc1RgbaUnorm => vk::Format::BC1_RGBA_UNORM_BLOCK,
+        Format::Bc1RgbaUnormSrgb => vk::Format::BC1_RGBA_SRGB_BLOCK,
+        Format::Bc2RgbaUnorm => vk::Format::BC2_UNORM_BLOCK,
+        Format::Bc2RgbaUnormSrgb => vk::Format::BC2_SRGB_BLOCK,
+        Format::Bc3RgbaUnorm => vk::Format::BC3_UNORM_BLOCK,
+        Format::Bc3RgbaUnormSrgb => vk::Format::BC3_SRGB_BLOCK,
+        Format::Bc4RUnorm => vk::Format::BC4_UNORM_BLOCK,
+        Format::Bc4RSnorm => vk::Format::BC4_SNORM_BLOCK,
+        Format::Bc5RgUnorm => vk::Format::BC5_UNORM_BLOCK,
+        Format::Bc5RgSnorm => vk::Format::BC5_SNORM_BLOCK,
+        Format::Bc6hRgbFloat => vk::Format::BC6H_SFLOAT_BLOCK,
+        Format::Bc6hRgbUfloat => vk::Format::BC6H_UFLOAT_BLOCK,
+        Format::Bc7RgbaUnorm => vk::Format::BC7_UNORM_BLOCK,
+        Format::Bc7RgbaUnormSrgb => vk::Format::BC7_SRGB_BLOCK,
+        Format::Astc4x4Unorm => vk::Format::ASTC_4X4_UNORM_BLOCK,
+        Format::Astc4x4UnormSrgb => vk::Format::ASTC_4X4_SRGB_BLOCK,
     }
 }
 
@@ -138,6 +154,22 @@ pub(crate) fn from_vk_format(raw: vk::Format) -> Option<Format> {
         vk::Format::D32_SFLOAT => Format::D32Float,
         vk::Format::D32_SFLOAT_S8_UINT => Format::D32FloatS8,
         vk::Format::D16_UNORM => Format::D16Unorm,
+        vk::Format::BC1_RGBA_UNORM_BLOCK => Format::Bc1RgbaUnorm,
+        vk::Format::BC1_RGBA_SRGB_BLOCK => Format::Bc1RgbaUnormSrgb,
+        vk::Format::BC2_UNORM_BLOCK => Format::Bc2RgbaUnorm,
+        vk::Format::BC2_SRGB_BLOCK => Format::Bc2RgbaUnormSrgb,
+        vk::Format::BC3_UNORM_BLOCK => Format::Bc3RgbaUnorm,
+        vk::Format::BC3_SRGB_BLOCK => Format::Bc3RgbaUnormSrgb,
+        vk::Format::BC4_UNORM_BLOCK => Format::Bc4RUnorm,
+        vk::Format::BC4_SNORM_BLOCK => Format::Bc4RSnorm,
+        vk::Format::BC5_UNORM_BLOCK => Format::Bc5RgUnorm,
+        vk::Format::BC5_SNORM_BLOCK => Format::Bc5RgSnorm,
+        vk::Format::BC6H_SFLOAT_BLOCK => Format::Bc6hRgbFloat,
+        vk::Format::BC6H_UFLOAT_BLOCK => Format::Bc6hRgbUfloat,
+        vk::Format::BC7_UNORM_BLOCK => Format::Bc7RgbaUnorm,
+        vk::Format::BC7_SRGB_BLOCK => Format::Bc7RgbaUnormSrgb,
+        vk::Format::ASTC_4X4_UNORM_BLOCK => Format::Astc4x4Unorm,
+        vk::Format::ASTC_4X4_SRGB_BLOCK => Format::Astc4x4UnormSrgb,
         _ => return None,
     })
 }
@@ -594,6 +626,9 @@ pub struct Device {
     pub(crate) bindless_cap: u32,
     pub(crate) max_multi_draw_count: u32,
     pub(crate) timestamp_period: f32,
+    pub(crate) timestamp_valid_bits: u32,
+    compression_bc: bool,
+    compression_astc: bool,
     pub(crate) debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
@@ -761,7 +796,10 @@ impl Device {
         let mut unused_attachments =
             vk::PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT::default()
                 .dynamic_rendering_unused_attachments(true);
+        let supported = unsafe { instance.get_physical_device_features(physical) };
         let features = vk::PhysicalDeviceFeatures::default()
+            .texture_compression_bc(supported.texture_compression_bc != 0)
+            .texture_compression_astc_ldr(supported.texture_compression_astc_ldr != 0)
             .shader_int64(true)
             .occlusion_query_precise(true)
             .multi_draw_indirect(true)
@@ -804,6 +842,10 @@ impl Device {
         // Read out of `props` before touching the structs it holds mutable borrows of.
         let limits = props.properties.limits;
         let timestamp_period = limits.timestamp_period;
+        let timestamp_valid_bits =
+            unsafe { instance.get_physical_device_queue_family_properties(physical) }
+                [queue_family as usize]
+                .timestamp_valid_bits;
 
         // What the hardware allows, and nothing invented on top of it. A slot reserves an
         // entry in all three arrays, so the ceiling is the smallest of them — per-stage as
@@ -852,6 +894,9 @@ impl Device {
             },
             max_multi_draw_count: multi_draw_props.max_multi_draw_count,
             timestamp_period,
+            timestamp_valid_bits,
+            compression_bc: supported.texture_compression_bc != 0,
+            compression_astc: supported.texture_compression_astc_ldr != 0,
             swapchain_ext: ash::khr::swapchain::Device::load(&instance, &device),
             descriptor_buffer_ext: ash::ext::descriptor_buffer::Device::load(&instance, &device),
             surface_ext,
@@ -929,8 +974,10 @@ impl Device {
             // and `draw_multi` cover the same ground differently and are always available.
             Feature::IndirectCommands => false,
             Feature::MultiDraw => self.max_multi_draw_count > 1,
-            Feature::Timestamps => self.timestamp_period > 0.0,
+            Feature::Timestamps => self.timestamp_period > 0.0 && self.timestamp_valid_bits > 0,
             Feature::Occlusion => true,
+            Feature::TextureCompressionBc => self.compression_bc,
+            Feature::TextureCompressionAstc => self.compression_astc,
         }
     }
 
@@ -1831,6 +1878,8 @@ pub struct GpuHeap {
     pub(crate) granularity: u64,
     pub(crate) device: ash::Device,
     uploader: UnsafeCell<Uploader>,
+    compression_bc: bool,
+    compression_astc: bool,
     retired: UnsafeCell<VecDeque<(u64, u32, PendingResource)>>,
 }
 
@@ -1889,6 +1938,8 @@ impl GpuHeap {
             granularity,
             device: device.device.clone(),
             uploader: UnsafeCell::new(Uploader::new(device, ring)?),
+            compression_bc: device.compression_bc,
+            compression_astc: device.compression_astc,
             retired: UnsafeCell::new(VecDeque::new()),
         })
     }
@@ -1945,6 +1996,26 @@ impl GpuHeap {
     }
 
     pub fn alloc_texture(&self, desc: &TextureDesc) -> Result<HeapTexture<'_>, Error> {
+        let fmt = from_vk_format(desc.format).expect("texture format is outside nga::Format");
+        if fmt.is_compressed() {
+            let allowed = vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST;
+            if desc.samples != vk::SampleCountFlags::TYPE_1 || !(desc.usage & !allowed).is_empty() {
+                return Err(Error::new(
+                    "compressed textures only support sampling and copying",
+                ));
+            }
+            let supported = match fmt {
+                Format::Astc4x4Unorm | Format::Astc4x4UnormSrgb => self.compression_astc,
+                _ => self.compression_bc,
+            };
+            if !supported {
+                return Err(Error::new(
+                    "texture compression format is not supported by this device",
+                ));
+            }
+        }
         let info = vk::ImageCreateInfo::default()
             .flags(if desc.cube { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
             .image_type(vk::ImageType::TYPE_2D)
@@ -2131,19 +2202,17 @@ impl GpuHeap {
         }
         let width = (texture.width >> level).max(1);
         let height = (texture.height >> level).max(1);
-        let texels = width as usize * height as usize;
-        if texels == 0 || bytes.is_empty() {
-            return Ok(());
-        }
-        if !bytes.len().is_multiple_of(texels) {
+        let fmt = texture.format();
+        let expected = fmt.image_size(width, height);
+        if bytes.len() != expected {
             return Err(Error::new(format!(
-                "{} bytes is not a whole number of texels for a {width}x{height} image",
+                "{} bytes does not match the {expected} bytes required for a {width}x{height} {fmt:?} image",
                 bytes.len()
             )));
         }
-        // The texel size comes from the caller's own slice rather than a format table: an upload
-        // is by definition a whole level, so the division is exact and every format works.
-        let row = bytes.len() / height as usize;
+        let row = fmt.row_size(width);
+        let block_height = fmt.block_extent().1;
+        let block_rows = height.div_ceil(block_height);
         if row > uploader.ring.size {
             return Err(Error::new(format!(
                 "one image row is {row} bytes, larger than the {} byte upload ring",
@@ -2167,12 +2236,10 @@ impl GpuHeap {
         };
         texture.layout.set(vk::ImageLayout::TRANSFER_DST_OPTIMAL);
 
-        // Rows are the chunking unit, so a texture far larger than the ring still streams
-        // through it. `bufferRowLength` stays 0 because each chunk is tightly packed.
         let mut first = 0u32;
-        while first < height {
-            let remaining = (height - first) as usize * row;
-            let rows = ((uploader.chunk(remaining) / row).max(1) as u32).min(height - first);
+        while first < block_rows {
+            let remaining = (block_rows - first) as usize * row;
+            let rows = ((uploader.chunk(remaining) / row).max(1) as u32).min(block_rows - first);
             let size = rows as usize * row;
             let (staged, cpu) = uploader.stage(size, 16)?;
             unsafe {
@@ -2195,12 +2262,12 @@ impl GpuHeap {
                         },
                         image_offset: vk::Offset3D {
                             x: 0,
-                            y: first as i32,
+                            y: (first * block_height) as i32,
                             z: 0,
                         },
                         image_extent: vk::Extent3D {
                             width,
-                            height: rows,
+                            height: (rows * block_height).min(height - first * block_height),
                             depth: 1,
                         },
                         ..Default::default()
@@ -4302,6 +4369,24 @@ impl<'a> Compute<'a> {
             .get()
             .checked_sub(arena.base)
             .expect("the readback destination is not in this arena");
+        let fmt = texture.format();
+        let size = fmt.image_size(
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        );
+        assert!(
+            offset <= arena.size as u64 && size as u64 <= arena.size as u64 - offset,
+            "texture readback exceeds the arena"
+        );
+        let align = if fmt.is_compressed() {
+            fmt.block_size() as u64
+        } else {
+            4
+        };
+        assert!(
+            offset.is_multiple_of(align),
+            "texture readback offset is not block-aligned"
+        );
         self.transition(texture, Usage::COPY_SRC);
         let region = vk::BufferImageCopy2::default()
             .image_subresource(
@@ -4881,11 +4966,16 @@ pub struct Timers {
     pub(crate) count: usize,
     pub(crate) base: usize,
     pub(crate) ticks: Vec<u64>,
+    results: Vec<[u64; 2]>,
+    valid_mask: u64,
     pub(crate) ns_per_tick: f64,
 }
 
 impl Timers {
     pub fn new(device: &Device, count: usize) -> Result<Self, Error> {
+        if !device.supports(Feature::Timestamps) {
+            return Err(Error::new("timestamps are not supported by this queue"));
+        }
         let total = count * FRAMES_IN_FLIGHT as usize;
         let pool = unsafe {
             device.device.create_query_pool(
@@ -4905,6 +4995,8 @@ impl Timers {
             count,
             base: 0,
             ticks: vec![0; count],
+            results: vec![[0; 2]; count],
+            valid_mask: u64::MAX >> (64 - device.timestamp_valid_bits),
             ns_per_tick: device.timestamp_period as f64,
         })
     }
@@ -4915,44 +5007,35 @@ impl Timers {
 
     /// Take this frame's half of the pool and read back what the last frame to use it recorded.
     /// Call once per frame, after `begin_frame`. That wait is what makes the read safe.
-    ///
-    /// Only slots written every frame are meaningful: a Vulkan query has to be reset before it
-    /// can be written again, so a slot skipped this frame reads as unwritten, where Metal would
-    /// leave the previous value in place.
     pub fn begin(&mut self, frame: &Frame) {
         self.base = ((frame.value - 1) % FRAMES_IN_FLIGHT) as usize * self.count;
-        self.ticks.fill(0);
+        self.results.fill([0; 2]);
         unsafe {
-            // Unwritten slots stay zero: without WAIT this returns NOT_READY and leaves them
-            // alone, which is the same thing an unresolved Metal counter reads as.
-            self.device
-                .get_query_pool_results(
-                    self.pool,
-                    self.base as u32,
-                    &mut self.ticks,
-                    vk::QueryResultFlags::TYPE_64,
-                )
-                .ok();
+            let result = self.device.get_query_pool_results(
+                self.pool,
+                self.base as u32,
+                &mut self.results,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WITH_AVAILABILITY,
+            );
+            if !matches!(result, Ok(()) | Err(vk::Result::NOT_READY)) {
+                self.results.fill([0; 2]);
+            }
             self.device
                 .reset_query_pool(self.pool, self.base as u32, self.count as u32);
         }
+        for (tick, result) in self.ticks.iter_mut().zip(&self.results) {
+            *tick = result[0] & self.valid_mask;
+        }
     }
 
-    /// Whether slot `index` holds a timestamp from the last frame to use this half. A slot that
-    /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
-    /// reports for it, so this is how to tell the two apart.
     pub fn written(&self, index: usize) -> bool {
-        self.ticks[index] != 0
+        self.results[index][1] != 0
     }
 
     /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
     /// order, which is what an unwritten slot looks like on both backends.
     pub fn ns(&self, start: usize, end: usize) -> f64 {
-        let (start, end) = (self.ticks[start], self.ticks[end]);
-        match start == 0 || end < start {
-            true => 0.0,
-            false => (end - start) as f64 * self.ns_per_tick,
-        }
+        self.checked_ns(start, end).unwrap_or(0.0)
     }
 
     pub fn ms(&self, start: usize, end: usize) -> f64 {

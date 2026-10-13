@@ -90,3 +90,19 @@ This library is a work in progress and the API is currently quite awful since it
 I never wanted to write this library. 
 
 In order to write high performance cross-platform GPU code I basically had no choice.
+
+## GPU timings
+
+Call `timers.begin(&frame)` after `context.begin_frame()`. Results belong to the previous use of that frame slot, `FRAMES_IN_FLIGHT` frames earlier.
+
+Use `timers.checked_ms(start, end)` or `checked_ns(start, end)` for measurements. They return `None` for missing timestamps, out-of-order values (including a detected counter wrap), or indices outside the timer set. Equal valid timestamps return `Some(0.0)`. The existing `ms` and `ns` methods remain available and still return zero for invalid intervals.
+
+Record a begin/end pair within each pass rather than deriving a pass's duration from adjacent passes. Raster timestamps target the fragment stage on Metal and color output on Vulkan; compute timestamps wait for prior work. Passes and stages can overlap, and Metal timestamps do not delay subsequent work, so summing these intervals is not a whole-frame timing or proof of a 120 FPS budget. Precise timestamps can themselves affect performance.
+
+## Block-compressed textures
+
+`Format` supports BC1–BC7 and ASTC 4×4 LDR, including their sRGB variants where applicable. Query `Feature::TextureCompressionBc` or `Feature::TextureCompressionAstc` with `device.supports` before use. Unsupported compression formats and compressed render-target, storage, or multisample textures return an allocation error. Other ASTC block footprints and ASTC HDR are not exposed yet.
+
+`format.block_extent()` gives the block dimensions in texels and `block_size()` gives bytes per block. `row_size(width)` and `image_size(width, height)` give tightly packed transfer sizes, rounding partial blocks up, including mip levels smaller than a block. `size()` remains bytes per texel for uncompressed formats and panics for compressed formats.
+
+`heap.upload_layer(&texture, level, layer, bytes)` expects exactly `format.image_size(mip_width, mip_height)` bytes of already-compressed data, not decoded texels. The same block layout applies to `compute.read_texture_at`. Allocate sufficient readback space and align compressed readback offsets to `block_size()` bytes. Vulkan streams large uploads in complete block rows; the final copy can contain a partial block row at the mip boundary.

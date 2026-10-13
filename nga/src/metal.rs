@@ -145,6 +145,22 @@ pub(crate) fn format(format: Format) -> PixelFormat {
         Format::D32Float => PixelFormat::Depth32Float,
         Format::D32FloatS8 => PixelFormat::Depth32FloatStencil8,
         Format::D16Unorm => PixelFormat::Depth16Unorm,
+        Format::Bc1RgbaUnorm => PixelFormat::Bc1Rgba,
+        Format::Bc1RgbaUnormSrgb => PixelFormat::Bc1RgbaSrgb,
+        Format::Bc2RgbaUnorm => PixelFormat::Bc2Rgba,
+        Format::Bc2RgbaUnormSrgb => PixelFormat::Bc2RgbaSrgb,
+        Format::Bc3RgbaUnorm => PixelFormat::Bc3Rgba,
+        Format::Bc3RgbaUnormSrgb => PixelFormat::Bc3RgbaSrgb,
+        Format::Bc4RUnorm => PixelFormat::Bc4RUnorm,
+        Format::Bc4RSnorm => PixelFormat::Bc4RSnorm,
+        Format::Bc5RgUnorm => PixelFormat::Bc5RgUnorm,
+        Format::Bc5RgSnorm => PixelFormat::Bc5RgSnorm,
+        Format::Bc6hRgbFloat => PixelFormat::Bc6HRgbFloat,
+        Format::Bc6hRgbUfloat => PixelFormat::Bc6HRgbUfloat,
+        Format::Bc7RgbaUnorm => PixelFormat::Bc7RgbaUnorm,
+        Format::Bc7RgbaUnormSrgb => PixelFormat::Bc7RgbaUnormSrgb,
+        Format::Astc4x4Unorm => PixelFormat::Astc4x4Ldr,
+        Format::Astc4x4UnormSrgb => PixelFormat::Astc4x4Srgb,
     }
 }
 
@@ -169,6 +185,22 @@ pub(crate) fn from_metal_format(raw: PixelFormat) -> Option<Format> {
         PixelFormat::Depth32Float => Format::D32Float,
         PixelFormat::Depth32FloatStencil8 => Format::D32FloatS8,
         PixelFormat::Depth16Unorm => Format::D16Unorm,
+        PixelFormat::Bc1Rgba => Format::Bc1RgbaUnorm,
+        PixelFormat::Bc1RgbaSrgb => Format::Bc1RgbaUnormSrgb,
+        PixelFormat::Bc2Rgba => Format::Bc2RgbaUnorm,
+        PixelFormat::Bc2RgbaSrgb => Format::Bc2RgbaUnormSrgb,
+        PixelFormat::Bc3Rgba => Format::Bc3RgbaUnorm,
+        PixelFormat::Bc3RgbaSrgb => Format::Bc3RgbaUnormSrgb,
+        PixelFormat::Bc4RUnorm => Format::Bc4RUnorm,
+        PixelFormat::Bc4RSnorm => Format::Bc4RSnorm,
+        PixelFormat::Bc5RgUnorm => Format::Bc5RgUnorm,
+        PixelFormat::Bc5RgSnorm => Format::Bc5RgSnorm,
+        PixelFormat::Bc6HRgbFloat => Format::Bc6hRgbFloat,
+        PixelFormat::Bc6HRgbUfloat => Format::Bc6hRgbUfloat,
+        PixelFormat::Bc7RgbaUnorm => Format::Bc7RgbaUnorm,
+        PixelFormat::Bc7RgbaUnormSrgb => Format::Bc7RgbaUnormSrgb,
+        PixelFormat::Astc4x4Ldr => Format::Astc4x4Unorm,
+        PixelFormat::Astc4x4Srgb => Format::Astc4x4UnormSrgb,
         _ => return None,
     })
 }
@@ -549,6 +581,10 @@ impl Device {
             Feature::MultiDraw => false,
             Feature::Timestamps => true,
             Feature::Occlusion => true,
+            Feature::TextureCompressionBc => self.device.supports_bc_texture_compression(),
+            Feature::TextureCompressionAstc => {
+                self.device.supports_family(minmetal::GPUFamily::Apple2)
+            }
         }
     }
 
@@ -1031,6 +1067,26 @@ impl GpuHeap {
     }
 
     pub fn alloc_texture(&self, desc: &TextureDesc) -> Result<HeapTexture<'_>, Error> {
+        if desc.format.is_compressed() {
+            if desc.samples != 1
+                || desc.usage.0 & !(Usage::SAMPLED | Usage::COPY_SRC | Usage::COPY_DST).0 != 0
+            {
+                return Err(Error::new(
+                    "compressed textures only support sampling and copying",
+                ));
+            }
+            let supported = match desc.format {
+                Format::Astc4x4Unorm | Format::Astc4x4UnormSrgb => {
+                    self.device.supports_family(minmetal::GPUFamily::Apple2)
+                }
+                _ => self.device.supports_bc_texture_compression(),
+            };
+            if !supported {
+                return Err(Error::new(
+                    "texture compression format is not supported by this device",
+                ));
+            }
+        }
         let descriptor = desc.descriptor();
         descriptor.set_storage_mode(StorageMode::Shared);
         let need = self.device.heap_texture_size_and_align(&descriptor);
@@ -1105,17 +1161,15 @@ impl GpuHeap {
         }
         let width = (texture.width >> level).max(1);
         let height = (texture.height >> level).max(1);
-        let texels = width as usize * height as usize;
-        if texels == 0 || bytes.is_empty() {
-            return Ok(());
-        }
-        if !bytes.len().is_multiple_of(texels) {
+        let expected = texture.format.image_size(width, height);
+        if bytes.len() != expected {
             return Err(Error::new(format!(
-                "{} bytes is not a whole number of texels for a {width}x{height} image",
-                bytes.len()
+                "{} bytes does not match the {expected} bytes required for a {width}x{height} {:?} image",
+                bytes.len(),
+                texture.format
             )));
         }
-        let row = bytes.len() / height as usize;
+        let row = texture.format.row_size(width);
         let view;
         let target;
         let target_level;
@@ -2503,7 +2557,16 @@ impl<'a> Compute<'a> {
             .expect("the readback destination is not in this arena") as usize;
         let width = (texture.width >> level).max(1);
         let height = (texture.height >> level).max(1);
-        let row = width as usize * texture.format.size();
+        let row = texture.format.row_size(width);
+        let size = texture.format.image_size(width, height);
+        assert!(
+            offset <= arena.size && size <= arena.size - offset,
+            "texture readback exceeds the arena"
+        );
+        assert!(
+            !texture.format.is_compressed() || offset.is_multiple_of(texture.format.block_size()),
+            "texture readback offset is not block-aligned"
+        );
         self.encoder.copy_texture_to_buffer(
             &texture.texture,
             layer as usize,
@@ -2513,7 +2576,7 @@ impl<'a> Compute<'a> {
             &arena.buffer,
             offset,
             row,
-            row * height as usize,
+            size,
             minmetal::BlitOption::NONE,
         );
     }
@@ -3129,9 +3192,6 @@ impl Timers {
         heap.invalidate_counter_range(range);
     }
 
-    /// Whether slot `index` holds a timestamp from the previous use of this frame slot. A slot that
-    /// was never written reads as zero on both backends, and zero is also what [`Timers::ns`]
-    /// reports for it, so this is how to tell the two apart.
     pub fn written(&self, index: usize) -> bool {
         self.ticks[index] != 0
     }
@@ -3139,11 +3199,7 @@ impl Timers {
     /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
     /// order, which is what an unwritten slot looks like on both backends.
     pub fn ns(&self, start: usize, end: usize) -> f64 {
-        let (start, end) = (self.ticks[start], self.ticks[end]);
-        match start == 0 || end < start {
-            true => 0.0,
-            false => (end - start) as f64 * self.ns_per_tick,
-        }
+        self.checked_ns(start, end).unwrap_or(0.0)
     }
 
     pub fn ms(&self, start: usize, end: usize) -> f64 {
@@ -3205,4 +3261,24 @@ impl Occlusion {
     pub fn samples(&self, index: u32) -> u64 {
         self.samples[index as usize]
     }
+}
+
+#[test]
+fn checked_timing_intervals() {
+    let timers = Timers {
+        heaps: Vec::new(),
+        count: 4,
+        base: 0,
+        ticks: vec![0, 10, 10, 30],
+        ns_per_tick: 2.5,
+    };
+    assert_eq!(timers.checked_ns(0, 1), None);
+    assert_eq!(timers.checked_ns(1, 0), None);
+    assert_eq!(timers.checked_ns(3, 1), None);
+    assert_eq!(timers.checked_ns(1, 2), Some(0.0));
+    assert_eq!(timers.checked_ns(1, 3), Some(50.0));
+    assert_eq!(timers.checked_ms(1, 3), Some(0.00005));
+    assert_eq!(timers.checked_ns(4, 1), None);
+    assert_eq!(timers.checked_ns(1, usize::MAX), None);
+    assert_eq!(timers.ms(3, 1), 0.0);
 }
