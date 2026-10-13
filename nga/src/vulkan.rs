@@ -20,7 +20,7 @@ use crate::{
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
     Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
     Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TileDesc, Tlsf,
     Topology, Usage, VertexShader, Viewport, Winding,
 };
 use ash::vk;
@@ -1404,6 +1404,7 @@ pub struct HeapTexture<'heap> {
     pub(crate) height: u32,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
+    pub(crate) cube: bool,
     _allocation: HeapAllocation<'heap>,
     pub(crate) layout: Cell<vk::ImageLayout>,
 }
@@ -1465,6 +1466,7 @@ pub struct TextureDesc {
     pub(crate) samples: vk::SampleCountFlags,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
+    pub(crate) cube: bool,
 }
 
 impl TextureDesc {
@@ -1478,7 +1480,13 @@ impl TextureDesc {
             samples: vk::SampleCountFlags::TYPE_1,
             mips: 1,
             layers: 1,
+            cube: false,
         }
+    }
+
+    pub fn texture_cube(fmt: Format, size: u32) -> Self {
+        assert!(size > 0, "a cubemap must have a nonzero face size");
+        Self { layers: 6, cube: true, ..Self::texture_2d(fmt, size, size) }
     }
 
     pub fn depth(fmt: Format, width: u32, height: u32) -> Self {
@@ -1494,6 +1502,7 @@ impl TextureDesc {
             samples: vk::SampleCountFlags::TYPE_1,
             mips: 1,
             layers: 1,
+            cube: false,
         }
     }
 
@@ -1516,6 +1525,7 @@ impl TextureDesc {
     /// Build a 2D array texture. A layered pass writes `Pass::layers` consecutive slices,
     /// starting at the slice selected by its attachment.
     pub fn layers(mut self, layers: u32) -> Self {
+        assert!(!self.cube, "cubemap arrays are not supported");
         assert!(layers > 0, "a texture must have at least one array layer");
         self.layers = layers;
         self
@@ -1532,6 +1542,7 @@ impl TextureDesc {
     /// cannot be sampled or copied, since it is only ever an attachment and a resolve source, so
     /// this also drops the usage the constructor assumed.
     pub fn samples(mut self, samples: u32) -> Self {
+        assert!(!self.cube || samples == 1, "cubemaps cannot be multisampled");
         self.samples = sample_count(samples);
         if samples > 1 {
             // A multisample image is one level by definition, and it is never sampled, so the
@@ -1935,6 +1946,7 @@ impl GpuHeap {
 
     pub fn alloc_texture(&self, desc: &TextureDesc) -> Result<HeapTexture<'_>, Error> {
         let info = vk::ImageCreateInfo::default()
+            .flags(if desc.cube { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
             .extent(vk::Extent3D {
@@ -1976,6 +1988,7 @@ impl GpuHeap {
             height: desc.height,
             mips: desc.mips,
             layers: desc.layers,
+            cube: desc.cube,
             _allocation: allocation,
             layout: Cell::new(vk::ImageLayout::UNDEFINED),
         };
@@ -1983,10 +1996,11 @@ impl GpuHeap {
             self.device
                 .bind_image_memory(texture.image, self.storage.memory, alloc.offset)?
         };
-        let view_type = match desc.layers {
+        let attachment_type = match desc.layers {
             1 => vk::ImageViewType::TYPE_2D,
             _ => vk::ImageViewType::TYPE_2D_ARRAY,
         };
+        let view_type = if desc.cube { vk::ImageViewType::CUBE } else { attachment_type };
         texture.view = unsafe {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
@@ -2008,7 +2022,7 @@ impl GpuHeap {
                     self.device.create_image_view(
                         &vk::ImageViewCreateInfo::default()
                             .image(texture.image)
-                            .view_type(view_type)
+                            .view_type(attachment_type)
                             .format(desc.format)
                             .subresource_range(
                                 vk::ImageSubresourceRange::default()
@@ -2507,6 +2521,11 @@ impl ResourceHeap {
             self.resources_cpu,
         );
         Texture2d(Handle((range.base + slot) as u64))
+    }
+
+    pub fn write_cube(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> TextureCube {
+        assert!(texture.cube, "write_cube requires a cubemap");
+        TextureCube(self.write_texture(range, slot, texture).0)
     }
 
     /// A texture that is written and sampled in the same frame stays in `GENERAL`, so its

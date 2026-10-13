@@ -30,7 +30,7 @@ use crate::{
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
     Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
     Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TileDesc, Tlsf,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TileDesc, Tlsf,
     Topology, Usage, VertexShader, Viewport, Winding,
 };
 use minmetal::{
@@ -779,6 +779,7 @@ pub struct HeapTexture<'heap> {
     pub(crate) height: u32,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
+    pub(crate) cube: bool,
     _allocation: HeapAllocation<'heap>,
 }
 
@@ -813,6 +814,7 @@ pub struct TextureDesc {
     pub(crate) samples: u32,
     pub(crate) mips: u32,
     pub(crate) layers: u32,
+    pub(crate) cube: bool,
 }
 
 impl TextureDesc {
@@ -825,7 +827,13 @@ impl TextureDesc {
             samples: 1,
             mips: 1,
             layers: 1,
+            cube: false,
         }
+    }
+
+    pub fn texture_cube(fmt: Format, size: u32) -> Self {
+        assert!(size > 0, "a cubemap must have a nonzero face size");
+        Self { layers: 6, cube: true, ..Self::texture_2d(fmt, size, size) }
     }
 
     pub fn depth(fmt: Format, width: u32, height: u32) -> Self {
@@ -837,6 +845,7 @@ impl TextureDesc {
             samples: 1,
             mips: 1,
             layers: 1,
+            cube: false,
         }
     }
 
@@ -859,6 +868,7 @@ impl TextureDesc {
     /// Build a 2D array texture. A layered pass writes `Pass::layers` consecutive slices,
     /// starting at the slice selected by its attachment.
     pub fn layers(mut self, layers: u32) -> Self {
+        assert!(!self.cube, "cubemap arrays are not supported");
         assert!(layers > 0, "a texture must have at least one array layer");
         self.layers = layers;
         self
@@ -875,6 +885,10 @@ impl TextureDesc {
     /// is only ever an attachment and a resolve source, so this also drops the usage the
     /// constructor assumed, the same narrowing Vulkan needs for the same reason.
     pub fn samples(mut self, samples: u32) -> Self {
+        assert!(
+            !self.cube || samples == 1,
+            "cubemaps cannot be multisampled"
+        );
         assert!(
             matches!(samples, 1 | 2 | 4 | 8),
             "{samples} is not a Metal sample count"
@@ -900,13 +914,15 @@ impl TextureDesc {
         let mut texture_usage = usage(self.usage);
         if self.layers > 1 {
             texture_usage = texture_usage | TextureUsage::PIXEL_FORMAT_VIEW;
-            desc.set_array_length(self.layers as usize);
+            desc.set_array_length(if self.cube { 1 } else { self.layers as usize });
         }
         desc.set_usage(texture_usage);
         if self.mips > 1 {
             desc.set_mipmap_level_count(self.mips as usize);
         }
-        if self.samples > 1 && self.layers > 1 {
+        if self.cube {
+            desc.set_texture_type(TextureType::Cube);
+        } else if self.samples > 1 && self.layers > 1 {
             desc.set_texture_type(TextureType::D2MultisampleArray);
             desc.set_sample_count(self.samples as usize);
         } else if self.samples > 1 {
@@ -1035,6 +1051,7 @@ impl GpuHeap {
             height: desc.height,
             mips: desc.mips,
             layers: desc.layers,
+            cube: desc.cube,
             _allocation: allocation,
         })
     }
@@ -1269,6 +1286,11 @@ impl ResourceHeap {
                 .write(resource_id.impl_)
         };
         Texture2d(Handle((range.base + slot) as u64))
+    }
+
+    pub fn write_cube(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> TextureCube {
+        assert!(texture.cube, "write_cube requires a cubemap");
+        TextureCube(self.write_texture(range, slot, texture).0)
     }
 
     /// The Vulkan version needs the usage to pick an image layout for the descriptor. There is

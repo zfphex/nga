@@ -69,6 +69,7 @@ const OP_IMAGE_SAMPLE_IMPLICIT_LOD: u32 = 87;
 const OP_IMAGE_SAMPLE_EXPLICIT_LOD: u32 = 88;
 const OP_IMAGE_READ: u32 = 98;
 const OP_IMAGE_WRITE: u32 = 99;
+const OP_IMAGE_QUERY_SIZE_LOD: u32 = 103;
 const OP_IMAGE_QUERY_SIZE: u32 = 104;
 const OP_CONVERT_F_TO_U: u32 = 109;
 const OP_CONVERT_F_TO_S: u32 = 110;
@@ -248,6 +249,9 @@ struct M {
     storage_image: u32,
     sampler_type: u32,
     sampled_image: u32,
+    cubes: u32,
+    cube_image: u32,
+    sampled_cube: u32,
 }
 
 impl M {
@@ -577,6 +581,9 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
         storage_image: 0,
         sampler_type: 0,
         sampled_image: 0,
+        cubes: 0,
+        cube_image: 0,
+        sampled_cube: 0,
     };
     m.glsl = m.id();
     m.capability(1);
@@ -1905,9 +1912,11 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
         HandleKind::Texture2dRW | HandleKind::Texture3dRW => 1,
         _ => 0,
     };
+    let cube = kind == HandleKind::TextureCube;
     let cached = match set {
         1 => (m.storage, m.storage_image),
         2 => (m.samplers, m.sampler_type),
+        _ if cube => (m.cubes, m.cube_image),
         _ => (m.textures, m.texture_image),
     };
     if cached.0 != 0 {
@@ -1923,9 +1932,6 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
         _ => {
             let float = m.ty(Ty::F32);
             let id = m.id();
-            // 2D, no depth, not arrayed, single-sampled. A sampled image says so; a storage
-            // image says "used without a sampler" and carries an unknown format, which is what
-            // lets one array serve every format the host binds into it.
             let sampled = match set {
                 1 => 2,
                 _ => 1,
@@ -1933,7 +1939,7 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
             inst(
                 &mut m.globals,
                 OP_TYPE_IMAGE,
-                &[id, float, 1, 0, 0, 0, sampled, 0],
+                &[id, float, if cube { 3 } else { 1 }, 0, 0, 0, sampled, 0],
             );
             if set == 1 {
                 m.capability(55);
@@ -1958,6 +1964,7 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
         match set {
             1 => "nga_storage",
             2 => "nga_samplers",
+            _ if cube => "nga_cubes",
             _ => "nga_textures",
         },
     );
@@ -1969,6 +1976,10 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
         2 => {
             m.samplers = variable;
             m.sampler_type = element;
+        }
+        _ if cube => {
+            m.cubes = variable;
+            m.cube_image = element;
         }
         _ => {
             m.textures = variable;
@@ -2015,16 +2026,18 @@ fn image(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
             let sampler = descriptor(m, w, sampler_kind, sampler_handle);
             let uv = value(m, w, args[2]);
             let (_, element) = descriptor_array(m, kind);
-            if m.sampled_image == 0 {
-                let id = m.id();
-                inst(&mut m.globals, OP_TYPE_SAMPLED_IMAGE, &[id, element]);
-                m.sampled_image = id;
+            let cube = kind == HandleKind::TextureCube;
+            let mut sampled_type = if cube { m.sampled_cube } else { m.sampled_image };
+            if sampled_type == 0 {
+                sampled_type = m.id();
+                inst(&mut m.globals, OP_TYPE_SAMPLED_IMAGE, &[sampled_type, element]);
+                if cube { m.sampled_cube = sampled_type; } else { m.sampled_image = sampled_type; }
             }
             let sampled = m.id();
             inst(
                 &mut w.body,
                 OP_SAMPLED_IMAGE,
-                &[m.sampled_image, sampled, image_id, sampler],
+                &[sampled_type, sampled, image_id, sampler],
             );
             let type_id = m.ty(ty);
             let id = m.id();
@@ -2059,9 +2072,15 @@ fn image(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
             0
         }
         _ => {
+            m.capability(50);
             let type_id = m.ty(Ty::Vec(Prim::U32, 2));
             let id = m.id();
-            inst(&mut w.body, OP_IMAGE_QUERY_SIZE, &[type_id, id, image_id]);
+            if matches!(kind, HandleKind::Texture2dRW | HandleKind::Texture3dRW) {
+                inst(&mut w.body, OP_IMAGE_QUERY_SIZE, &[type_id, id, image_id]);
+            } else {
+                let level = m.constant(Ty::Scalar(Prim::I32), 0);
+                inst(&mut w.body, OP_IMAGE_QUERY_SIZE_LOD, &[type_id, id, image_id, level]);
+            }
             id
         }
     }

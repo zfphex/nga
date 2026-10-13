@@ -416,8 +416,33 @@ sampled! {
     Texture3d,
     Texture3dW,
     Texture3dRW,
-    TextureCube,
     Depth2d,
+}
+
+impl crate::TextureCube {
+    pub fn sample(self, sampler: Sampler, direction: f32x3) -> f32x4 {
+        let _ = (self, sampler, direction);
+        f32x4::splat(0.0)
+    }
+
+    pub fn sample_level(self, sampler: Sampler, direction: f32x3, level: f32) -> f32x4 {
+        let _ = (self, sampler, direction, level);
+        f32x4::splat(0.0)
+    }
+
+    pub fn dimensions(self) -> u32x2 {
+        let _ = self;
+        u32x2::splat(0)
+    }
+
+    pub fn offset(self, off: u32) -> Self {
+        Self(crate::Handle(self.0.0 + off as u64))
+    }
+}
+
+impl std::ops::Add<u32> for crate::TextureCube {
+    type Output = Self;
+    fn add(self, rhs: u32) -> Self { self.offset(rhs) }
 }
 
 impl crate::Texture2dRW {
