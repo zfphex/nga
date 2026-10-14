@@ -798,6 +798,7 @@ impl Device {
                 .dynamic_rendering_unused_attachments(true);
         let supported = unsafe { instance.get_physical_device_features(physical) };
         let features = vk::PhysicalDeviceFeatures::default()
+            .geometry_shader(supported.geometry_shader != 0)
             .texture_compression_bc(supported.texture_compression_bc != 0)
             .texture_compression_astc_ldr(supported.texture_compression_astc_ldr != 0)
             .shader_int64(true)

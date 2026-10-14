@@ -345,6 +345,7 @@ pub enum Builtin {
     /// The draw's own base instance. The one way a Vulkan indirect draw can smuggle a value
     /// into the vertex stage, which is what `gpu_driven` does with it.
     BaseInstance,
+    PrimitiveId,
     /// `f32x4`. An output of a vertex stage and an input of a fragment one.
     Position,
     /// `u32`. Selects the array layer written by a rasterized primitive.

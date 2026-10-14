@@ -405,6 +405,7 @@ fn builtin(b: Builtin) -> &'static str {
         Builtin::VertexId => "[[vertex_id]]",
         Builtin::InstanceId => "[[instance_id]]",
         Builtin::BaseInstance => "[[base_instance]]",
+        Builtin::PrimitiveId => "[[primitive_id]]",
         Builtin::Position => "[[position]]",
         Builtin::RenderTargetArrayIndex => "[[render_target_array_index]]",
         Builtin::FrontFacing => "[[front_facing]]",

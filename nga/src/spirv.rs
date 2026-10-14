@@ -676,6 +676,7 @@ fn builtin_number(b: Builtin, storage: u32) -> u32 {
         Builtin::VertexId => 42,
         Builtin::InstanceId => 43,
         Builtin::BaseInstance => 4425,
+        Builtin::PrimitiveId => 7,
         Builtin::RenderTargetArrayIndex => 9,
         Builtin::FrontFacing => 17,
         Builtin::ThreadIdInGroup => 27,
@@ -692,6 +693,7 @@ fn builtin_ty(b: Builtin) -> Ty {
         Builtin::VertexId
         | Builtin::InstanceId
         | Builtin::BaseInstance
+        | Builtin::PrimitiveId
         | Builtin::RenderTargetArrayIndex
         | Builtin::ThreadIndexInGroup => Ty::U32,
         Builtin::FrontFacing => Ty::BOOL,
@@ -715,6 +717,9 @@ fn builtin_variable(m: &mut M, b: Builtin, storage: u32) -> u32 {
     }
     if b == Builtin::RenderTargetArrayIndex {
         m.capability(69);
+    }
+    if b == Builtin::PrimitiveId {
+        m.capability(2);
     }
     let ty = m.ty(builtin_ty(b));
     let pointer = m.pointer(storage, ty);

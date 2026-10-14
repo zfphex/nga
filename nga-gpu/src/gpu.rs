@@ -933,6 +933,7 @@ fn builtin(name: &str) -> Option<&'static str> {
         "vertex_id" => "VertexId",
         "instance_id" => "InstanceId",
         "base_instance" => "BaseInstance",
+        "primitive_id" => "PrimitiveId",
         "position" => "Position",
         "render_target_array_index" => "RenderTargetArrayIndex",
         "front_facing" => "FrontFacing",

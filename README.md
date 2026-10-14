@@ -8,7 +8,7 @@ Currently only Apple M series and Nvidia Pascal (or later) are supported.
 
 I would like to note that this library is basically the complete opposite of WebGPU. WebGPU supports no modern features and trys to cover the widest possible range of devices. It is genuinely an awful choice for any modern application. It is also not a graphics API and neither is this. These are both abstractions over existing APIs. Unfortunately GPU manufacturers are able to abuse their monopolies to keep their instruction set architectures and drivers proprietary. This makes it impossible to write a compiler that targets different GPUs like we do for CPUs. In order to maximise profits, GPU manufacturers vendor lock GPU code so that is unportable as possible, even if a competitor has a superior product, the difficulty of porting code removes any benifit.
 
-Shaders are written as Rust code and compiled to either Metal Shading Language or Standard Portable Intermediate Representation (SPIRV). Despite SPIRV having "Standard" and "Portable" in the name, it's not supported on Apple silicon (thank you Apple).
+Shaders are written as Rust code and compiled to either Metal Shading Language or Standard Portable Intermediate Representation (SPIR-V). Despite SPIR-V having "Standard" and "Portable" in the name, it's not supported on Apple silicon (thank you Apple).
 
 Here is an example Rust shader module.
 
