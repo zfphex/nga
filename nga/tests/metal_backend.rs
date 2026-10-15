@@ -43,9 +43,17 @@ mod shader {
         pub sampler: Sampler,
     }
 
+    fn sample_source(source: Texture2d, sampler: Sampler, uv: f32x2) -> f32x4 {
+        source.sample(sampler, uv)
+    }
+
+    fn sample_copy(root: Gpu<CopyData>, uv: f32x2) -> f32x4 {
+        sample_source(root.source, root.sampler, uv)
+    }
+
     #[fragment]
     fn copy(root: Gpu<CopyData>, input: VertexOut) -> f32x4 {
-        root.source.sample(root.sampler, input.position.xy() / 4.0)
+        sample_copy(root, input.position.xy() / 4.0)
     }
 }
 

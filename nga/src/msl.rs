@@ -479,9 +479,11 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
         });
     }
     arguments.retain(|argument| !argument.is_empty());
-    if f.stage != Stage::Helper {
-        arguments.insert(0, "constant nga_push* nga_push_data [[buffer(0)]]".into());
-    }
+    arguments.insert(0, if f.stage == Stage::Helper {
+        "constant nga_push* nga_push_data".into()
+    } else {
+        "constant nga_push* nga_push_data [[buffer(0)]]".into()
+    });
     match f.stage {
         Stage::Object => arguments.insert(0, "mesh_grid_properties nga_mesh_grid".into()),
         Stage::Mesh {
@@ -796,11 +798,12 @@ fn expr(w: &mut W, node: u32) -> String {
         }
         Node::Call { func, args } => {
             let callee = w.f.calls[func as usize];
-            let args: Vec<String> = args
+            let mut args: Vec<String> = args
                 .iter()
                 .enumerate()
                 .map(|(i, &a)| coerced(w, a, callee.params[i].ty))
                 .collect();
+            args.insert(0, "nga_push_data".into());
             format!("{}({})", escape(callee.name), args.join(", "))
         }
         Node::Intrinsic { op, args } => intrinsic(w, op, args),

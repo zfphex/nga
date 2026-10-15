@@ -2947,9 +2947,12 @@ impl<'a> Recorder<'a> {
 impl<'a> Recorder<'a> {
     pub fn compute(&mut self) -> &Compute<'a> {
         self.raster = None;
-        self.compute = None;
-        self.compute
-            .insert(Compute::new(self.command_buffer, self.table, self.arena))
+        if self.compute.is_none() {
+            self.compute = Some(Compute::new(self.command_buffer, self.table, self.arena));
+        }
+        let compute = self.compute.as_ref().unwrap();
+        compute.resources.set(0);
+        compute
     }
 
     pub fn raster(&mut self, pass: &Pass) -> &Raster<'a> {
