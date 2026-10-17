@@ -32,6 +32,15 @@ use metal as backend;
 
 pub use backend::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapUsage {
+    pub capacity: u64,
+    pub allocated: u64,
+    pub peak: u64,
+    pub retired: u64,
+    pub allocator_metadata: usize,
+}
+
 impl Timers {
     pub fn checked_ns(&self, start: usize, end: usize) -> Option<f64> {
         let (&start_tick, &end_tick) = (self.ticks.get(start)?, self.ticks.get(end)?);
@@ -368,6 +377,7 @@ handle! {
     Texture3dW,
     Texture3dRW,
     TextureCube,
+    TextureCubeRW,
     Depth2d,
     Sampler,
     // The last two are Metal-only: an `IndirectCommands` buffer, and a `Pipeline` built with

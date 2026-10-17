@@ -125,6 +125,7 @@ fn named_ty(name: &str, users: &mut Vec<String>) -> String {
         "Texture3dW" | "Texture3dRW" => handle("Texture3dRW"),
         "Texture2dArray" => handle("Texture2dArray"),
         "TextureCube" => handle("TextureCube"),
+        "TextureCubeRW" => handle("TextureCubeRW"),
         "Depth2d" => handle("Depth2d"),
         "Sampler" => handle("Sampler"),
         "Commands" => handle("Commands"),

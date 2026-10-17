@@ -18,9 +18,9 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
-    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage, IndexFormat,
     Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TileDesc, Tlsf,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TextureCubeRW, TileDesc, Tlsf,
     Topology, Usage, VertexShader, Viewport, Winding,
 };
 use ash::vk;
@@ -947,6 +947,16 @@ impl Device {
         &self.name
     }
 
+    pub fn allocated_bytes(&self) -> Option<usize> { None }
+
+    pub fn start_capture(&self, _path: &std::path::Path) -> Result<(), Error> {
+        Err(Error::new("Metal file capture is unavailable on this backend"))
+    }
+
+    pub fn stop_capture(&self) -> Result<(), Error> {
+        Err(Error::new("Metal file capture is unavailable on this backend"))
+    }
+
     /// Blocks until the device is idle. The one piece of teardown a caller has to drive, and
     /// the only reason `vkDeviceWaitIdle` used to appear in an example.
     /// How many errors the validation layer has reported, process-wide. Always zero unless
@@ -1447,6 +1457,7 @@ pub struct HeapTexture<'heap> {
     pub(crate) image: vk::Image,
     pub(crate) view: vk::ImageView,
     pub(crate) attachment_views: Vec<vk::ImageView>,
+    storage_views: Vec<vk::ImageView>,
     pub(crate) format: vk::Format,
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -1460,7 +1471,7 @@ pub struct HeapTexture<'heap> {
 impl Drop for HeapTexture<'_> {
     fn drop(&mut self) {
         unsafe {
-            for &view in &self.attachment_views {
+            for &view in self.attachment_views.iter().chain(&self.storage_views) {
                 self._allocation
                     .storage
                     .device
@@ -1837,7 +1848,7 @@ impl Drop for Uploader {
 
 enum PendingResource {
     Buffer(vk::Buffer),
-    Texture(vk::Image, vk::ImageView, Vec<vk::ImageView>),
+    Texture(vk::Image, vk::ImageView, Vec<vk::ImageView>, Vec<vk::ImageView>),
 }
 
 struct HeapStorage {
@@ -1885,6 +1896,21 @@ pub struct GpuHeap {
 }
 
 impl GpuHeap {
+    pub fn usage(&self) -> HeapUsage {
+        let tlsf = unsafe { &*self.storage.tlsf.get() };
+        let retired = unsafe { &*self.retired.get() };
+        let mut usage = HeapUsage { capacity: tlsf.size, allocated: tlsf.used, peak: tlsf.peak, retired: 0,
+            allocator_metadata: size_of::<Self>() + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
+                + tlsf.spare.capacity() * size_of::<u32>() + retired.capacity() * size_of::<(u64, u32, PendingResource)>() };
+        for (_, block, resource) in retired {
+            usage.retired += tlsf.blocks[*block as usize].size;
+            if let PendingResource::Texture(_, _, views, storage_views) = resource {
+                usage.allocator_metadata += (views.capacity() + storage_views.capacity()) * size_of::<vk::ImageView>();
+            }
+        }
+        usage
+    }
+
     pub const BUFFER_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
         vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS.as_raw()
             | vk::BufferUsageFlags::STORAGE_BUFFER.as_raw()
@@ -2055,6 +2081,7 @@ impl GpuHeap {
             image: unsafe { self.device.create_image(&info, None)? },
             view: vk::ImageView::null(),
             attachment_views: Vec::with_capacity((desc.mips * desc.layers) as usize),
+            storage_views: Vec::new(),
             format: desc.format,
             width: desc.width,
             height: desc.height,
@@ -2088,6 +2115,13 @@ impl GpuHeap {
                 None,
             )?
         };
+        if desc.cube && desc.usage.contains(vk::ImageUsageFlags::STORAGE) {
+            for mip in 0..desc.mips {
+                texture.storage_views.push(unsafe { self.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default().image(texture.image).view_type(vk::ImageViewType::CUBE).format(desc.format)
+                        .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(desc.aspect).base_mip_level(mip).level_count(1).layer_count(desc.layers)), None)? });
+            }
+        }
         for level in 0..desc.mips {
             for layer in 0..desc.layers {
                 texture.attachment_views.push(unsafe {
@@ -2380,6 +2414,7 @@ impl GpuHeap {
                         texture.image,
                         texture.view,
                         std::mem::take(&mut texture.attachment_views),
+                        std::mem::take(&mut texture.storage_views),
                     ),
                 )
             }
@@ -2400,8 +2435,8 @@ impl GpuHeap {
                 PendingResource::Buffer(buffer) => unsafe {
                     self.device.destroy_buffer(buffer, None)
                 },
-                PendingResource::Texture(image, view, views) => unsafe {
-                    for view in views {
+                PendingResource::Texture(image, view, views, storage_views) => unsafe {
+                    for view in views.into_iter().chain(storage_views) {
                         self.device.destroy_image_view(view, None);
                     }
                     self.device.destroy_image_view(view, None);
@@ -2623,6 +2658,16 @@ impl ResourceHeap {
             self.resources_cpu,
         );
         Texture2d(Handle((range.base + slot) as u64))
+    }
+
+    pub fn write_storage_cube_mip(&self, range: HeapRange, slot: u32, texture: &HeapTexture, mip: u32) -> Result<TextureCubeRW, Error> {
+        assert!(slot < range.len);
+        let view = *texture.storage_views.get(mip as usize).ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
+        let image = vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL);
+        let data = vk::DescriptorDataEXT { p_storage_image: &image };
+        self.write(vk::DescriptorType::STORAGE_IMAGE, data,
+            self.storage_offset + (range.base + slot) as u64 * self.sizes.storage_image as u64, self.sizes.storage_image, self.resources_cpu);
+        Ok(TextureCubeRW(Handle((range.base + slot) as u64)))
     }
 
     pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
@@ -4128,6 +4173,10 @@ impl<'a> Raster<'a> {
         Ok(())
     }
 
+    pub fn draw_indexed_commands<T>(&self, _pipeline: Pipeline, _root: T, _commands: &IndirectCommands, _ranges: &[std::ops::Range<u32>]) -> Result<(), Error> {
+        Err(Error::new("native indexed ICBs are not supported on this backend"))
+    }
+
     /// Apple-only. An [`IndirectCommands`] cannot be created here, so nothing can reach this.
     pub fn execute(&self, _commands: &IndirectCommands, _range: std::ops::Range<u32>) {
         debug_assert!(
@@ -4167,6 +4216,7 @@ impl<'a> Raster<'a> {
     /// left the fragment stage. Metal spells the same thing `writeTimestampWithGranularity:`.
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
         unsafe {
             self.device.cmd_write_timestamp2(
                 self.command_buffer,
@@ -4436,6 +4486,7 @@ impl<'a> Compute<'a> {
     /// command buffer has finished.
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
         unsafe {
             self.device.cmd_write_timestamp2(
                 self.command_buffer,
@@ -4666,6 +4717,8 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
+    pub fn completed_gpu_ms(&self) -> Option<f64> { None }
+
     /// This frame's per-thread arena. The bump is reset when this slot is recorded again, after
     /// the frames in flight have retired. A [`GpuBox`] borrows the mapping for as long as the
     /// arena does. Copying [`GpuBox::gpu`] out does not.
@@ -4841,6 +4894,17 @@ impl<'a> Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
+    pub fn timestamp(&mut self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
+        self.compute = None;
+        self.raster = None;
+        unsafe {
+            self.device.cmd_write_timestamp2(self.command_buffer, vk::PipelineStageFlags2::ALL_COMMANDS,
+                timers.pool, (timers.base + index) as u32);
+        }
+    }
+
     pub fn compute(&mut self) -> &Compute<'a> {
         self.raster = None;
         self.compute = None;
@@ -4962,6 +5026,7 @@ impl Drop for Fence {
 /// the host has not read yet. `begin` picks this frame's half and fetches the other one, so
 /// the numbers a caller reads are always from `FRAMES_IN_FLIGHT` frames ago and never stall.
 pub struct Timers {
+    pub enabled: bool,
     pub(crate) device: ash::Device,
     pub(crate) pool: vk::QueryPool,
     pub(crate) count: usize,
@@ -4991,6 +5056,7 @@ impl Timers {
         // which is what keeps `begin` symmetric with Metal's.
         unsafe { device.device.reset_query_pool(pool, 0, total as u32) };
         Ok(Self {
+            enabled: true,
             device: device.device.clone(),
             pool,
             count,
@@ -5030,7 +5096,7 @@ impl Timers {
     }
 
     pub fn written(&self, index: usize) -> bool {
-        self.results[index][1] != 0
+        self.enabled && self.results[index][1] != 0
     }
 
     /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
@@ -5132,6 +5198,12 @@ pub struct IndirectCommands {
 }
 
 impl IndirectCommands {
+    pub fn indexed<I: IndexFormat>(_device: &Device, _topology: Topology, _indices: &HeapBuffer, _draws: &[DrawIndexed]) -> Result<Self, Error> {
+        Err(Error::new("native indexed ICBs are not supported on this backend"))
+    }
+
+    pub fn allocated_size(&self) -> usize { 0 }
+
     /// The portable counted-draw shape. Vulkan needs no opaque command buffer: the producer
     /// writes ordinary `VkDrawIndirectCommand` records, while this value carries the maximum
     /// count and supplies a zero shader handle for Metal's no-op [`command_draw`] intrinsic.

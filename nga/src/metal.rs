@@ -28,9 +28,9 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
-    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, IndexFormat,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage, IndexFormat,
     Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TileDesc, Tlsf,
+    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TextureCubeRW, TileDesc, Tlsf,
     Topology, Usage, VertexShader, Viewport, Winding,
 };
 use minmetal::{
@@ -555,6 +555,30 @@ impl Device {
         &self.name
     }
 
+    pub fn allocated_bytes(&self) -> Option<usize> { Some(self.device.current_allocated_size()) }
+
+    pub fn start_capture(&self, path: &std::path::Path) -> Result<(), Error> {
+        let manager = minmetal::CaptureManager::shared()?;
+        if manager.is_capturing() { return Err(Error::new("a Metal capture is already active")); }
+        if !manager.supports_destination(minmetal::CaptureDestination::GpuTraceDocument) {
+            return Err(Error::new("Metal file capture is unavailable; launch with MTL_CAPTURE_ENABLED=1"));
+        }
+        let descriptor = minmetal::CaptureDescriptor::new();
+        descriptor.set_capture_object(self.device.raw);
+        descriptor.set_destination(minmetal::CaptureDestination::GpuTraceDocument);
+        let absolute = if path.is_absolute() { path.to_path_buf() } else {
+            std::env::current_dir().map_err(|e| Error::new(e.to_string()))?.join(path)
+        };
+        descriptor.set_output_url(absolute.to_str().ok_or_else(|| Error::new("capture path must be UTF-8"))?);
+        manager.start_capture(&descriptor)?;
+        Ok(())
+    }
+
+    pub fn stop_capture(&self) -> Result<(), Error> {
+        minmetal::CaptureManager::shared()?.stop_capture();
+        Ok(())
+    }
+
     /// Metal has no `vkDeviceWaitIdle`. The equivalent is to signal an event *behind* every
     /// command buffer already committed and wait for it: the queue is in-order, so the signal
     /// cannot land before the work in front of it has.
@@ -809,6 +833,7 @@ impl HeapBuffer<'_> {
 }
 
 pub struct HeapTexture<'heap> {
+    storage_views: Vec<Texture>,
     pub(crate) texture: Texture,
     pub(crate) format: Format,
     pub(crate) width: u32,
@@ -973,7 +998,7 @@ impl TextureDesc {
 
 enum PendingResource {
     Buffer(Buffer),
-    Texture(Texture),
+    Texture(Texture, Vec<Texture>),
 }
 
 struct HeapStorage {
@@ -1003,6 +1028,19 @@ pub struct GpuHeap {
 }
 
 impl GpuHeap {
+    pub fn usage(&self) -> HeapUsage {
+        let tlsf = unsafe { &*self.storage.tlsf.get() };
+        let retired = unsafe { &*self.retired.get() };
+        let mut usage = HeapUsage { capacity: tlsf.size, allocated: tlsf.used, peak: tlsf.peak, retired: 0,
+            allocator_metadata: size_of::<Self>() + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
+                + tlsf.spare.capacity() * size_of::<u32>() + retired.capacity() * size_of::<(u64, u32, PendingResource)>() };
+        for (_, block, resource) in retired {
+            usage.retired += tlsf.blocks[*block as usize].size;
+            if let PendingResource::Texture(_, views) = resource { usage.allocator_metadata += views.capacity() * size_of::<Texture>(); }
+        }
+        usage
+    }
+
     pub fn new(device: &Device, size: u64) -> Result<Self, Error> {
         Self::with_ring(device, size, 0)
     }
@@ -1097,11 +1135,17 @@ impl GpuHeap {
             block: alloc.block,
             storage: &self.storage,
         };
+        let texture = self.storage.heap.new_texture_at_offset(&descriptor, alloc.offset as usize)?;
+        let mut storage_views = Vec::new();
+        if desc.cube && desc.usage.0 & Usage::STORAGE.0 != 0 {
+            for mip in 0..desc.mips {
+                storage_views.push(texture.new_texture_view_with_type_and_ranges(format(desc.format), TextureType::Cube,
+                    minmetal::Range::new(mip as usize, 1), minmetal::Range::new(0, desc.layers as usize))?);
+            }
+        }
         Ok(HeapTexture {
-            texture: self
-                .storage
-                .heap
-                .new_texture_at_offset(&descriptor, alloc.offset as usize)?,
+            storage_views,
+            texture,
             format: desc.format,
             width: desc.width,
             height: desc.height,
@@ -1242,12 +1286,13 @@ impl GpuHeap {
                 assert!(std::ptr::eq(texture._allocation.storage, &self.storage));
                 let HeapTexture {
                     texture,
+                    storage_views,
                     _allocation,
                     ..
                 } = texture;
                 let block = _allocation.block;
                 std::mem::forget(_allocation);
-                (block, PendingResource::Texture(texture))
+                (block, PendingResource::Texture(texture, storage_views))
             }
         };
         unsafe { &mut *self.retired.get() }.push_back((frame, block, resource));
@@ -1264,7 +1309,7 @@ impl GpuHeap {
             let (_, block, resource) = retired.pop_front().unwrap();
             match resource {
                 PendingResource::Buffer(buffer) => drop(buffer),
-                PendingResource::Texture(texture) => drop(texture),
+                PendingResource::Texture(texture, views) => { drop(views); drop(texture); },
             }
             unsafe { (*self.storage.tlsf.get()).free(block) };
         }
@@ -1357,6 +1402,14 @@ impl ResourceHeap {
         _usage: Usage,
     ) -> Texture2d {
         self.write_texture(range, slot, texture)
+    }
+
+    pub fn write_storage_cube_mip(&self, range: HeapRange, slot: u32, texture: &HeapTexture, mip: u32) -> Result<TextureCubeRW, Error> {
+        assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
+        let view = texture.storage_views.get(mip as usize).ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
+        let resource_id = view.gpu_resource_id()?;
+        unsafe { self.ids.contents().cast::<u64>().add((range.base + slot) as usize).write(resource_id.impl_); }
+        Ok(TextureCubeRW(Handle((range.base + slot) as u64)))
     }
 
     pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
@@ -2340,6 +2393,17 @@ impl<'a> Raster<'a> {
         Ok(())
     }
 
+    pub fn draw_indexed_commands<T>(&self, pipeline: Pipeline, root: T, commands: &IndirectCommands, ranges: &[std::ops::Range<u32>]) -> Result<(), Error> {
+        self.prepare(pipeline, root)?;
+        for range in ranges {
+            if range.start > range.end || range.end > commands.count {
+                return Err(Error::new("ICB execution range exceeds command count"));
+            }
+            self.execute(commands, range.clone());
+        }
+        Ok(())
+    }
+
     /// Replays draws a shader encoded into `commands`. The GPU wrote both the arguments and the
     /// pipeline selection, which is what an [`IndirectCommands`] buffer has over
     /// `draw_indirect_count`. Metal-only.
@@ -2369,6 +2433,7 @@ impl<'a> Raster<'a> {
     /// left the fragment stage. Vulkan spells the same thing `vkCmdWriteTimestamp2`.
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
         self.encoder.write_timestamp_with_granularity(
             M4TimestampGranularity::Precise,
             RenderStages::FRAGMENT,
@@ -2603,6 +2668,7 @@ impl<'a> Compute<'a> {
     /// encoder has finished.
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
         self.encoder.write_timestamp_with_granularity(
             M4TimestampGranularity::Precise,
             &timers.heaps[timers.base],
@@ -2661,9 +2727,15 @@ fn check_submission_error(error: &OnceLock<String>) -> Result<(), Error> {
     }
 }
 
+struct FrameFeedback {
+    completed: SharedEvent,
+    value: AtomicU64,
+    gpu_ns: AtomicU64,
+}
+
 pub struct Context {
     commit_options: M4CommitOptions,
-    feedback_handler: M4CommitFeedbackHandler,
+    feedback: Vec<(Arc<FrameFeedback>, M4CommitFeedbackHandler)>,
     submission_error: Arc<OnceLock<String>>,
     pub(crate) queue: M4CommandQueue,
     pub(crate) residency: ResidencySet,
@@ -2742,18 +2814,34 @@ impl Context {
         ];
 
         let commit_options = M4CommitOptions::new();
-        let submission_error = device.submission_error.clone();
-        let feedback_handler = M4CommitFeedbackHandler::new(move |feedback| {
-            if let Some(error) = feedback.error_description() {
-                let _ = submission_error.set(error.to_string());
-            }
-        });
+        let mut feedback = Vec::new();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let result = Arc::new(FrameFeedback {
+                completed: device.device.new_shared_event()?,
+                value: AtomicU64::new(0),
+                gpu_ns: AtomicU64::new(f64::NAN.to_bits()),
+            });
+            let state = Arc::clone(&result);
+            let submission_error = Arc::clone(&device.submission_error);
+            let handler = M4CommitFeedbackHandler::new(move |feedback| {
+                let value = state.value.load(Ordering::Acquire);
+                if let Some(error) = feedback.error_description() {
+                    let _ = submission_error.set(error.to_string());
+                }
+                let start = feedback.gpu_start_time();
+                let end = feedback.gpu_end_time();
+                let ns = if start.is_finite() && end.is_finite() && start > 0.0 && end > start { (end - start) * 1e9 } else { f64::NAN };
+                state.gpu_ns.store(ns.to_bits(), Ordering::Release);
+                state.completed.set_signaled_value(value);
+            });
+            feedback.push((result, handler));
+        }
 
         Ok(Self {
             queue: device.queue.clone(),
             residency: device.residency.clone(),
             commit_options,
-            feedback_handler,
+            feedback,
             submission_error: device.submission_error.clone(),
             event: device.device.new_shared_event()?,
             command_buffers,
@@ -2790,6 +2878,13 @@ impl Context {
             return Err(Error::new("timed out waiting for a frame in flight"));
         }
 
+        let (feedback, feedback_handler) = &self.feedback[(index % FRAMES_IN_FLIGHT) as usize];
+        if index >= FRAMES_IN_FLIGHT
+            && !feedback.completed.wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 10_000)
+        {
+            return Err(Error::new("timed out waiting for GPU submission feedback"));
+        }
+        check_submission_error(&self.submission_error)?;
         let base = (index % FRAMES_IN_FLIGHT) as usize * self.threads;
         let slots = base..base + self.threads;
         for slot in slots.clone() {
@@ -2799,7 +2894,8 @@ impl Context {
 
         Ok(Frame {
             commit_options: &self.commit_options,
-            feedback_handler: &self.feedback_handler,
+            feedback,
+            feedback_handler,
             submission_error: &self.submission_error,
             queue: &self.queue,
             residency: &self.residency,
@@ -2821,6 +2917,7 @@ impl Context {
 
 pub struct Frame<'a> {
     commit_options: &'a M4CommitOptions,
+    feedback: &'a FrameFeedback,
     feedback_handler: &'a M4CommitFeedbackHandler,
     submission_error: &'a OnceLock<String>,
     pub(crate) queue: &'a M4CommandQueue,
@@ -2838,6 +2935,12 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
+    pub fn completed_gpu_ms(&self) -> Option<f64> {
+        if self.value <= FRAMES_IN_FLIGHT { return None; }
+        let ns = f64::from_bits(self.feedback.gpu_ns.load(Ordering::Acquire));
+        if ns.is_finite() && ns > 0.0 { Some(ns / 1e6) } else { None }
+    }
+
     /// This frame's per-thread arena. The bump is reset when this slot is recorded again, after
     /// the frames in flight have retired. A [`GpuBox`] borrows the mapping for as long as the
     /// arena does. Copying [`GpuBox::gpu`] out does not.
@@ -2899,8 +3002,11 @@ impl<'a> Frame<'a> {
             self.queue.wait_for_drawable(&drawable.drawable);
         }
         if recording > 0 {
-            self.commit_options
-                .add_feedback_handler(self.feedback_handler);
+            self.feedback.value.store(self.value, Ordering::Release);
+            self.commit_options.add_feedback_handler(self.feedback_handler);
+        } else {
+            self.feedback.gpu_ns.store(f64::NAN.to_bits(), Ordering::Release);
+            self.feedback.completed.set_signaled_value(self.value);
         }
         self.queue
             .commit_with_options(&self.command_buffers[..recording], self.commit_options);
@@ -2945,6 +3051,14 @@ impl<'a> Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
+    pub fn timestamp(&mut self, timers: &Timers, index: usize) {
+        debug_assert!(index < timers.count);
+        if !timers.enabled { return; }
+        self.compute = None;
+        self.raster = None;
+        self.command_buffer.write_timestamp_into_heap(&timers.heaps[timers.base], index);
+    }
+
     pub fn compute(&mut self) -> &Compute<'a> {
         self.raster = None;
         if self.compute.is_none() {
@@ -3038,9 +3152,43 @@ pub struct IndirectCommands {
     pub(crate) icb: IndirectCommandBuffer,
     pub(crate) handle: Commands,
     pub(crate) count: u32,
+    residency: ResidencySet,
+}
+
+impl Drop for IndirectCommands {
+    fn drop(&mut self) {
+        self.residency.remove_allocation(&Allocation::from_indirect_command_buffer(&self.icb)).ok();
+        self.residency.commit().ok();
+    }
 }
 
 impl IndirectCommands {
+    pub fn indexed<I: IndexFormat>(device: &Device, topology: Topology, indices: &HeapBuffer, draws: &[DrawIndexed]) -> Result<Self, Error> {
+        if draws.is_empty() { return Err(Error::new("an ICB must contain at least one command")); }
+        let desc = IndirectCommandBufferDescriptor::new();
+        desc.set_command_types(IndirectCommandType::DRAW_INDEXED);
+        desc.set_inherit_pipeline_state(true);
+        desc.set_inherit_buffers(true);
+        Self::inherit_render_state(&desc);
+        let commands = Self::new(device, &desc, draws.len() as u32)?;
+        let width = if I::WIDE { 4 } else { 2 };
+        for (slot, draw) in draws.iter().enumerate() {
+            if (draw.index_start as u64 + draw.index_count as u64) * width as u64 > indices.len as u64 {
+                return Err(Error::new("ICB index range exceeds the index buffer"));
+            }
+            commands.icb.render_command(slot)?.draw_indexed_primitives(
+                self::topology(topology), draw.index_count as usize,
+                if I::WIDE { IndexType::UInt32 } else { IndexType::UInt16 },
+                &indices.buffer, draw.index_start as usize * width, draw.instance_count as usize,
+                draw.base_vertex as isize, draw.base_instance as usize)?;
+        }
+        Ok(commands)
+    }
+
+    pub fn allocated_size(&self) -> usize {
+        Allocation::from_indirect_command_buffer(&self.icb).allocated_size()
+    }
+
     /// A compact batch whose draw count is written by the same shader that encodes its slots.
     ///
     /// The render pass supplies the pipeline, root pointer, and dynamic state. The producer
@@ -3123,6 +3271,7 @@ impl IndirectCommands {
             handle: Commands(Handle(icb.gpu_resource_id()?.impl_)),
             icb,
             count,
+            residency: device.residency.clone(),
         })
     }
 
@@ -3147,6 +3296,7 @@ impl IndirectCommands {
 /// One timestamp heap per frame slot. `begin` resolves and invalidates the completed slot
 /// without touching heaps still in use by the GPU.
 pub struct Timers {
+    pub enabled: bool,
     pub(crate) heaps: Vec<M4CounterHeap>,
     pub(crate) count: usize,
     pub(crate) base: usize,
@@ -3166,6 +3316,7 @@ impl Timers {
             heaps.push(heap);
         }
         Ok(Self {
+            enabled: true,
             heaps,
             count,
             base: 0,
@@ -3196,7 +3347,7 @@ impl Timers {
     }
 
     pub fn written(&self, index: usize) -> bool {
-        self.ticks[index] != 0
+        self.enabled && self.ticks[index] != 0
     }
 
     /// Nanoseconds between two slots. Zero if either was never written or the pair is out of
@@ -3267,8 +3418,38 @@ impl Occlusion {
 }
 
 #[test]
+#[ignore = "requires a GPU"]
+fn deferred_cube_storage_views() -> Result<(), Error> {
+    let device = Device::new(true)?;
+    let heap = GpuHeap::new(&device, 1048576)?;
+    let texture = heap.alloc_texture(&TextureDesc::texture_cube(Format::Rgba32Float, 4).mips(3).usage(Usage::STORAGE))?;
+    let before = heap.usage();
+    assert!(before.allocated > 0 && before.allocated <= before.capacity);
+    assert_eq!(before.peak, before.allocated);
+    heap.free_later(7, Retired::Texture(texture));
+    heap.retire(7);
+    assert_eq!(heap.usage().allocated, before.allocated);
+    assert_eq!(heap.usage().retired, before.allocated);
+    {
+        let pending = unsafe { &*heap.retired.get() };
+        assert_eq!(pending.len(), 1);
+        match &pending.front().unwrap().2 {
+            PendingResource::Texture(_, views) => assert_eq!(views.len(), 3),
+            _ => panic!("expected a deferred texture"),
+        }
+    }
+    heap.retire(8);
+    assert!(unsafe { &*heap.retired.get() }.is_empty());
+    assert_eq!(heap.usage().allocated, 0);
+    assert_eq!(heap.usage().retired, 0);
+    assert_eq!(heap.usage().peak, before.allocated);
+    Ok(())
+}
+
+#[test]
 fn checked_timing_intervals() {
-    let timers = Timers {
+    let mut timers = Timers {
+        enabled: true,
         heaps: Vec::new(),
         count: 4,
         base: 0,
@@ -3284,4 +3465,8 @@ fn checked_timing_intervals() {
     assert_eq!(timers.checked_ns(4, 1), None);
     assert_eq!(timers.checked_ns(1, usize::MAX), None);
     assert_eq!(timers.ms(3, 1), 0.0);
+    timers.enabled = false;
+    assert_eq!(timers.checked_ns(1, 3), None);
+    timers.enabled = true;
+    assert_eq!(timers.checked_ns(1, 3), Some(50.0));
 }

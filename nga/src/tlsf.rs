@@ -31,6 +31,8 @@ pub struct Tlsf {
     pub fl_bitmap: u32,
     pub size: u64,
     pub min: u64,
+    pub used: u64,
+    pub peak: u64,
 }
 
 impl Tlsf {
@@ -45,6 +47,8 @@ impl Tlsf {
             fl_bitmap: 0,
             size,
             min,
+            used: 0,
+            peak: 0,
         };
         let root = tlsf.block(0, size & !(min - 1));
         tlsf.insert(root);
@@ -181,6 +185,8 @@ impl Tlsf {
             self.insert(tail);
         }
 
+        self.used += self.blocks[index as usize].size;
+        self.peak = self.peak.max(self.used);
         Some(Alloc {
             offset: aligned,
             size: self.blocks[index as usize].size,
@@ -189,6 +195,7 @@ impl Tlsf {
     }
 
     pub fn free(&mut self, block: u32) {
+        self.used -= self.blocks[block as usize].size;
         let mut index = block;
         let next = self.blocks[index as usize].next;
         if next != NIL && self.blocks[next as usize].free {
@@ -215,4 +222,30 @@ impl Tlsf {
         }
         self.insert(index);
     }
+}
+
+#[test]
+fn allocation_high_water() {
+    let mut tlsf = Tlsf::new(4096, 256);
+    let a = tlsf.alloc(257, 256).unwrap();
+    let b = tlsf.alloc(513, 1024).unwrap();
+    assert_eq!(a.size, 512);
+    assert_eq!(b.offset % 1024, 0);
+    assert_eq!(tlsf.used, a.size + b.size);
+    assert_eq!(tlsf.peak, tlsf.used);
+    let peak = tlsf.peak;
+    assert!(tlsf.alloc(8192, 256).is_none());
+    assert_eq!(tlsf.used, peak);
+    assert_eq!(tlsf.peak, peak);
+    tlsf.free(a.block);
+    assert_eq!(tlsf.used, b.size);
+    tlsf.free(b.block);
+    assert_eq!(tlsf.used, 0);
+    assert_eq!(tlsf.peak, peak);
+    let whole = tlsf.alloc(4096, 256).unwrap();
+    assert_eq!(tlsf.used, 4096);
+    assert_eq!(tlsf.peak, 4096);
+    tlsf.free(whole.block);
+    assert_eq!(tlsf.used, 0);
+    assert_eq!(tlsf.peak, 4096);
 }

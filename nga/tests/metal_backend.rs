@@ -98,19 +98,27 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
     let readback = Arena::new(&device, 4096, Memory::Readback)?;
     let pixels = readback.alloc_slice(&[0u8; 64]).unwrap();
     let mut context = Context::new(&device, &shaders, 4096, 1)?;
-    let mut timers = Timers::new(&device, 2)?;
+    let mut timers = Timers::new(&device, 4)?;
 
     for frame_index in 0..(FRAMES_IN_FLIGHT * 3) {
         let mut frame = context.begin_frame()?;
         timers.begin(&frame);
         if frame_index >= FRAMES_IN_FLIGHT {
+            let gpu_ms = frame.completed_gpu_ms().expect("completed submission has GPU feedback");
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
             let expected = frame_index < FRAMES_IN_FLIGHT * 2;
             assert_eq!(timers.written(0), expected);
             assert_eq!(timers.written(1), expected);
             assert!(timers.ns(0, 1).is_finite());
+            assert_eq!(timers.written(2), expected);
+            assert_eq!(timers.written(3), expected);
+            if expected { assert!(timers.checked_ns(2, 3).is_some()); }
+        } else {
+            assert_eq!(frame.completed_gpu_ms(), None);
         }
         let recorder = frame.recorder();
         if frame_index < FRAMES_IN_FLIGHT {
+            recorder.timestamp(&timers, 2);
             recorder.compute().timestamp(&timers, 0);
         }
         let pass = Pass::new().color_texture(0, &target, Some([1.0, 0.0, 0.0, 1.0]));
@@ -154,6 +162,7 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
         compute.read_texture(&copied, &readback, pixels.gpu.as_rw());
         if frame_index < FRAMES_IN_FLIGHT {
             compute.timestamp(&timers, 1);
+            recorder.timestamp(&timers, 3);
         }
         frame.submit(None)?;
         device.wait_idle()?;
@@ -186,5 +195,12 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
         invalid_fill.is_err(),
         "word fills must not silently truncate in release builds"
     );
+    drop(frame);
+    for index in 0..FRAMES_IN_FLIGHT * 2 {
+        let frame = context.begin_frame()?;
+        if index >= FRAMES_IN_FLIGHT { assert_eq!(frame.completed_gpu_ms(), None); }
+        frame.submit(None)?;
+    }
+    device.wait_idle()?;
     Ok(())
 }

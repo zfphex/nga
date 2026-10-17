@@ -18,6 +18,7 @@ struct nga_texture2d_array { ulong slot; };
 struct nga_texture3d { ulong slot; };
 struct nga_texture3d_rw { ulong slot; };
 struct nga_texturecube { ulong slot; };
+struct nga_texturecube_rw { ulong slot; };
 struct nga_depth2d { ulong slot; };
 struct nga_sampler { sampler s; };
 struct nga_opaque { ulong bits; };
@@ -43,4 +44,5 @@ inline texture2d_array<float> nga_deref_tex2d_array(constant nga_push* p, nga_te
 inline texture3d<float> nga_deref_tex3d(constant nga_push* p, nga_texture3d h) { return nga_deref<texture3d<float>>(p, h); }
 inline texture3d<float, access::read_write> nga_deref_tex3d_rw(constant nga_push* p, nga_texture3d_rw h) { return nga_deref<texture3d<float, access::read_write>>(p, h); }
 inline texturecube<float> nga_deref_texcube(constant nga_push* p, nga_texturecube h) { return nga_deref<texturecube<float>>(p, h); }
+inline texturecube<float, access::write> nga_deref_texcube_rw(constant nga_push* p, nga_texturecube_rw h) { return nga_deref<texturecube<float, access::write>>(p, h); }
 inline depth2d<float> nga_deref_depth2d(constant nga_push* p, nga_depth2d h) { return nga_deref<depth2d<float>>(p, h); }

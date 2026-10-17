@@ -269,6 +269,7 @@ fn handle(kind: HandleKind) -> &'static str {
         HandleKind::Texture3dRW => "nga_texture3d_rw",
         HandleKind::Texture2dArray => "nga_texture2d_array",
         HandleKind::TextureCube => "nga_texturecube",
+        HandleKind::TextureCubeRW => "nga_texturecube_rw",
         HandleKind::Depth2d => "nga_depth2d",
         HandleKind::Sampler => "nga_sampler",
         HandleKind::Commands => "nga_commands",
@@ -827,6 +828,7 @@ fn tex_expr(w: &W, arg: u32, expr: &str) -> String {
         Ty::Handle(HandleKind::TextureCube) => {
             format!("nga_deref_texcube(nga_push_data, {expr})")
         }
+        Ty::Handle(HandleKind::TextureCubeRW) => format!("nga_deref_texcube_rw(nga_push_data, {expr})"),
         Ty::Handle(HandleKind::Depth2d) => format!("nga_deref_depth2d(nga_push_data, {expr})"),
         _ => format!("{expr}.t"),
     }
@@ -898,7 +900,9 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         }
         Intrinsic::Store => {
             let tex = tex_expr(w, args[0], &a[0]);
-            format!("{tex}.write({}, {})", a[2], a[1])
+            if w.types.nodes[args[0] as usize] == Ty::Handle(HandleKind::TextureCubeRW) {
+                format!("{tex}.write({}, {}.xy, {}.z)", a[2], a[1], a[1])
+            } else { format!("{tex}.write({}, {})", a[2], a[1]) }
         }
         Intrinsic::Dimensions => {
             let tex = tex_expr(w, args[0], &a[0]);

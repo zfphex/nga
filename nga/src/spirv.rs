@@ -251,6 +251,8 @@ struct M {
     sampled_image: u32,
     cubes: u32,
     cube_image: u32,
+    storage_cubes: u32,
+    storage_cube_image: u32,
     sampled_cube: u32,
 }
 
@@ -583,6 +585,8 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
         sampled_image: 0,
         cubes: 0,
         cube_image: 0,
+        storage_cubes: 0,
+        storage_cube_image: 0,
         sampled_cube: 0,
     };
     m.glsl = m.id();
@@ -1914,11 +1918,12 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
     m.extension("SPV_EXT_descriptor_indexing");
     let set = match kind {
         HandleKind::Sampler => 2,
-        HandleKind::Texture2dRW | HandleKind::Texture3dRW => 1,
+        HandleKind::Texture2dRW | HandleKind::Texture3dRW | HandleKind::TextureCubeRW => 1,
         _ => 0,
     };
-    let cube = kind == HandleKind::TextureCube;
+    let cube = matches!(kind, HandleKind::TextureCube | HandleKind::TextureCubeRW);
     let cached = match set {
+        1 if cube => (m.storage_cubes, m.storage_cube_image),
         1 => (m.storage, m.storage_image),
         2 => (m.samplers, m.sampler_type),
         _ if cube => (m.cubes, m.cube_image),
@@ -1967,6 +1972,7 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
     m.name(
         variable,
         match set {
+            1 if cube => "nga_storage_cubes",
             1 => "nga_storage",
             2 => "nga_samplers",
             _ if cube => "nga_cubes",
@@ -1974,6 +1980,10 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
         },
     );
     match set {
+        1 if cube => {
+            m.storage_cubes = variable;
+            m.storage_cube_image = element;
+        }
         1 => {
             m.storage = variable;
             m.storage_image = element;
@@ -2080,7 +2090,7 @@ fn image(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
             m.capability(50);
             let type_id = m.ty(Ty::Vec(Prim::U32, 2));
             let id = m.id();
-            if matches!(kind, HandleKind::Texture2dRW | HandleKind::Texture3dRW) {
+            if matches!(kind, HandleKind::Texture2dRW | HandleKind::Texture3dRW | HandleKind::TextureCubeRW) {
                 inst(&mut w.body, OP_IMAGE_QUERY_SIZE, &[type_id, id, image_id]);
             } else {
                 let level = m.constant(Ty::Scalar(Prim::I32), 0);

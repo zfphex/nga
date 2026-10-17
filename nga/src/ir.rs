@@ -37,6 +37,7 @@ pub enum HandleKind {
     Texture3dRW,
     Texture2dArray,
     TextureCube,
+    TextureCubeRW,
     Depth2d,
     Sampler,
     Commands,

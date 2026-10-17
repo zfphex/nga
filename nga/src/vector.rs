@@ -451,6 +451,12 @@ impl crate::Texture2dRW {
     }
 }
 
+impl crate::TextureCubeRW {
+    pub fn store(self, at: u32x3, value: f32x4) {
+        let _ = (self, at, value);
+    }
+}
+
 impl crate::Texture2dW {
     pub fn store(self, at: u32x2, value: f32x4) {
         let _ = (self, at, value);

@@ -55,7 +55,7 @@ fn primitive_id_codegen() {
 fn indexed_primitives_ignore_index_offset_and_reset_per_draw() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::new(true)?;
     let mut shaders = device.shaders(shader::MODULE)?;
-    let pipeline = shaders.raster(shader::VERTEX, shader::FRAGMENT).color(Format::Rgba8Unorm).build()?;
+    let pipeline = shaders.raster(shader::VERTEX, shader::FRAGMENT).indirect().color(Format::Rgba8Unorm).build()?;
     let heap = GpuHeap::new(&device, 1048576)?;
     let positions = heap.alloc_slice(&[
         f32x4::new(-1.0, -1.0, 0.0, 1.0), f32x4::new(1.0, -1.0, 0.0, 1.0),
@@ -71,7 +71,16 @@ fn indexed_primitives_ignore_index_offset_and_reset_per_draw() -> Result<(), Box
     let readback = Arena::new(&device, 4096, Memory::Readback)?;
     let first = readback.alloc_slice(&[0u8; 64]).unwrap();
     let second = readback.alloc_slice(&[0u8; 64]).unwrap();
+    let persistent = IndirectCommands::indexed::<u32>(&device, Topology::TriangleList, &indices, &[
+        DrawIndexed { index_count: 6, instance_count: 1, index_start: 1, base_vertex: 0, base_instance: 0 },
+        DrawIndexed { index_count: 3, instance_count: 1, index_start: 7, base_vertex: 0, base_instance: 0 },
+    ])?;
+    assert!(persistent.allocated_size() > 0);
+    assert!(IndirectCommands::indexed::<u32>(&device, Topology::TriangleList, &indices, &[
+        DrawIndexed { index_count: 3, instance_count: 1, index_start: 9, base_vertex: 0, base_instance: 0 },
+    ]).is_err());
     let mut context = Context::new(&device, &shaders, 16384, 1)?;
+    for native in [false, true, true] {
     let mut frame = context.begin_frame()?;
     let arena = frame.arena(0);
     let draws = arena.alloc_slice(&[
@@ -82,8 +91,12 @@ fn indexed_primitives_ignore_index_offset_and_reset_per_draw() -> Result<(), Box
     for batch in 0..2 {
         let pass = Pass::new().color_texture(0, &targets[batch], Some([0.0; 4]));
         let commands = unsafe { Gpu::new(draws.gpu.get() + batch as u64 * size_of::<DrawIndexed>() as u64) };
-        recorder.raster(&pass).draw_indexed_indirect::<u32, _>(pipeline,
-            shader::Root { positions: positions.gpu(), batch: batch as u32 }, &indices, arena, commands, 1)?;
+        let root = shader::Root { positions: positions.gpu(), batch: batch as u32 };
+        if native {
+            recorder.raster(&pass).draw_indexed_commands(pipeline, root, &persistent, &[batch as u32..batch as u32 + 1])?;
+        } else {
+            recorder.raster(&pass).draw_indexed_indirect::<u32, _>(pipeline, root, &indices, arena, commands, 1)?;
+        }
     }
     let compute = recorder.compute();
     compute.barrier(Stage::COLOR_OUT, Stage::TRANSFER, Hazard::TEXTURES);
@@ -95,5 +108,6 @@ fn indexed_primitives_ignore_index_offset_and_reset_per_draw() -> Result<(), Box
     assert_eq!(&first[60..64], &[255, 0, 0, 255]);
     for pixel in first.chunks_exact(4) { assert!(pixel == [255, 0, 0, 255] || pixel == [0, 255, 0, 255]); }
     for pixel in second.chunks_exact(4) { assert_eq!(pixel, [0, 0, 255, 255]); }
+    }
     Ok(())
 }
