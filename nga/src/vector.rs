@@ -356,7 +356,13 @@ pub fn max<T: PartialOrd + Copy>(a: T, b: T) -> T {
 
 #[inline]
 pub fn clamp<T: PartialOrd + Copy>(x: T, min_val: T, max_val: T) -> T {
-    if x < min_val { min_val } else if x > max_val { max_val } else { x }
+    if x < min_val {
+        min_val
+    } else if x > max_val {
+        max_val
+    } else {
+        x
+    }
 }
 
 macro_rules! sampled {
@@ -434,7 +440,9 @@ impl crate::TextureCube {
 
 impl std::ops::Add<u32> for crate::TextureCube {
     type Output = Self;
-    fn add(self, rhs: u32) -> Self { self.offset(rhs) }
+    fn add(self, rhs: u32) -> Self {
+        self.offset(rhs)
+    }
 }
 
 impl crate::Texture2dRW {

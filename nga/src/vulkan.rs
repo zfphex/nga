@@ -1,10 +1,10 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
-    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage, IndexFormat,
-    Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TextureCubeRW, TileDesc, Tlsf,
-    Topology, Usage, VertexShader, Viewport, Winding,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage,
+    IndexFormat, Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler,
+    SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW,
+    TextureCube, TextureCubeRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
 };
 use ash::vk;
 use ash::vk::TaggedStructure as _;
@@ -23,7 +23,6 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-
     pub fn handle(&self) -> PipelineHandle {
         PipelineHandle(Handle(0))
     }
@@ -560,7 +559,6 @@ pub(crate) struct Push {
 pub(crate) const PUSH_SIZE: u32 = size_of::<Push>() as u32;
 
 pub struct Device {
-
     #[allow(dead_code)]
     pub(crate) entry: ash::Entry,
     pub(crate) instance: ash::Instance,
@@ -884,14 +882,20 @@ impl Device {
         &self.name
     }
 
-    pub fn allocated_bytes(&self) -> Option<usize> { None }
+    pub fn allocated_bytes(&self) -> Option<usize> {
+        None
+    }
 
     pub fn start_capture(&self, _path: &std::path::Path) -> Result<(), Error> {
-        Err(Error::new("Metal file capture is unavailable on this backend"))
+        Err(Error::new(
+            "Metal file capture is unavailable on this backend",
+        ))
     }
 
     pub fn stop_capture(&self) -> Result<(), Error> {
-        Err(Error::new("Metal file capture is unavailable on this backend"))
+        Err(Error::new(
+            "Metal file capture is unavailable on this backend",
+        ))
     }
 
     pub fn validation_errors(&self) -> u64 {
@@ -905,7 +909,6 @@ impl Device {
 
     pub fn supports(&self, feature: Feature) -> bool {
         match feature {
-
             Feature::TileShaders => false,
 
             Feature::MeshShaders => false,
@@ -1099,7 +1102,6 @@ impl Drop for Device {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Placement {
-
     Bar,
 
     Upload,
@@ -1108,7 +1110,6 @@ pub(crate) enum Placement {
 }
 
 impl Placement {
-
     fn candidates(self) -> [(vk::MemoryPropertyFlags, vk::MemoryPropertyFlags); 2] {
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
         let none = vk::MemoryPropertyFlags::empty();
@@ -1141,7 +1142,6 @@ unsafe impl Sync for Arena {}
 
 impl Arena {
     pub fn new(device: &Device, size: usize, memory: Memory) -> Result<Self, Error> {
-
         let placement = match memory {
             Memory::Device => Placement::Bar,
             Memory::Upload => Placement::Upload,
@@ -1317,7 +1317,6 @@ impl Drop for HeapBuffer<'_> {
 }
 
 impl HeapBuffer<'_> {
-
     pub fn gpu<T: ?Sized>(&self) -> Gpu<T> {
         crate::device_ptr(self.gpu)
     }
@@ -1435,7 +1434,11 @@ impl TextureDesc {
 
     pub fn texture_cube(fmt: Format, size: u32) -> Self {
         assert!(size > 0, "a cubemap must have a nonzero face size");
-        Self { layers: 6, cube: true, ..Self::texture_2d(fmt, size, size) }
+        Self {
+            layers: 6,
+            cube: true,
+            ..Self::texture_2d(fmt, size, size)
+        }
     }
 
     pub fn depth(fmt: Format, width: u32, height: u32) -> Self {
@@ -1480,10 +1483,12 @@ impl TextureDesc {
     }
 
     pub fn samples(mut self, samples: u32) -> Self {
-        assert!(!self.cube || samples == 1, "cubemaps cannot be multisampled");
+        assert!(
+            !self.cube || samples == 1,
+            "cubemaps cannot be multisampled"
+        );
         self.samples = sample_count(samples);
         if samples > 1 {
-
             self.mips = 1;
             self.usage &= !(vk::ImageUsageFlags::SAMPLED
                 | vk::ImageUsageFlags::STORAGE
@@ -1689,7 +1694,12 @@ impl Drop for Uploader {
 
 enum PendingResource {
     Buffer(vk::Buffer),
-    Texture(vk::Image, vk::ImageView, Vec<vk::ImageView>, Vec<vk::ImageView>),
+    Texture(
+        vk::Image,
+        vk::ImageView,
+        Vec<vk::ImageView>,
+        Vec<vk::ImageView>,
+    ),
 }
 
 struct HeapStorage {
@@ -1729,13 +1739,21 @@ impl GpuHeap {
     pub fn usage(&self) -> HeapUsage {
         let tlsf = unsafe { &*self.storage.tlsf.get() };
         let retired = unsafe { &*self.retired.get() };
-        let mut usage = HeapUsage { capacity: tlsf.size, allocated: tlsf.used, peak: tlsf.peak, retired: 0,
-            allocator_metadata: size_of::<Self>() + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
-                + tlsf.spare.capacity() * size_of::<u32>() + retired.capacity() * size_of::<(u64, u32, PendingResource)>() };
+        let mut usage = HeapUsage {
+            capacity: tlsf.size,
+            allocated: tlsf.used,
+            peak: tlsf.peak,
+            retired: 0,
+            allocator_metadata: size_of::<Self>()
+                + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
+                + tlsf.spare.capacity() * size_of::<u32>()
+                + retired.capacity() * size_of::<(u64, u32, PendingResource)>(),
+        };
         for (_, block, resource) in retired {
             usage.retired += tlsf.blocks[*block as usize].size;
             if let PendingResource::Texture(_, _, views, storage_views) = resource {
-                usage.allocator_metadata += (views.capacity() + storage_views.capacity()) * size_of::<vk::ImageView>();
+                usage.allocator_metadata +=
+                    (views.capacity() + storage_views.capacity()) * size_of::<vk::ImageView>();
             }
         }
         usage
@@ -1755,7 +1773,6 @@ impl GpuHeap {
     }
 
     pub fn with_ring(device: &Device, size: u64, ring: usize) -> Result<Self, Error> {
-
         let probe = vk::BufferCreateInfo::default()
             .size(size.min(1 << 20))
             .usage(Self::BUFFER_USAGE);
@@ -1873,7 +1890,11 @@ impl GpuHeap {
             }
         }
         let info = vk::ImageCreateInfo::default()
-            .flags(if desc.cube { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
+            .flags(if desc.cube {
+                vk::ImageCreateFlags::CUBE_COMPATIBLE
+            } else {
+                vk::ImageCreateFlags::empty()
+            })
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
             .extent(vk::Extent3D {
@@ -1928,7 +1949,11 @@ impl GpuHeap {
             1 => vk::ImageViewType::TYPE_2D,
             _ => vk::ImageViewType::TYPE_2D_ARRAY,
         };
-        let view_type = if desc.cube { vk::ImageViewType::CUBE } else { attachment_type };
+        let view_type = if desc.cube {
+            vk::ImageViewType::CUBE
+        } else {
+            attachment_type
+        };
         texture.view = unsafe {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
@@ -1946,9 +1971,22 @@ impl GpuHeap {
         };
         if desc.cube && desc.usage.contains(vk::ImageUsageFlags::STORAGE) {
             for mip in 0..desc.mips {
-                texture.storage_views.push(unsafe { self.device.create_image_view(
-                    &vk::ImageViewCreateInfo::default().image(texture.image).view_type(vk::ImageViewType::CUBE).format(desc.format)
-                        .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(desc.aspect).base_mip_level(mip).level_count(1).layer_count(desc.layers)), None)? });
+                texture.storage_views.push(unsafe {
+                    self.device.create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(texture.image)
+                            .view_type(vk::ImageViewType::CUBE)
+                            .format(desc.format)
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default()
+                                    .aspect_mask(desc.aspect)
+                                    .base_mip_level(mip)
+                                    .level_count(1)
+                                    .layer_count(desc.layers),
+                            ),
+                        None,
+                    )?
+                });
             }
         }
         for level in 0..desc.mips {
@@ -2151,7 +2189,6 @@ impl GpuHeap {
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
-
                     .level_count(vk::REMAINING_MIP_LEVELS)
                     .layer_count(layers),
             )
@@ -2275,7 +2312,6 @@ pub struct ResourceHeap {
 
 impl ResourceHeap {
     pub fn new(device: &Device, cap: u32) -> Result<Self, Error> {
-
         if cap > device.bindless_cap {
             return Err(Error::new(format!(
                 "a resource heap of {cap} slots is past this device's ceiling of {}",
@@ -2430,13 +2466,31 @@ impl ResourceHeap {
         Texture2d(Handle((range.base + slot) as u64))
     }
 
-    pub fn write_storage_cube_mip(&self, range: HeapRange, slot: u32, texture: &HeapTexture, mip: u32) -> Result<TextureCubeRW, Error> {
+    pub fn write_storage_cube_mip(
+        &self,
+        range: HeapRange,
+        slot: u32,
+        texture: &HeapTexture,
+        mip: u32,
+    ) -> Result<TextureCubeRW, Error> {
         assert!(slot < range.len);
-        let view = *texture.storage_views.get(mip as usize).ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
-        let image = vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL);
-        let data = vk::DescriptorDataEXT { p_storage_image: &image };
-        self.write(vk::DescriptorType::STORAGE_IMAGE, data,
-            self.storage_offset + (range.base + slot) as u64 * self.sizes.storage_image as u64, self.sizes.storage_image, self.resources_cpu);
+        let view = *texture
+            .storage_views
+            .get(mip as usize)
+            .ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
+        let image = vk::DescriptorImageInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::GENERAL);
+        let data = vk::DescriptorDataEXT {
+            p_storage_image: &image,
+        };
+        self.write(
+            vk::DescriptorType::STORAGE_IMAGE,
+            data,
+            self.storage_offset + (range.base + slot) as u64 * self.sizes.storage_image as u64,
+            self.sizes.storage_image,
+            self.resources_cpu,
+        );
         Ok(TextureCubeRW(Handle((range.base + slot) as u64)))
     }
 
@@ -2754,7 +2808,6 @@ pub struct Shaders {
 }
 
 impl Shaders {
-
     pub fn raster(&mut self, vertex: VertexShader, fragment: FragmentShader) -> RasterBuilder<'_> {
         RasterBuilder {
             shaders: self,
@@ -3386,7 +3439,6 @@ impl<'a> Raster<'a> {
         width: u32,
         height: u32,
     ) -> Self {
-
         let mut barriers = [vk::ImageMemoryBarrier2::default(); MAX_IMAGE_BARRIERS];
         let mut barrier_count = 0;
         for attachment in pass
@@ -3394,7 +3446,6 @@ impl<'a> Raster<'a> {
             .iter()
             .filter(|attachment| attachment.image != vk::Image::null())
         {
-
             let (src_stage, src_access) = match attachment.old_layout {
                 vk::ImageLayout::UNDEFINED => (
                     vk::PipelineStageFlags2::TOP_OF_PIPE,
@@ -3882,8 +3933,16 @@ impl<'a> Raster<'a> {
         Ok(())
     }
 
-    pub fn draw_indexed_commands<T>(&self, _pipeline: Pipeline, _root: T, _commands: &IndirectCommands, _ranges: &[std::ops::Range<u32>]) -> Result<(), Error> {
-        Err(Error::new("native indexed ICBs are not supported on this backend"))
+    pub fn draw_indexed_commands<T>(
+        &self,
+        _pipeline: Pipeline,
+        _root: T,
+        _commands: &IndirectCommands,
+        _ranges: &[std::ops::Range<u32>],
+    ) -> Result<(), Error> {
+        Err(Error::new(
+            "native indexed ICBs are not supported on this backend",
+        ))
     }
 
     pub fn execute(&self, _commands: &IndirectCommands, _range: std::ops::Range<u32>) {
@@ -3919,7 +3978,9 @@ impl<'a> Raster<'a> {
 
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         unsafe {
             self.device.cmd_write_timestamp2(
                 self.command_buffer,
@@ -3951,7 +4012,6 @@ impl<'a> Raster<'a> {
 
 impl Drop for Raster<'_> {
     fn drop(&mut self) {
-
         self.occlusion_off();
         unsafe { self.device.cmd_end_rendering(self.command_buffer) };
     }
@@ -4168,7 +4228,9 @@ impl<'a> Compute<'a> {
 
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         unsafe {
             self.device.cmd_write_timestamp2(
                 self.command_buffer,
@@ -4389,7 +4451,9 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    pub fn completed_gpu_ms(&self) -> Option<f64> { None }
+    pub fn completed_gpu_ms(&self) -> Option<f64> {
+        None
+    }
 
     pub fn arena(&self, thread: usize) -> &'a Arena {
         &self.arenas[thread]
@@ -4397,7 +4461,6 @@ impl<'a> Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-
     pub fn recorders(&mut self, counts: &[usize]) -> &mut [Recorder<'a>] {
         assert!(
             self.recording == 0,
@@ -4545,7 +4608,6 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-
     pub fn arena(&self) -> &'a Arena {
         self.arena
     }
@@ -4554,12 +4616,18 @@ impl<'a> Recorder<'a> {
 impl<'a> Recorder<'a> {
     pub fn timestamp(&mut self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         self.compute = None;
         self.raster = None;
         unsafe {
-            self.device.cmd_write_timestamp2(self.command_buffer, vk::PipelineStageFlags2::ALL_COMMANDS,
-                timers.pool, (timers.base + index) as u32);
+            self.device.cmd_write_timestamp2(
+                self.command_buffer,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                timers.pool,
+                (timers.base + index) as u32,
+            );
         }
     }
 
@@ -4818,11 +4886,20 @@ pub struct IndirectCommands {
 }
 
 impl IndirectCommands {
-    pub fn indexed<I: IndexFormat>(_device: &Device, _topology: Topology, _indices: &HeapBuffer, _draws: &[DrawIndexed]) -> Result<Self, Error> {
-        Err(Error::new("native indexed ICBs are not supported on this backend"))
+    pub fn indexed<I: IndexFormat>(
+        _device: &Device,
+        _topology: Topology,
+        _indices: &HeapBuffer,
+        _draws: &[DrawIndexed],
+    ) -> Result<Self, Error> {
+        Err(Error::new(
+            "native indexed ICBs are not supported on this backend",
+        ))
     }
 
-    pub fn allocated_size(&self) -> usize { 0 }
+    pub fn allocated_size(&self) -> usize {
+        0
+    }
 
     pub fn counted_draws(_device: &Device, count: u32) -> Result<Self, Error> {
         Ok(Self { count })

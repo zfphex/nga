@@ -296,7 +296,6 @@ mod commands {
             }
 
             window.draw(|win| {
-
                 heap.retire(ctx.completed());
 
                 let (new_width, new_height) = win.scaled_size();
@@ -307,7 +306,6 @@ mod commands {
                         .unwrap();
                     resized = false;
                     if surface.width() > 0 && surface.height() > 0 {
-
                         let stale = std::mem::replace(
                             &mut depth,
                             heap.alloc_texture(&TextureDesc::depth(

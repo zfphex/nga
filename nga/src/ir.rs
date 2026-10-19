@@ -30,7 +30,6 @@ pub enum HandleKind {
     Sampler,
     Commands,
     Pipeline,
-
     Opaque,
 }
 
@@ -39,22 +38,14 @@ pub enum Ty {
     Void,
     Scalar(Prim),
     Vec(Prim, u8),
-
     PackedVec(Prim, u8),
-
     Mat(u8, u8),
     Array(&'static Ty, u32),
     Struct(&'static TypeAbi),
-    Ptr {
-        mutable: bool,
-        pointee: &'static Ty,
-    },
+    Ptr { mutable: bool, pointee: &'static Ty },
     Handle(HandleKind),
-
     ThreadgroupAtomicU32,
-
     Infer,
-
     IntLit,
     FloatLit,
 }
@@ -238,7 +229,6 @@ pub enum Const {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Node {
-
     Block(&'static [u32]),
     Let {
         local: u32,
@@ -312,7 +302,6 @@ pub enum Node {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
-
     ThreadId,
 
     ThreadIdInGroup,
@@ -334,7 +323,6 @@ pub enum Builtin {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Binding {
-
     None,
 
     Root,
@@ -351,7 +339,6 @@ pub enum Binding {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Stage {
-
     Helper,
     Vertex,
     Fragment,
@@ -395,7 +382,6 @@ pub struct GpuFn {
 }
 
 impl GpuFn {
-
     pub fn reachable(&'static self) -> Vec<&'static GpuFn> {
         let mut out = Vec::new();
         visit(self, &mut out);
@@ -473,7 +459,6 @@ fn stmt(f: &GpuFn, types: &mut Types, node: u32) {
             end,
             body,
         } => {
-
             let start_ty = expr(f, types, start);
             let end_ty = expr(f, types, end);
             let ty = match (start_ty, end_ty) {
@@ -557,7 +542,6 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
             expr(f, types, index);
             coerce(f, types, index, Ty::U32);
             match expr(f, types, base) {
-
                 Ty::Ptr { pointee, .. } => *pointee,
                 Ty::Array(e, _) => *e,
                 Ty::Vec(p, _) => Ty::Scalar(p),
@@ -582,7 +566,6 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
             } else if matches!(l, Ty::Mat(..)) || matches!(r, Ty::Mat(..)) {
                 panic!("matrices multiply with `mul`, not `*`")
             } else {
-
                 match (l, r) {
                     (Ty::Vec(..), _) => l,
                     (_, Ty::Vec(..)) => r,

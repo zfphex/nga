@@ -657,7 +657,6 @@ fn builtin_ty(b: Builtin) -> Ty {
 }
 
 fn builtin_variable(m: &mut M, b: Builtin, storage: u32) -> u32 {
-
     if let Some((.., id)) = m
         .builtins
         .iter()
@@ -720,7 +719,6 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
     let types = ir::infer(f);
     let entry = f.stage != Stage::Helper;
     let ret = match entry {
-
         true => Ty::Void,
         false => f.ret,
     };
@@ -1132,7 +1130,6 @@ fn stmt(m: &mut M, w: &mut W, node: u32) {
                 let result = coerced(m, w, result, ret);
                 inst(&mut w.body, OP_RETURN_VALUE, &[result]);
             } else {
-
                 let ret = w.f.ret;
                 let result = coerced(m, w, result, ret);
                 for (index, (variable, ty)) in w.outputs.clone().iter().enumerate() {
@@ -1226,7 +1223,6 @@ fn load(m: &mut M, w: &mut W, place: Place) -> u32 {
     let ty = m.type_of(place.ty, memory(place.storage));
     let id = m.id();
     match place.storage {
-
         PHYSICAL_STORAGE_BUFFER => inst(
             &mut w.body,
             OP_LOAD,
@@ -1251,7 +1247,6 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
             let base_ty = w.types.nodes[base as usize];
             let ty = w.types.nodes[node as usize];
             let (pointer, storage) = match base_ty {
-
                 Ty::Ptr { .. } => (value(m, w, base), PHYSICAL_STORAGE_BUFFER),
                 _ => {
                     let place = place_of(m, w, base);
@@ -1277,7 +1272,6 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
             let ty = w.types.nodes[node as usize];
             let index = value(m, w, index);
             match base_ty {
-
                 Ty::Ptr { .. } => {
                     let base = value(m, w, base);
                     let pointer_type = m.ptr(PHYSICAL_STORAGE_BUFFER, ty);
@@ -1417,7 +1411,6 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
             }
             let base_ty = w.types.nodes[base as usize];
             match base_ty.deref() {
-
                 Ty::Vec(..) | Ty::PackedVec(..) => {
                     let source = value(m, w, base);
                     let type_id = m.ty(ty);
@@ -1635,7 +1628,6 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
     }
 
     if matches!(op, Intrinsic::Barrier | Intrinsic::ThreadgroupBarrier) {
-
         let scope = m.constant(Ty::U32, 2);
         let memory = match op {
             Intrinsic::Barrier => 0x40 | 0x100,
@@ -1787,7 +1779,6 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
 
 fn atomic(m: &mut M, w: &mut W, op: Intrinsic, args: &[u32]) -> u32 {
     let place = match w.types.nodes[args[0] as usize] {
-
         Ty::Ptr { .. } => Place {
             id: value(m, w, args[0]),
             ty: Ty::U32,
@@ -1942,11 +1933,23 @@ fn image(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
             let uv = value(m, w, args[2]);
             let (_, element) = descriptor_array(m, kind);
             let cube = kind == HandleKind::TextureCube;
-            let mut sampled_type = if cube { m.sampled_cube } else { m.sampled_image };
+            let mut sampled_type = if cube {
+                m.sampled_cube
+            } else {
+                m.sampled_image
+            };
             if sampled_type == 0 {
                 sampled_type = m.id();
-                inst(&mut m.globals, OP_TYPE_SAMPLED_IMAGE, &[sampled_type, element]);
-                if cube { m.sampled_cube = sampled_type; } else { m.sampled_image = sampled_type; }
+                inst(
+                    &mut m.globals,
+                    OP_TYPE_SAMPLED_IMAGE,
+                    &[sampled_type, element],
+                );
+                if cube {
+                    m.sampled_cube = sampled_type;
+                } else {
+                    m.sampled_image = sampled_type;
+                }
             }
             let sampled = m.id();
             inst(
@@ -1990,11 +1993,18 @@ fn image(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
             m.capability(50);
             let type_id = m.ty(Ty::Vec(Prim::U32, 2));
             let id = m.id();
-            if matches!(kind, HandleKind::Texture2dRW | HandleKind::Texture3dRW | HandleKind::TextureCubeRW) {
+            if matches!(
+                kind,
+                HandleKind::Texture2dRW | HandleKind::Texture3dRW | HandleKind::TextureCubeRW
+            ) {
                 inst(&mut w.body, OP_IMAGE_QUERY_SIZE, &[type_id, id, image_id]);
             } else {
                 let level = m.constant(Ty::Scalar(Prim::I32), 0);
-                inst(&mut w.body, OP_IMAGE_QUERY_SIZE_LOD, &[type_id, id, image_id, level]);
+                inst(
+                    &mut w.body,
+                    OP_IMAGE_QUERY_SIZE_LOD,
+                    &[type_id, id, image_id, level],
+                );
             }
             id
         }

@@ -1,10 +1,10 @@
 use crate::{
     AddressMode, Alloc, BlendFactor, BlendMode, ColorTarget, Commands, CompareOp, ComputeShader,
     Constant, Constants, Cull, DepthState, DispatchThreads, DrawIndexed, Error, FRAMES_IN_FLIGHT,
-    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage, IndexFormat,
-    Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler, SamplerDesc,
-    Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW, TextureCube, TextureCubeRW, TileDesc, Tlsf,
-    Topology, Usage, VertexShader, Viewport, Winding,
+    Feature, Filter, Format, FragmentShader, Gpu, GpuBox, GpuRw, Handle, Hazard, HeapUsage,
+    IndexFormat, Memory, MeshDesc, PipelineHandle, RasterBuilder, RasterDesc, ResolveMode, Sampler,
+    SamplerDesc, Scalar, Scissor, Stage, StencilFace, StencilOp, Texture2d, Texture2dRW,
+    TextureCube, TextureCubeRW, TileDesc, Tlsf, Topology, Usage, VertexShader, Viewport, Winding,
 };
 use minmetal::{
     Allocation, Buffer, ColorWriteMask, CompareFunction, CpuCacheMode, CullMode,
@@ -21,10 +21,10 @@ use minmetal::{
     M4SpecializedFunctionDescriptor, M4TileRenderPipelineDescriptor, M4TimestampGranularity,
     M4VisibilityOptions, MetalError, MetalLayer, MultisampleDepthResolveFilter, Origin,
     PixelFormat, PrimitiveTopologyClass, PrimitiveType, Region, RenderStages, ResidencySet,
-    ResidencySetDescriptor, ResourceOptions, SamplerAddressMode,
-    SamplerDescriptor, SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages,
-    StencilDescriptor, StencilOperation, StorageMode, Texture, TextureDescriptor, TextureType,
-    TextureUsage, VisibilityResultMode, VisibilityResultType, id,
+    ResidencySetDescriptor, ResourceOptions, SamplerAddressMode, SamplerDescriptor,
+    SamplerMinMagFilter, SamplerMipFilter, SharedEvent, Size, Stages, StencilDescriptor,
+    StencilOperation, StorageMode, Texture, TextureDescriptor, TextureType, TextureUsage,
+    VisibilityResultMode, VisibilityResultType, id,
 };
 use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
@@ -45,7 +45,6 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-
     pub fn handle(&self) -> PipelineHandle {
         self.handle
     }
@@ -457,7 +456,6 @@ pub struct Device {
 }
 
 impl Device {
-
     pub fn new(_validation: bool) -> Result<Self, Error> {
         let device = minmetal::Device::system_default().ok_or(Error::new("no Metal device"))?;
         let queue = device.new_m4_command_queue().ok_or(Error::new(
@@ -481,21 +479,35 @@ impl Device {
         &self.name
     }
 
-    pub fn allocated_bytes(&self) -> Option<usize> { Some(self.device.current_allocated_size()) }
+    pub fn allocated_bytes(&self) -> Option<usize> {
+        Some(self.device.current_allocated_size())
+    }
 
     pub fn start_capture(&self, path: &std::path::Path) -> Result<(), Error> {
         let manager = minmetal::CaptureManager::shared()?;
-        if manager.is_capturing() { return Err(Error::new("a Metal capture is already active")); }
+        if manager.is_capturing() {
+            return Err(Error::new("a Metal capture is already active"));
+        }
         if !manager.supports_destination(minmetal::CaptureDestination::GpuTraceDocument) {
-            return Err(Error::new("Metal file capture is unavailable; launch with MTL_CAPTURE_ENABLED=1"));
+            return Err(Error::new(
+                "Metal file capture is unavailable; launch with MTL_CAPTURE_ENABLED=1",
+            ));
         }
         let descriptor = minmetal::CaptureDescriptor::new();
         descriptor.set_capture_object(self.device.raw);
         descriptor.set_destination(minmetal::CaptureDestination::GpuTraceDocument);
-        let absolute = if path.is_absolute() { path.to_path_buf() } else {
-            std::env::current_dir().map_err(|e| Error::new(e.to_string()))?.join(path)
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| Error::new(e.to_string()))?
+                .join(path)
         };
-        descriptor.set_output_url(absolute.to_str().ok_or_else(|| Error::new("capture path must be UTF-8"))?);
+        descriptor.set_output_url(
+            absolute
+                .to_str()
+                .ok_or_else(|| Error::new("capture path must be UTF-8"))?,
+        );
         manager.start_capture(&descriptor)?;
         Ok(())
     }
@@ -699,7 +711,6 @@ pub struct HeapBuffer<'heap> {
 }
 
 impl HeapBuffer<'_> {
-
     pub fn gpu<T: ?Sized>(&self) -> Gpu<T> {
         crate::device_ptr(self.gpu)
     }
@@ -791,7 +802,11 @@ impl TextureDesc {
 
     pub fn texture_cube(fmt: Format, size: u32) -> Self {
         assert!(size > 0, "a cubemap must have a nonzero face size");
-        Self { layers: 6, cube: true, ..Self::texture_2d(fmt, size, size) }
+        Self {
+            layers: 6,
+            cube: true,
+            ..Self::texture_2d(fmt, size, size)
+        }
     }
 
     pub fn depth(fmt: Format, width: u32, height: u32) -> Self {
@@ -842,7 +857,6 @@ impl TextureDesc {
         );
         self.samples = samples;
         if samples > 1 {
-
             self.mips = 1;
             self.usage = match self.usage.has(Usage::DEPTH_STENCIL) {
                 true => Usage::DEPTH_STENCIL,
@@ -913,12 +927,21 @@ impl GpuHeap {
     pub fn usage(&self) -> HeapUsage {
         let tlsf = unsafe { &*self.storage.tlsf.get() };
         let retired = unsafe { &*self.retired.get() };
-        let mut usage = HeapUsage { capacity: tlsf.size, allocated: tlsf.used, peak: tlsf.peak, retired: 0,
-            allocator_metadata: size_of::<Self>() + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
-                + tlsf.spare.capacity() * size_of::<u32>() + retired.capacity() * size_of::<(u64, u32, PendingResource)>() };
+        let mut usage = HeapUsage {
+            capacity: tlsf.size,
+            allocated: tlsf.used,
+            peak: tlsf.peak,
+            retired: 0,
+            allocator_metadata: size_of::<Self>()
+                + tlsf.blocks.capacity() * size_of::<crate::tlsf::Block>()
+                + tlsf.spare.capacity() * size_of::<u32>()
+                + retired.capacity() * size_of::<(u64, u32, PendingResource)>(),
+        };
         for (_, block, resource) in retired {
             usage.retired += tlsf.blocks[*block as usize].size;
-            if let PendingResource::Texture(_, views) = resource { usage.allocator_metadata += views.capacity() * size_of::<Texture>(); }
+            if let PendingResource::Texture(_, views) = resource {
+                usage.allocator_metadata += views.capacity() * size_of::<Texture>();
+            }
         }
         usage
     }
@@ -1016,12 +1039,19 @@ impl GpuHeap {
             block: alloc.block,
             storage: &self.storage,
         };
-        let texture = self.storage.heap.new_texture_at_offset(&descriptor, alloc.offset as usize)?;
+        let texture = self
+            .storage
+            .heap
+            .new_texture_at_offset(&descriptor, alloc.offset as usize)?;
         let mut storage_views = Vec::new();
         if desc.cube && desc.usage.0 & Usage::STORAGE.0 != 0 {
             for mip in 0..desc.mips {
-                storage_views.push(texture.new_texture_view_with_type_and_ranges(format(desc.format), TextureType::Cube,
-                    minmetal::Range::new(mip as usize, 1), minmetal::Range::new(0, desc.layers as usize))?);
+                storage_views.push(texture.new_texture_view_with_type_and_ranges(
+                    format(desc.format),
+                    TextureType::Cube,
+                    minmetal::Range::new(mip as usize, 1),
+                    minmetal::Range::new(0, desc.layers as usize),
+                )?);
             }
         }
         Ok(HeapTexture {
@@ -1176,7 +1206,10 @@ impl GpuHeap {
             let (_, block, resource) = retired.pop_front().unwrap();
             match resource {
                 PendingResource::Buffer(buffer) => drop(buffer),
-                PendingResource::Texture(texture, views) => { drop(views); drop(texture); },
+                PendingResource::Texture(texture, views) => {
+                    drop(views);
+                    drop(texture);
+                }
             }
             unsafe { (*self.storage.tlsf.get()).free(block) };
         }
@@ -1242,7 +1275,10 @@ impl ResourceHeap {
     pub fn write_texture(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2d {
         assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
         let index = (range.base + slot) as usize;
-        let resource_id = texture.texture.gpu_resource_id().expect("texture resource id");
+        let resource_id = texture
+            .texture
+            .gpu_resource_id()
+            .expect("texture resource id");
         unsafe {
             self.ids
                 .contents()
@@ -1268,18 +1304,36 @@ impl ResourceHeap {
         self.write_texture(range, slot, texture)
     }
 
-    pub fn write_storage_cube_mip(&self, range: HeapRange, slot: u32, texture: &HeapTexture, mip: u32) -> Result<TextureCubeRW, Error> {
+    pub fn write_storage_cube_mip(
+        &self,
+        range: HeapRange,
+        slot: u32,
+        texture: &HeapTexture,
+        mip: u32,
+    ) -> Result<TextureCubeRW, Error> {
         assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
-        let view = texture.storage_views.get(mip as usize).ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
+        let view = texture
+            .storage_views
+            .get(mip as usize)
+            .ok_or_else(|| Error::new("storage cube mip is unavailable"))?;
         let resource_id = view.gpu_resource_id()?;
-        unsafe { self.ids.contents().cast::<u64>().add((range.base + slot) as usize).write(resource_id.impl_); }
+        unsafe {
+            self.ids
+                .contents()
+                .cast::<u64>()
+                .add((range.base + slot) as usize)
+                .write(resource_id.impl_);
+        }
         Ok(TextureCubeRW(Handle((range.base + slot) as u64)))
     }
 
     pub fn write_storage(&self, range: HeapRange, slot: u32, texture: &HeapTexture) -> Texture2dRW {
         assert!(slot < range.len && range.base < self.cap && slot < self.cap - range.base);
         let index = (range.base + slot) as usize;
-        let resource_id = texture.texture.gpu_resource_id().expect("texture resource id");
+        let resource_id = texture
+            .texture
+            .gpu_resource_id()
+            .expect("texture resource id");
         unsafe {
             self.ids
                 .contents()
@@ -1311,7 +1365,6 @@ pub struct Surface {
 }
 
 impl Surface {
-
     pub fn rebuild(&mut self, _device: &Device, width: u32, height: u32) -> Result<(), Error> {
         self.layer
             .set_drawable_size(width as usize, height as usize);
@@ -1365,7 +1418,6 @@ pub struct Shaders {
 }
 
 impl Shaders {
-
     pub fn new(device: &Device, entries: &[&'static crate::ir::GpuFn]) -> Result<Self, Error> {
         let source = crate::msl::module(entries);
         let source = std::str::from_utf8(source.as_bytes())
@@ -1389,7 +1441,6 @@ impl Shaders {
     }
 
     fn function(&self, name: &str, values: Option<&dyn Constants>) -> M4FunctionDescriptor {
-
         let name = &crate::msl::escape(name);
         let function = M4LibraryFunctionDescriptor::new();
         function.set_name(name);
@@ -2195,7 +2246,13 @@ impl<'a> Raster<'a> {
         Ok(())
     }
 
-    pub fn draw_indexed_commands<T>(&self, pipeline: Pipeline, root: T, commands: &IndirectCommands, ranges: &[std::ops::Range<u32>]) -> Result<(), Error> {
+    pub fn draw_indexed_commands<T>(
+        &self,
+        pipeline: Pipeline,
+        root: T,
+        commands: &IndirectCommands,
+        ranges: &[std::ops::Range<u32>],
+    ) -> Result<(), Error> {
         self.prepare(pipeline, root)?;
         for range in ranges {
             if range.start > range.end || range.end > commands.count {
@@ -2227,7 +2284,9 @@ impl<'a> Raster<'a> {
 
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         self.encoder.write_timestamp_with_granularity(
             M4TimestampGranularity::Precise,
             RenderStages::FRAGMENT,
@@ -2298,7 +2357,6 @@ impl<'a> Compute<'a> {
     }
 
     pub fn pipeline(&self, pipeline: Pipeline) {
-
         let state = unsafe { minmetal::ComputePipelineState::from_raw_borrowed(&pipeline.raw) };
         self.encoder.set_compute_pipeline_state(state);
     }
@@ -2426,7 +2484,9 @@ impl<'a> Compute<'a> {
 
     pub fn timestamp(&self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         self.encoder.write_timestamp_with_granularity(
             M4TimestampGranularity::Precise,
             &timers.heaps[timers.base],
@@ -2506,7 +2566,6 @@ pub struct Context {
 }
 
 impl Context {
-
     pub fn new(
         device: &Device,
         _shaders: &Shaders,
@@ -2582,7 +2641,11 @@ impl Context {
                 }
                 let start = feedback.gpu_start_time();
                 let end = feedback.gpu_end_time();
-                let ns = if start.is_finite() && end.is_finite() && start > 0.0 && end > start { (end - start) * 1e9 } else { f64::NAN };
+                let ns = if start.is_finite() && end.is_finite() && start > 0.0 && end > start {
+                    (end - start) * 1e9
+                } else {
+                    f64::NAN
+                };
                 state.gpu_ns.store(ns.to_bits(), Ordering::Release);
                 state.completed.set_signaled_value(value);
             });
@@ -2628,7 +2691,9 @@ impl Context {
 
         let (feedback, feedback_handler) = &self.feedback[(index % FRAMES_IN_FLIGHT) as usize];
         if index >= FRAMES_IN_FLIGHT
-            && !feedback.completed.wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 10_000)
+            && !feedback
+                .completed
+                .wait_until_signaled_value(index + 1 - FRAMES_IN_FLIGHT, 10_000)
         {
             return Err(Error::new("timed out waiting for GPU submission feedback"));
         }
@@ -2684,9 +2749,15 @@ pub struct Frame<'a> {
 
 impl<'a> Frame<'a> {
     pub fn completed_gpu_ms(&self) -> Option<f64> {
-        if self.value <= FRAMES_IN_FLIGHT { return None; }
+        if self.value <= FRAMES_IN_FLIGHT {
+            return None;
+        }
         let ns = f64::from_bits(self.feedback.gpu_ns.load(Ordering::Acquire));
-        if ns.is_finite() && ns > 0.0 { Some(ns / 1e6) } else { None }
+        if ns.is_finite() && ns > 0.0 {
+            Some(ns / 1e6)
+        } else {
+            None
+        }
     }
 
     pub fn arena(&self, thread: usize) -> &'a Arena {
@@ -2695,7 +2766,6 @@ impl<'a> Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-
     pub fn recorders(&mut self, counts: &[usize]) -> &mut [Recorder<'a>] {
         assert!(
             self.recording == 0,
@@ -2741,9 +2811,12 @@ impl<'a> Frame<'a> {
         }
         if recording > 0 {
             self.feedback.value.store(self.value, Ordering::Release);
-            self.commit_options.add_feedback_handler(self.feedback_handler);
+            self.commit_options
+                .add_feedback_handler(self.feedback_handler);
         } else {
-            self.feedback.gpu_ns.store(f64::NAN.to_bits(), Ordering::Release);
+            self.feedback
+                .gpu_ns
+                .store(f64::NAN.to_bits(), Ordering::Release);
             self.feedback.completed.set_signaled_value(self.value);
         }
         self.queue
@@ -2778,7 +2851,6 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-
     pub fn arena(&self) -> &'a Arena {
         self.arena
     }
@@ -2787,10 +2859,13 @@ impl<'a> Recorder<'a> {
 impl<'a> Recorder<'a> {
     pub fn timestamp(&mut self, timers: &Timers, index: usize) {
         debug_assert!(index < timers.count);
-        if !timers.enabled { return; }
+        if !timers.enabled {
+            return;
+        }
         self.compute = None;
         self.raster = None;
-        self.command_buffer.write_timestamp_into_heap(&timers.heaps[timers.base], index);
+        self.command_buffer
+            .write_timestamp_into_heap(&timers.heaps[timers.base], index);
     }
 
     pub fn compute(&mut self) -> &Compute<'a> {
@@ -2869,14 +2944,23 @@ pub struct IndirectCommands {
 
 impl Drop for IndirectCommands {
     fn drop(&mut self) {
-        self.residency.remove_allocation(&Allocation::from_indirect_command_buffer(&self.icb)).ok();
+        self.residency
+            .remove_allocation(&Allocation::from_indirect_command_buffer(&self.icb))
+            .ok();
         self.residency.commit().ok();
     }
 }
 
 impl IndirectCommands {
-    pub fn indexed<I: IndexFormat>(device: &Device, topology: Topology, indices: &HeapBuffer, draws: &[DrawIndexed]) -> Result<Self, Error> {
-        if draws.is_empty() { return Err(Error::new("an ICB must contain at least one command")); }
+    pub fn indexed<I: IndexFormat>(
+        device: &Device,
+        topology: Topology,
+        indices: &HeapBuffer,
+        draws: &[DrawIndexed],
+    ) -> Result<Self, Error> {
+        if draws.is_empty() {
+            return Err(Error::new("an ICB must contain at least one command"));
+        }
         let desc = IndirectCommandBufferDescriptor::new();
         desc.set_command_types(IndirectCommandType::DRAW_INDEXED);
         desc.set_inherit_pipeline_state(true);
@@ -2885,14 +2969,25 @@ impl IndirectCommands {
         let commands = Self::new(device, &desc, draws.len() as u32)?;
         let width = if I::WIDE { 4 } else { 2 };
         for (slot, draw) in draws.iter().enumerate() {
-            if (draw.index_start as u64 + draw.index_count as u64) * width as u64 > indices.len as u64 {
+            if (draw.index_start as u64 + draw.index_count as u64) * width as u64
+                > indices.len as u64
+            {
                 return Err(Error::new("ICB index range exceeds the index buffer"));
             }
             commands.icb.render_command(slot)?.draw_indexed_primitives(
-                self::topology(topology), draw.index_count as usize,
-                if I::WIDE { IndexType::UInt32 } else { IndexType::UInt16 },
-                &indices.buffer, draw.index_start as usize * width, draw.instance_count as usize,
-                draw.base_vertex as isize, draw.base_instance as usize)?;
+                self::topology(topology),
+                draw.index_count as usize,
+                if I::WIDE {
+                    IndexType::UInt32
+                } else {
+                    IndexType::UInt16
+                },
+                &indices.buffer,
+                draw.index_start as usize * width,
+                draw.instance_count as usize,
+                draw.base_vertex as isize,
+                draw.base_instance as usize,
+            )?;
         }
         Ok(commands)
     }
@@ -3100,7 +3195,11 @@ impl Occlusion {
 fn deferred_cube_storage_views() -> Result<(), Error> {
     let device = Device::new(true)?;
     let heap = GpuHeap::new(&device, 1048576)?;
-    let texture = heap.alloc_texture(&TextureDesc::texture_cube(Format::Rgba32Float, 4).mips(3).usage(Usage::STORAGE))?;
+    let texture = heap.alloc_texture(
+        &TextureDesc::texture_cube(Format::Rgba32Float, 4)
+            .mips(3)
+            .usage(Usage::STORAGE),
+    )?;
     let before = heap.usage();
     assert!(before.allocated > 0 && before.allocated <= before.capacity);
     assert_eq!(before.peak, before.allocated);

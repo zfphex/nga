@@ -65,7 +65,9 @@ fn pass_timestamps_and_skipped_slots() -> Result<(), Box<dyn std::error::Error>>
         assert_eq!(timers.checked_ms(5, 0), None);
         assert_eq!(timers.checked_ms(0, usize::MAX), None);
         let recorder = frame.recorder();
-        if index < FRAMES_IN_FLIGHT * 2 || (FRAMES_IN_FLIGHT * 3..FRAMES_IN_FLIGHT * 4).contains(&index) {
+        if index < FRAMES_IN_FLIGHT * 2
+            || (FRAMES_IN_FLIGHT * 3..FRAMES_IN_FLIGHT * 4).contains(&index)
+        {
             let compute = recorder.compute();
             compute.timestamp(&timers, 0);
             compute.fill_buffer(&buffer, 0, buffer.len(), 0);
@@ -75,7 +77,9 @@ fn pass_timestamps_and_skipped_slots() -> Result<(), Box<dyn std::error::Error>>
             raster.timestamp(&timers, 2);
             raster.draw(pipeline, (), 0..3)?;
             raster.timestamp(&timers, 3);
-            if !timers.enabled { recorder.timestamp(&timers, 4); }
+            if !timers.enabled {
+                recorder.timestamp(&timers, 4);
+            }
         }
         frame.submit(None)?;
     }

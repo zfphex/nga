@@ -20,7 +20,6 @@ mod meshlets {
         const RING: u32 = 8;
 
         pub struct Meshlet {
-
             pub bounds: f32x4,
             pub color: [f32; 3],
         }

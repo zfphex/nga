@@ -104,7 +104,9 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
         let mut frame = context.begin_frame()?;
         timers.begin(&frame);
         if frame_index >= FRAMES_IN_FLIGHT {
-            let gpu_ms = frame.completed_gpu_ms().expect("completed submission has GPU feedback");
+            let gpu_ms = frame
+                .completed_gpu_ms()
+                .expect("completed submission has GPU feedback");
             assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
             let expected = frame_index < FRAMES_IN_FLIGHT * 2;
             assert_eq!(timers.written(0), expected);
@@ -112,7 +114,9 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
             assert!(timers.ns(0, 1).is_finite());
             assert_eq!(timers.written(2), expected);
             assert_eq!(timers.written(3), expected);
-            if expected { assert!(timers.checked_ns(2, 3).is_some()); }
+            if expected {
+                assert!(timers.checked_ns(2, 3).is_some());
+            }
         } else {
             assert_eq!(frame.completed_gpu_ms(), None);
         }
@@ -197,7 +201,9 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
     drop(frame);
     for index in 0..FRAMES_IN_FLIGHT * 2 {
         let frame = context.begin_frame()?;
-        if index >= FRAMES_IN_FLIGHT { assert_eq!(frame.completed_gpu_ms(), None); }
+        if index >= FRAMES_IN_FLIGHT {
+            assert_eq!(frame.completed_gpu_ms(), None);
+        }
         frame.submit(None)?;
     }
     device.wait_idle()?;

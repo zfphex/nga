@@ -301,7 +301,6 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
     let mut pad = 0usize;
     for (index, field) in abi.fields.iter().enumerate() {
         if interface {
-
             let flat = match field.ty {
                 Ty::Scalar(p) | Ty::Vec(p, _) if !matches!(p, Prim::F16 | Prim::F32) => " [[flat]]",
                 _ => "",
@@ -454,11 +453,14 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
         });
     }
     arguments.retain(|argument| !argument.is_empty());
-    arguments.insert(0, if f.stage == Stage::Helper {
-        "constant nga_push* nga_push_data".into()
-    } else {
-        "constant nga_push* nga_push_data [[buffer(0)]]".into()
-    });
+    arguments.insert(
+        0,
+        if f.stage == Stage::Helper {
+            "constant nga_push* nga_push_data".into()
+        } else {
+            "constant nga_push* nga_push_data [[buffer(0)]]".into()
+        },
+    );
     match f.stage {
         Stage::Object => arguments.insert(0, "mesh_grid_properties nga_mesh_grid".into()),
         Stage::Mesh {
@@ -680,7 +682,6 @@ fn expr(w: &mut W, node: u32) -> String {
             _ => format!("{value:?}f"),
         },
         Node::Field { base, name } => {
-
             if let Node::Param(index) = w.f.nodes[base as usize]
                 && w.f.params[index as usize].binding == ir::Binding::Constants
             {
@@ -710,7 +711,6 @@ fn expr(w: &mut W, node: u32) -> String {
             }
         }
         Node::Binary(op, lhs, rhs) => {
-
             let want = match (
                 op.compare() || op.logical(),
                 matches!(op, BinOp::Shl | BinOp::Shr),
@@ -793,7 +793,9 @@ fn tex_expr(w: &W, arg: u32, expr: &str) -> String {
         Ty::Handle(HandleKind::TextureCube) => {
             format!("nga_deref_texcube(nga_push_data, {expr})")
         }
-        Ty::Handle(HandleKind::TextureCubeRW) => format!("nga_deref_texcube_rw(nga_push_data, {expr})"),
+        Ty::Handle(HandleKind::TextureCubeRW) => {
+            format!("nga_deref_texcube_rw(nga_push_data, {expr})")
+        }
         Ty::Handle(HandleKind::Depth2d) => format!("nga_deref_depth2d(nga_push_data, {expr})"),
         _ => format!("{expr}.t"),
     }
@@ -867,7 +869,9 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
             let tex = tex_expr(w, args[0], &a[0]);
             if w.types.nodes[args[0] as usize] == Ty::Handle(HandleKind::TextureCubeRW) {
                 format!("{tex}.write({}, {}.xy, {}.z)", a[2], a[1], a[1])
-            } else { format!("{tex}.write({}, {})", a[2], a[1]) }
+            } else {
+                format!("{tex}.write({}, {})", a[2], a[1])
+            }
         }
         Intrinsic::Dimensions => {
             let tex = tex_expr(w, args[0], &a[0]);

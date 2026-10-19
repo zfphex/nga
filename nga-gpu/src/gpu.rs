@@ -53,7 +53,10 @@ pub fn ir_ty_collect(mut tokens: &[TokenTree], users: &mut Vec<String>) -> Resul
                 return Err((span, format!("expected `{name}<T>`")));
             }
             let pointee = &generics[1..generics.len() - 1];
-            if pointee.first().is_some_and(|token| punct(Some(token), '\'')) {
+            if pointee
+                .first()
+                .is_some_and(|token| punct(Some(token), '\''))
+            {
                 return Err((
                     span,
                     format!("`{name}` carries no lifetime; write `{name}<T>`"),
@@ -216,7 +219,6 @@ fn binop(t: &[TokenTree], i: usize) -> Option<(&'static str, u8, usize)> {
     if p.spacing() == Spacing::Joint
         && let Some(TokenTree::Punct(q)) = t.get(i + 1)
     {
-
         if q.as_char() == '=' && !matches!(p.as_char(), '=' | '!' | '<' | '>') {
             return None;
         }
@@ -561,7 +563,6 @@ fn unary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> Res
         )));
     }
     if punct(t.get(*i), '*') {
-
         *i += 1;
         return unary(b, t, i, want);
     }
@@ -769,7 +770,6 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
 }
 
 fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
-
     const SUFFIXES: &[&str] = &[
         "usize", "isize", "u128", "i128", "f32", "f64", "f16", "u64", "i64", "u32", "i32", "u16",
         "i16", "u8", "i8",
@@ -988,7 +988,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         let ty_tokens = &arg[j + 2..];
         let ty = ir_ty(ty_tokens)?;
         let binding = binding.unwrap_or_else(|| {
-
             if !root_taken && stage != "::nga::ir::Stage::Helper" && ty.contains("Ty::Ptr") {
                 root_taken = true;
                 "::nga::ir::Binding::Root".into()

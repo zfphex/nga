@@ -130,7 +130,6 @@ fn items(body: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut i = 0;
     while i < body.len() {
         if punct(body.get(i), '#') {
-
             if punct(body.get(i + 1), '!') {
                 i += 3;
                 out.push(body[start..i].to_vec());
@@ -192,7 +191,6 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
     let mut entries: Vec<String> = Vec::new();
     let body: Vec<TokenTree> = body.stream().into_iter().collect();
     for item in items(&body) {
-
         if punct(item.first(), '#') && punct(item.get(1), '!') {
             out.extend(item);
             continue;
@@ -235,9 +233,20 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         let rest: Vec<TokenTree> = item[i..].to_vec();
         let mut j = 0;
         if matches!(rest.get(j), Some(TokenTree::Ident(id)) if id.to_string() == "pub") {
-            j += if matches!(rest.get(j + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) { 2 } else { 1 };
+            j += if matches!(rest.get(j + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis)
+            {
+                2
+            } else {
+                1
+            };
         }
-        let kind = rest.get(j).and_then(|t| match t { TokenTree::Ident(id) => Some(id.to_string()), _ => None }).unwrap_or_default();
+        let kind = rest
+            .get(j)
+            .and_then(|t| match t {
+                TokenTree::Ident(id) => Some(id.to_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
         let mut k = j;
         while matches!(rest.get(k), Some(TokenTree::Ident(id))
             if matches!(id.to_string().as_str(), "unsafe" | "const" | "async" | "extern"))

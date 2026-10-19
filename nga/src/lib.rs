@@ -93,7 +93,6 @@ pub(crate) fn device_ptr_rw<T: ?Sized>(address: u64) -> GpuRw<T> {
 }
 
 impl<T: ?Sized> Gpu<T> {
-
     pub unsafe fn new(address: u64) -> Self {
         Self(NonZeroU64::new(address).unwrap(), PhantomData)
     }
@@ -126,7 +125,6 @@ impl<T: ?Sized> Copy for Gpu<T> {}
 pub struct GpuRw<T: ?Sized>(pub(crate) NonZeroU64, PhantomData<fn(*mut T)>);
 
 impl<T: ?Sized> GpuRw<T> {
-
     pub unsafe fn new(address: u64) -> Self {
         Self(NonZeroU64::new(address).unwrap(), PhantomData)
     }
@@ -381,9 +379,7 @@ impl Dispatch {
     }
 
     pub fn xyz(x: u32, y: u32, z: u32) -> DispatchThreads {
-        DispatchThreads {
-            threads: [x, y, z],
-        }
+        DispatchThreads { threads: [x, y, z] }
     }
 }
 
@@ -496,7 +492,6 @@ impl<T: ?Sized> ConstantValue for GpuRw<T> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Memory {
-
     Device,
 
     Upload,
@@ -659,7 +654,6 @@ impl std::ops::BitOr for Usage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
-
     MeshShaders,
 
     TileShaders,
@@ -1057,7 +1051,6 @@ pub enum ResolveMode {
 
 #[derive(Clone, Copy)]
 pub struct MeshDesc<'a> {
-
     pub object: &'a str,
     pub mesh: &'a str,
     pub fragment: &'a str,
