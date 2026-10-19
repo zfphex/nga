@@ -1,14 +1,5 @@
-//! The shader IR. `#[gpu_mod]` parses Rust into this; `msl.rs` and `spirv.rs` read it back out.
-//!
-//! Flat arenas, `Copy` everywhere, indices instead of pointers, so a whole function is one
-//! `const` the proc macro can emit as text and the linker resolves across crates. A call to
-//! another shader function is an index into `calls`, whose entries are the other function's own
-//! const; a struct type is `&<T as DeviceAbi>::ABI`. Rust's name resolution does the linking,
-//! which is the one thing a proc macro cannot do for itself.
-
 use crate::TypeAbi;
 
-/// The absent index. `If`'s missing `else`, `Return`'s missing value.
 pub const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,9 +17,6 @@ pub enum Prim {
     U64,
 }
 
-/// Handle types are opaque to the IR: eight bytes in a struct, and an intrinsic away from
-/// meaning anything. The two backends disagree about what the eight bytes are, which is the
-/// whole reason they are not spelled as ordinary structs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HandleKind {
     Texture2d,
@@ -42,7 +30,7 @@ pub enum HandleKind {
     Sampler,
     Commands,
     Pipeline,
-    /// A prelude typedef with no IR meaning. Eight bytes in a struct.
+
     Opaque,
 }
 
@@ -51,9 +39,9 @@ pub enum Ty {
     Void,
     Scalar(Prim),
     Vec(Prim, u8),
-    /// A compact vector used only in device memory. Shader code converts it to `Vec` explicitly.
+
     PackedVec(Prim, u8),
-    /// Columns, rows. `f32` only, which is all either backend spells.
+
     Mat(u8, u8),
     Array(&'static Ty, u32),
     Struct(&'static TypeAbi),
@@ -62,13 +50,11 @@ pub enum Ty {
         pointee: &'static Ty,
     },
     Handle(HandleKind),
-    /// A local atomic shared by every invocation in one threadgroup. It cannot cross the
-    /// host/device ABI or appear in a device pointer.
+
     ThreadgroupAtomicU32,
-    /// An unannotated `let`, before `infer` fills it in.
+
     Infer,
-    /// An unsuffixed literal. Takes the type of whatever it meets, and `I32`/`F32` if it never
-    /// meets anything.
+
     IntLit,
     FloatLit,
 }
@@ -79,7 +65,6 @@ impl Ty {
     pub const U32: Ty = Ty::Scalar(Prim::U32);
     pub const BOOL: Ty = Ty::Scalar(Prim::Bool);
 
-    /// The element type of a vector or matrix column, and the scalar itself for a scalar.
     pub fn prim(self) -> Prim {
         match self {
             Ty::Scalar(p) | Ty::Vec(p, _) | Ty::PackedVec(p, _) => p,
@@ -121,8 +106,6 @@ impl Ty {
         }
     }
 
-    /// What a `Field` or `Index` of this reads through, with a pointer auto-dereferenced the
-    /// way Rust's own `.` does.
     pub fn deref(self) -> Ty {
         match self {
             Ty::Ptr { pointee, .. } => *pointee,
@@ -181,8 +164,6 @@ impl BinOp {
     }
 }
 
-/// Shader operations recorded from Rust. Portable operations have two lowerings; optional
-/// stage operations are omitted with their entry point on a backend that cannot execute them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intrinsic {
     Unpack,
@@ -257,7 +238,7 @@ pub enum Const {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Node {
-    // -- statements --
+
     Block(&'static [u32]),
     Let {
         local: u32,
@@ -279,7 +260,7 @@ pub enum Node {
     Loop {
         body: u32,
     },
-    /// `for local in start..end { body }`, the only iterator either backend can spell.
+
     Range {
         local: u32,
         start: u32,
@@ -291,12 +272,10 @@ pub enum Node {
     Return(u32),
     Discard,
 
-    // -- expressions --
     Local(u32),
     Param(u32),
     Const(Const),
-    /// Vector component (`.x`, `.xyz`) or struct member, told apart by the base's type because
-    /// the macro cannot know a struct's field names.
+
     Field {
         base: u32,
         name: &'static str,
@@ -311,12 +290,12 @@ pub enum Node {
         value: u32,
         to: Ty,
     },
-    /// A vector or array from its components: `f32x4::new(..)`, `[a, b]`.
+
     Construct {
         ty: Ty,
         args: &'static [u32],
     },
-    /// A struct literal. Named, not positional, because field order lives in `TypeAbi`.
+
     StructLit {
         ty: Ty,
         fields: &'static [(&'static str, u32)],
@@ -333,50 +312,46 @@ pub enum Node {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
-    /// `u32x3`, the global invocation.
+
     ThreadId,
-    /// `u32x3`, the invocation within its group.
+
     ThreadIdInGroup,
-    /// `u32x3`.
+
     GroupId,
-    /// `u32`, the flattened `ThreadIdInGroup`.
+
     ThreadIndexInGroup,
     VertexId,
     InstanceId,
-    /// The draw's own base instance. The one way a Vulkan indirect draw can smuggle a value
-    /// into the vertex stage, which is what `gpu_driven` does with it.
+
     BaseInstance,
     PrimitiveId,
-    /// `f32x4`. An output of a vertex stage and an input of a fragment one.
+
     Position,
-    /// `u32`. Selects the array layer written by a rasterized primitive.
+
     RenderTargetArrayIndex,
     FrontFacing,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Binding {
-    /// An ordinary argument of a helper function.
+
     None,
-    /// The root pointer: a push constant on Vulkan, argument-table slot zero on Metal. Exactly
-    /// one entry-point parameter may carry it.
+
     Root,
     Builtin(Builtin),
-    /// A varying, by location. Vertex outputs and fragment inputs.
+
     Location(u32),
-    /// A `#[derive(Constants)]` struct, whose fields are specialization constants rather than
-    /// memory. The field's index is its id, which is the same number `Constants::values`
-    /// pushes, so the host and the module cannot disagree about which is which.
+
     Constants,
-    /// Object-stage payload output, or the matching mesh-stage payload input.
+
     Payload,
-    /// A directly bound stage buffer. Indirect commands use slot one for per-draw data.
+
     Buffer(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Stage {
-    /// Called by other shader functions and no entry point of its own.
+
     Helper,
     Vertex,
     Fragment,
@@ -402,7 +377,7 @@ pub struct Param {
 #[derive(Clone, Copy, Debug)]
 pub struct Local {
     pub name: &'static str,
-    /// `Ty::Infer` unless the `let` was annotated. `infer` fills it in.
+
     pub ty: Ty,
 }
 
@@ -414,14 +389,13 @@ pub struct GpuFn {
     pub ret: Ty,
     pub locals: &'static [Local],
     pub nodes: &'static [Node],
-    /// The body block. The parser numbers it last, so it is not node zero.
+
     pub body: u32,
     pub calls: &'static [&'static GpuFn],
 }
 
 impl GpuFn {
-    /// Every function this one reaches, callees first, each once. Both backends emit in this
-    /// order because neither language lets a call precede its declaration.
+
     pub fn reachable(&'static self) -> Vec<&'static GpuFn> {
         let mut out = Vec::new();
         visit(self, &mut out);
@@ -439,14 +413,6 @@ fn visit(f: &'static GpuFn, out: &mut Vec<&'static GpuFn>) {
     out.push(f);
 }
 
-// -- inference ---------------------------------------------------------------------------
-
-/// The type of every node, and of every local the source left unannotated.
-///
-/// This is the only pass that knows what an expression means; both backends run it first and
-/// then only ever look types up. It panics rather than returning an error because `rustc` has
-/// already type-checked the same body — anything caught here is a hole in this file, not in the
-/// shader.
 pub struct Types {
     pub nodes: Vec<Ty>,
     pub locals: Vec<Ty>,
@@ -458,7 +424,7 @@ pub fn infer(f: &GpuFn) -> Types {
         locals: f.locals.iter().map(|l| l.ty).collect(),
     };
     stmt(f, &mut types, f.body);
-    // A literal that never met a typed operand takes Rust's own default.
+
     for ty in &mut types.nodes {
         match ty {
             Ty::IntLit => *ty = Ty::I32,
@@ -507,8 +473,7 @@ fn stmt(f: &GpuFn, types: &mut Types, node: u32) {
             end,
             body,
         } => {
-            // `for i in 0..count` should follow `count`, not the literal `0`. Typing from
-            // start alone made a `u32` bound compare against an `int` loop variable on Metal.
+
             let start_ty = expr(f, types, start);
             let end_ty = expr(f, types, end);
             let ty = match (start_ty, end_ty) {
@@ -538,7 +503,7 @@ fn stmt(f: &GpuFn, types: &mut Types, node: u32) {
             }
         }
         Node::Break | Node::Continue | Node::Discard => {}
-        // A bare expression statement: a call for its effect, or the block's trailing value.
+
         _ => {
             expr(f, types, node);
         }
@@ -553,8 +518,6 @@ fn concrete(ty: Ty) -> Ty {
     }
 }
 
-/// Pushes a wanted type down into a literal. The arena is a tree — every node has exactly one
-/// parent — so rewriting a node's type in place cannot disturb anything else.
 fn coerce(f: &GpuFn, types: &mut Types, node: u32, want: Ty) {
     if !matches!(types.nodes[node as usize], Ty::IntLit | Ty::FloatLit) {
         return;
@@ -563,7 +526,7 @@ fn coerce(f: &GpuFn, types: &mut Types, node: u32, want: Ty) {
         Ty::Vec(p, _) | Ty::PackedVec(p, _) => Ty::Scalar(p),
         other => other,
     };
-    // The children of a constructed value are literals in their own right.
+
     if let Node::Construct { args, .. } | Node::Intrinsic { args, .. } = f.nodes[node as usize] {
         for &arg in args {
             coerce(f, types, arg, want);
@@ -594,9 +557,7 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
             expr(f, types, index);
             coerce(f, types, index, Ty::U32);
             match expr(f, types, base) {
-                // A pointer indexes as the array it points into, which is what `Gpu<[T]>`
-                // lowers to: the pointee is already the element. It is matched before the
-                // dereference, or a pointer to a vector would look like a vector.
+
                 Ty::Ptr { pointee, .. } => *pointee,
                 Ty::Array(e, _) => *e,
                 Ty::Vec(p, _) => Ty::Scalar(p),
@@ -621,8 +582,7 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
             } else if matches!(l, Ty::Mat(..)) || matches!(r, Ty::Mat(..)) {
                 panic!("matrices multiply with `mul`, not `*`")
             } else {
-                // `vec * scalar` and `scalar * vec` both give the vector back, which is the one
-                // implicit broadcast either backend agrees on.
+
                 match (l, r) {
                     (Ty::Vec(..), _) => l,
                     (_, Ty::Vec(..)) => r,
@@ -667,10 +627,7 @@ fn expr(f: &GpuFn, types: &mut Types, node: u32) -> Ty {
                     first = ty;
                 }
             }
-            // Literal arguments follow the first typed one, which covers `min(x, 0.0)` and
-            // `clamp(x, 0.0, 1.0)` without a per-intrinsic signature table. An intrinsic whose
-            // receiver is a handle is the exception: a texture's arguments have nothing to do
-            // with the texture.
+
             let seed = concrete(first);
             if matches!(seed, Ty::Scalar(_) | Ty::Vec(..) | Ty::Mat(..)) {
                 for &arg in args {
@@ -711,7 +668,7 @@ fn intrinsic(op: Intrinsic, first: Ty, f: &GpuFn, types: &Types, args: &[u32]) -
             Stage::Tile { imageblock } => imageblock,
             _ => panic!("tile_read outside a tile stage"),
         },
-        // `mul` is matrix times vector, matrix times matrix, or the vector row form.
+
         Intrinsic::Mul => match (first, types.nodes[args[1] as usize]) {
             (Ty::Mat(_, r), Ty::Vec(..)) => Ty::Vec(Prim::F32, r),
             (Ty::Vec(..), Ty::Mat(c, _)) => Ty::Vec(Prim::F32, c),
@@ -728,10 +685,10 @@ fn intrinsic(op: Intrinsic, first: Ty, f: &GpuFn, types: &Types, args: &[u32]) -
         | Intrinsic::AtomicMin
         | Intrinsic::AtomicMax
         | Intrinsic::AtomicExchange => Ty::U32,
-        // `a.select(mask, b)`, so the value is the receiver's.
+
         Intrinsic::Select => first,
         Intrinsic::Cross => Ty::Vec(Prim::F32, 3),
-        // Everything left is componentwise and gives back what it was handed.
+
         _ => first,
     }
 }

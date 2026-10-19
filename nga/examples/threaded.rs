@@ -112,9 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap();
                         compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
 
-                        // Only the first thread clears; the rest load. `Raster::new` turns that
-                        // into the right layout transition, which is what keeps four separately
-                        // recorded command buffers from discarding each other's output.
                         let clear = match index {
                             0 => Some([0.03, 0.03, 0.05, 1.0]),
                             _ => None,

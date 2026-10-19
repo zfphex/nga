@@ -2,7 +2,6 @@ use gpu_driven::{BoundaryData, DrawArgs, DrawData, EncodeData, ExecutionRange, I
 use minwin::*;
 use nga::*;
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
 mod gpu_driven {
     use nga::*;
@@ -16,7 +15,6 @@ mod gpu_driven {
         pub color: f32x4,
     }
 
-    /// `VkDrawIndirectCommand`, laid out by the spec rather than by us.
     pub struct DrawArgs {
         pub vertex_count: u32,
         pub instance_count: u32,
@@ -39,7 +37,6 @@ mod gpu_driven {
         pub total: u32,
     }
 
-    /// Metal's indirect-command execution range. Vulkan reads `length` as its draw count.
     pub struct ExecutionRange {
         pub location: u32,
         pub length: AtomicU32,
@@ -80,10 +77,6 @@ mod gpu_driven {
         };
     }
 
-    /// Metal builds a real `render_command` here and binds a per-draw root pointer to it.
-    /// Vulkan has no GPU-side encoder, so this writes a `VkDrawIndirectCommand` instead and
-    /// smuggles the instance index through `first_instance`, which the vertex stage reads back
-    /// as the base instance.
     #[compute(64)]
     fn encode(root: Gpu<EncodeData>, #[thread_id] tid: u32x3) {
         let i = tid.x;
@@ -103,8 +96,7 @@ mod gpu_driven {
             first_vertex: 0,
             first_instance: i,
         };
-        // Metal encodes this compact slot into an inherited-state ICB. Vulkan already has the
-        // DrawArgs record above, so its compiler lowers this call to no instructions.
+
         command_draw(root.commands, slot, false, 0, 3, 1, i);
     }
 
@@ -129,7 +121,6 @@ mod gpu_driven {
         input.color
     }
 
-    /// A vertex stage that returns a bare `f32x4` is returning clip space and nothing else.
     #[vertex]
     fn boundary(root: Gpu<BoundaryData>, #[vertex_id] vid: u32) -> f32x4 {
         let a = (vid / 2) as f32 / root.segments as f32 * TAU;
@@ -227,8 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rec = frame.recorder();
 
             let compute = rec.compute();
-            // Clear `{ location, length }`. Only compact slots below the new length execute,
-            // so neither backend needs the entire draw array cleared.
+
             compute.fill_buffer(&range, 0, size_of::<ExecutionRange>(), 0);
             compute.barrier(Stage::TRANSFER, Stage::COMPUTE, Hazard::BUFFERS);
 

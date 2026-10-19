@@ -1,13 +1,7 @@
-//! The same source drives both backends. Nothing here names Vulkan or Metal.
-
 use minwin::*;
 use nga::*;
 use triangle::{Data, Vertex};
 
-/// The shader, in Rust. `#[gpu_mod]` records each body as IR beside the function it leaves
-/// untouched, so `rustc` type-checks the shader and `nga::compile` turns the same body into
-/// SPIR-V or MSL. The structs are the ABI: the host writes them and the shader reads them,
-/// and there is one definition rather than two kept in step by hand.
 #[gpu_mod]
 mod triangle {
     use nga::*;
@@ -23,8 +17,6 @@ mod triangle {
         pub mvp: f32x4x4,
     }
 
-    /// The interface between the two stages. `position` is the clip-space builtin on both
-    /// sides; every other member is a varying, in declaration order.
     pub struct VertexOut {
         pub position: f32x4,
         pub color: f32x3,

@@ -1,10 +1,3 @@
-//! The Metal backend: `GpuFn` in, MSL source out.
-//!
-//! A recursive walk of the arena, printing as it goes. The only structural work is padding:
-//! struct members land on the byte offsets `#[gpu_mod]` recorded from Rust, so a `uint`
-//! array fills every gap. Rust's layout is authoritative and MSL is made to match, and nothing
-//! is inferred on the way: the offsets are stated outright, not arranged for.
-
 use crate::TypeAbi;
 use crate::ir::{
     self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp,
@@ -12,10 +5,6 @@ use crate::ir::{
 
 pub const PRELUDE: &str = include_str!("prelude.metal");
 
-/// Names Rust allows and MSL does not. A shader function called `vertex` is perfectly good
-/// Rust and a syntax error in Metal, so any identifier that lands on one of these is emitted
-/// with a trailing underscore. `metal.rs` runs the same pass on the name a pipeline asks for,
-/// which is why this is public: the two spellings have to agree.
 pub fn escape(name: &str) -> String {
     const RESERVED: &[&str] = &[
         "vertex",
@@ -86,7 +75,6 @@ pub fn escape(name: &str) -> String {
     }
 }
 
-/// Everything one `MTLLibrary` holds: the entry points asked for, and every function they reach.
 pub fn module(entries: &[&'static GpuFn]) -> String {
     let mut functions: Vec<&'static GpuFn> = Vec::new();
     for entry in entries {
@@ -97,8 +85,6 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
         }
     }
 
-    // A struct reached through a pointer or a local is memory and gets padded; stage interfaces
-    // carry attributes instead.
     let mut io: Vec<&'static TypeAbi> = Vec::new();
     let mut mesh_io: Vec<&'static TypeAbi> = Vec::new();
     let mut tile_io: Vec<&'static TypeAbi> = Vec::new();
@@ -134,8 +120,7 @@ pub fn module(entries: &[&'static GpuFn]) -> String {
     let mut types = Vec::new();
     for f in &functions {
         let t = ir::infer(f);
-        // A constants block is not memory and gets no declaration; its fields are the module's
-        // function constants and nothing ever holds the struct itself.
+
         let params = f
             .params
             .iter()
@@ -189,8 +174,7 @@ static inline void nga_command_draw(nga_commands commands, uint slot, bool lines
     command.draw_primitives(lines ? primitive_type::line : primitive_type::triangle, start, count, instances, base_instance);\n\
 }\n";
     }
-    // Function constants are module scope in MSL, and their index is the field's own, which is
-    // the number `Constants::values` pushes on the host side.
+
     let mut declared: Vec<&'static TypeAbi> = Vec::new();
     for f in &functions {
         for param in f.params {
@@ -243,8 +227,6 @@ fn collect(ty: Ty, out: &mut Vec<&'static TypeAbi>) {
     }
 }
 
-// -- types -------------------------------------------------------------------------------
-
 fn prim(p: Prim) -> &'static str {
     match p {
         Prim::Bool => "bool",
@@ -292,13 +274,12 @@ fn name(ty: Ty) -> String {
             true => format!("device {}*", name(*pointee)),
             false => format!("device const {}*", name(*pointee)),
         },
-        // An array only ever appears through `decl`, which puts the length after the name.
+
         Ty::Array(element, _) => name(*element),
         other => panic!("{other:?} has no MSL spelling"),
     }
 }
 
-/// C declarator order: an array's length belongs to the name, not the type.
 fn decl(ty: Ty, binding: &str) -> String {
     match ty {
         Ty::Array(element, count) => format!("{} {binding}[{count}]", name(*element)),
@@ -320,10 +301,7 @@ fn declare(abi: &TypeAbi, interface: bool) -> String {
     let mut pad = 0usize;
     for (index, field) in abi.fields.iter().enumerate() {
         if interface {
-            // A varying carries no layout: the compiler assigns it, and `position` is the one
-            // member either stage names.
-            // An integer varying cannot be interpolated, and saying so is not optional on
-            // either target.
+
             let flat = match field.ty {
                 Ty::Scalar(p) | Ty::Vec(p, _) if !matches!(p, Prim::F16 | Prim::F32) => " [[flat]]",
                 _ => "",
@@ -395,8 +373,6 @@ fn padding(bytes: usize, index: &mut usize) -> String {
     }
 }
 
-// -- functions ---------------------------------------------------------------------------
-
 fn builtin(b: Builtin) -> &'static str {
     match b {
         Builtin::ThreadId => "[[thread_position_in_grid]]",
@@ -416,9 +392,9 @@ fn builtin(b: Builtin) -> &'static str {
 struct W<'a> {
     f: &'a GpuFn,
     types: &'a ir::Types,
-    /// The structs emitted as stage interfaces, which carry no padding for a literal to fill.
+
     io: &'a [&'static TypeAbi],
-    /// One name per local, disambiguated where a shadowing `let` reused one.
+
     names: Vec<String>,
     out: String,
 }
@@ -435,8 +411,6 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
         });
     }
 
-    // Everything a parameter can be, in one pass. What arrives some other way — the root
-    // pointer, a function constant — leaves an empty argument that is dropped at the end.
     let mut arguments = Vec::new();
     let mut root = String::new();
     for param in f.params {
@@ -472,7 +446,7 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
                     decl(param.ty, &escape(param.name))
                 )
             }
-            // A stage-in struct carries no binding of its own; the fragment stage takes one.
+
             _ if f.stage == Stage::Fragment => {
                 format!("{} [[stage_in]]", decl(param.ty, &escape(param.name)))
             }
@@ -520,8 +494,7 @@ fn function(f: &'static GpuFn, types: &ir::Types, io: &[&'static TypeAbi]) -> St
         names,
         out: String::new(),
     };
-    // Metal takes the threadgroup size at dispatch, so `Stage::Compute`'s sizes are the host's
-    // business and appear nowhere in the source.
+
     if let Stage::Mesh {
         vertex,
         max_vertices,
@@ -665,10 +638,6 @@ fn binary(op: BinOp) -> &'static str {
     }
 }
 
-/// A value where the type around it is fixed. Rust inferred the shader's integer literals for
-/// itself and `infer` only approximates that, so wherever the recorded types disagree the
-/// conversion is written out rather than left to a language that may not do it silently — MSL
-/// warns, and SPIR-V rejects it outright.
 fn coerced(w: &mut W, node: u32, want: Ty) -> String {
     let have = w.types.nodes[node as usize];
     let convertible =
@@ -697,8 +666,7 @@ fn expr(w: &mut W, node: u32) -> String {
             Ty::Scalar(Prim::F16) => format!("{:?}h", value as f64),
             _ => value.to_string(),
         },
-        // MSL is C++: an unsuffixed float literal is a `double`, which Metal will not promote
-        // silently in every position. The suffix is not optional.
+
         Node::Const(Const::Float(value)) => match w.types.nodes[node as usize] {
             Ty::Scalar(Prim::U32) => format!("{}u", value as u32),
             Ty::Scalar(Prim::U64) => format!("{}ul", value as u64),
@@ -712,7 +680,7 @@ fn expr(w: &mut W, node: u32) -> String {
             _ => format!("{value:?}f"),
         },
         Node::Field { base, name } => {
-            // A constants parameter has no value of its own; each field is its own constant.
+
             if let Node::Param(index) = w.f.nodes[base as usize]
                 && w.f.params[index as usize].binding == ir::Binding::Constants
             {
@@ -742,8 +710,7 @@ fn expr(w: &mut W, node: u32) -> String {
             }
         }
         Node::Binary(op, lhs, rhs) => {
-            // A shift's two sides are independent; everything else operates at one type, and a
-            // comparison's is its operands' rather than the `bool` it produces.
+
             let want = match (
                 op.compare() || op.logical(),
                 matches!(op, BinOp::Shl | BinOp::Shr),
@@ -776,9 +743,7 @@ fn expr(w: &mut W, node: u32) -> String {
             let Ty::Struct(abi) = ty else {
                 unreachable!("a struct literal is a struct")
             };
-            // An interface struct has no padding members, so its initialiser has no `{}` for
-            // them either. A memory one is padded to the byte offsets Rust chose, and the
-            // padding is positional like everything else.
+
             let interface = w.io.iter().any(|other| std::ptr::eq(*other, abi));
             let mut cursor = 0usize;
             let mut values = Vec::new();
@@ -878,7 +843,7 @@ fn intrinsic(w: &mut W, op: Intrinsic, args: &[u32]) -> String {
         Intrinsic::Any => call("any"),
         Intrinsic::All => call("all"),
         Intrinsic::Transpose => call("transpose"),
-        // The receiver-first Rust spellings whose MSL forms take their arguments elsewhere.
+
         Intrinsic::Step => format!("step({}, {})", a[1], a[0]),
         Intrinsic::SmoothStep => format!("smoothstep({}, {}, {})", a[1], a[2], a[0]),
         Intrinsic::Select => format!("select({}, {}, {})", a[2], a[0], a[1]),
@@ -964,8 +929,6 @@ fn atomic_target(ty: Ty, value: &str) -> String {
     }
 }
 
-/// Metal's compiler log for a failed `newLibrary` is mostly rejected `operator*` candidates
-/// from the standard headers. Keep the shader's own errors and the line they name.
 pub fn format_compile_error(source: &str, compiler: &str) -> String {
     let src_lines: Vec<&str> = source.lines().collect();
     let mut out = String::from("Metal shader compile failed:\n");

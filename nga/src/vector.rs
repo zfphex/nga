@@ -1,14 +1,3 @@
-//! The vector and matrix types a shader is written in, with real host bodies.
-//!
-//! Nothing here runs on a GPU. It exists so that a shader function is ordinary Rust that
-//! `rustc` type-checks, which is what replaces `slangc`'s diagnostics. Every operation is also
-//! an `ir::Intrinsic`, so the two backends know what to emit for it; a method with no intrinsic
-//! is a method a shader cannot call.
-//!
-//! Component access is a field for one component (`v.x`) and a method for more (`v.xyz()`),
-//! because Rust has no multi-field access and inventing one would mean the body stopped
-//! compiling.
-
 use crate::{Sampler, Scalar};
 
 macro_rules! vector {
@@ -22,8 +11,6 @@ macro_rules! vector {
                 $($pad: $element,)?
             }
 
-            /// The array form the host used before the fields existed, kept so a struct
-            /// literal reads the same on both sides of the ABI.
             #[allow(non_snake_case)]
             pub const fn $name(components: [$element; count!($($field)+)]) -> $name {
                 let [$($field),+] = components;
@@ -149,8 +136,7 @@ macro_rules! count {
 
 vector! {
     f32x2: f32 as F32x2, align 8, x, y;
-    // Register vectors use the native ABI on both targets. The explicit fourth word also keeps
-    // host uploads from copying uninitialised tail padding.
+
     f32x3: f32 as F32x3, align 16, x, y, z [pad _pad];
     f32x4: f32 as F32x4, align 16, x, y, z, w;
     u32x2: u32 as U32x2, align 8, x, y;
@@ -161,8 +147,6 @@ vector! {
     i32x4: i32 as I32x4, align 16, x, y, z, w;
 }
 
-/// A twelve-byte float vector for bandwidth-sensitive device memory. Shader arithmetic uses
-/// [`f32x3`]; call [`packed_f32x3::unpack`] once after loading this type.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -188,8 +172,6 @@ impl packed_f32x3 {
     }
 }
 
-/// The float-only half of the vocabulary. Written out per width because the component count is
-/// part of every one of these.
 macro_rules! float_vector {
     ($($name:ident, $($field:ident),+;)*) => {
         $(
@@ -302,7 +284,6 @@ impl u32x4 {
     }
 }
 
-/// Column-major, the layout both backends and every host matrix library agree on.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -359,12 +340,8 @@ impl f32x3x3 {
     }
 }
 
-// -- everything that only means something on a device ------------------------------------
-
-/// A threadgroup barrier. Nothing to do on the host; the node it parses to is the point.
 pub fn barrier() {}
 
-/// Ends a fragment invocation without writing. Diverges on a device, returns here.
 pub fn discard() {}
 
 #[inline]

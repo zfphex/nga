@@ -1,9 +1,3 @@
-//! The shader `sync.rs` and `threaded.rs` both draw with, in Rust.
-//!
-//! It lives in its own file because two examples run the same simulation: `sync` on one thread
-//! and `threaded` on several. A directory under `examples/` with no `main.rs` in it is not an
-//! example, so cargo leaves this alone and each of them pulls it in with `#[path]`.
-
 use nga::gpu_mod;
 
 #[gpu_mod]

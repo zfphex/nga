@@ -1,10 +1,3 @@
-//! Tile shading: a field of triangles, then a compute function that vignettes and posterises
-//! the imageblock before it is ever written out to memory.
-//!
-//! Apple-only, and permanently so. An imageblock is tile-based deferred hardware showing
-//! through, not an API Vulkan is missing. `Feature::TileShaders` is the runtime spelling of
-//! that, and `tests/tile.rs` is the headless half of this example.
-
 fn main() {
     #[cfg(target_vendor = "apple")]
     if let Err(error) = tiles::run() {
@@ -91,10 +84,8 @@ mod tiles {
 
     use shader::*;
 
-    /// One `TileColor` in the shader: a `float4`.
     const IMAGEBLOCK_BYTES: usize = 16;
-    /// The tile the imageblock covers. 32x32 is the largest Apple silicon accepts for a
-    /// four-byte-per-sample colour target.
+
     const TILE: u32 = 16;
 
     const ROWS: usize = 12;
@@ -120,7 +111,6 @@ mod tiles {
             .build()?;
         let vignette = shaders.tile(&TileDesc::new("tbdr_vignette", &[surface.format()]))?;
 
-        // A triangle per grid cell, each a different hue. Built once: only the transform moves.
         let mut mesh = Vec::with_capacity(ROWS * COLUMNS * 3);
         for row in 0..ROWS {
             for column in 0..COLUMNS {
@@ -188,23 +178,19 @@ mod tiles {
                 let mut frame = ctx.begin_frame().unwrap();
                 let rec = frame.recorder();
 
-                // The tile size and the imageblock layout belong to the *pass*: they decide
-                // how the hardware splits the render target, so they cannot change per draw.
                 let pass = Pass::new()
                     .color(0, &drawable, Some([0.02, 0.02, 0.04, 1.0]))
                     .tile(TILE, TILE, IMAGEBLOCK_BYTES);
                 let raster = rec.raster(&pass);
                 raster.draw(draw, Data { vertices, mvp }, 0..count).unwrap();
 
-                // Same encoder, same tile memory. On any other backend this would be a
-                // second pass over a stored texture.
                 raster
                     .dispatch_tile(
                         vignette,
                         Vignette {
                             size: f32x2([surface.width() as f32, surface.height() as f32]),
                             tile: f32x2([TILE as f32, TILE as f32]),
-                            // Swings so the effect is visibly the tile pass and not the geometry.
+
                             strength: 0.9 + 0.6 * (time * 0.7).sin(),
                             levels: 6.0,
                         },

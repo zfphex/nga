@@ -1,8 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// The root binding: one argument-table address at index 0. Every entry point takes it, and
-// `#[gpu]`'s root parameter is a cast of `root`.
 struct nga_push {
     ulong root;
     ulong resources;
@@ -11,7 +9,6 @@ struct nga_push {
 template<typename T>
 struct nga_desc { T t; };
 
-// A bindless handle is a 64-bit value: a 32-bit slot index or direct MTLResourceID.
 struct nga_texture2d { ulong slot; };
 struct nga_texture2d_rw { ulong slot; };
 struct nga_texture2d_array { ulong slot; };

@@ -1,17 +1,6 @@
-//! The function half of `#[gpu_mod]`: a Rust function in, a `GpuFn` const out.
-//!
-//! The body is also re-emitted unchanged, so `rustc` type-checks every shader for us. That is
-//! the point of the whole arrangement: the errors `slangc` used to report at build time, and the
-//! ones the driver used to report at pipeline creation, are ordinary Rust errors with spans.
-//!
-//! Nothing here knows what SPIR-V or MSL look like. It parses, and it prints the IR as text for
-//! the compiler to parse back; both backends live in `nga` where they can be stepped through.
-
 use crate::{Fail, punct};
 use proc_macro::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 
-/// The Rust type spellings that reach the GPU, as `nga::ir::Ty` expressions. Shared with
-/// the struct half, which records the same types in `FieldAbi`.
 pub fn ir_ty(tokens: &[TokenTree]) -> Result<String, Fail> {
     ir_ty_collect(tokens, &mut Vec::new())
 }
@@ -109,14 +98,12 @@ fn named_ty(name: &str, users: &mut Vec<String>) -> String {
         "i8" => prim("I8"),
         "u8" => prim("U8"),
         "bool" => prim("Bool"),
-        // `usize` reaches the IR only as an array index, which is a `uint` on both targets. It
-        // exists here because `[T; N]` indexes with one and nothing else would compile.
+
         "usize" => prim("U32"),
         "packed_f32x3" => "::nga::ir::Ty::PackedVec(::nga::ir::Prim::F32, 3)".into(),
         "f32x3x3" => "::nga::ir::Ty::Mat(3, 3)".into(),
         "f32x4x4" => "::nga::ir::Ty::Mat(4, 4)".into(),
-        // An atomic is a `uint` the shader only ever touches through an atomic intrinsic. It
-        // is not a handle: the pointer to it has to point at something four bytes wide.
+
         "AtomicU32" => prim("U32"),
         "ThreadgroupAtomicU32" => "::nga::ir::Ty::ThreadgroupAtomicU32".into(),
         "Texture2d" => handle("Texture2d"),
@@ -222,8 +209,6 @@ fn intrinsic(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Binding power, and how many tokens the operator spells. Everything is left-associative,
-/// which is what Rust does for all of these.
 fn binop(t: &[TokenTree], i: usize) -> Option<(&'static str, u8, usize)> {
     let TokenTree::Punct(p) = t.get(i)? else {
         return None;
@@ -231,7 +216,7 @@ fn binop(t: &[TokenTree], i: usize) -> Option<(&'static str, u8, usize)> {
     if p.spacing() == Spacing::Joint
         && let Some(TokenTree::Punct(q)) = t.get(i + 1)
     {
-        // `+=` and friends are assignments, not operators, and stop expression parsing dead.
+
         if q.as_char() == '=' && !matches!(p.as_char(), '=' | '!' | '<' | '>') {
             return None;
         }
@@ -266,17 +251,14 @@ fn binop(t: &[TokenTree], i: usize) -> Option<(&'static str, u8, usize)> {
     Some((one.0, one.1, 1))
 }
 
-/// Everything the parser accumulates. The arenas are printed straight into the const, so there
-/// is no second representation of a node anywhere.
 struct B {
     nodes: Vec<String>,
     locals: Vec<String>,
-    /// Name and index, innermost last, so a shadowing `let` is found first.
+
     scope: Vec<(String, u32)>,
     params: Vec<String>,
     calls: Vec<String>,
-    /// Inside an `if`/`while` condition or a `for` range, where `Name {` starts the body rather
-    /// than a struct literal. Rust's own parser carries exactly this flag.
+
     no_struct: bool,
 }
 
@@ -323,9 +305,6 @@ fn span_at(t: &[TokenTree], i: usize) -> Span {
     t.get(i).map(|t| t.span()).unwrap_or_else(Span::call_site)
 }
 
-/// Splits a comma-separated stream. Groups are single tokens already, so the only nesting that
-/// can hide a comma is `<..>`, which is a type's and never an expression's: `a < b, c > d` is
-/// two arguments and `Gpu<T>` is one parameter.
 fn commas(t: &[TokenTree], angles: bool) -> Vec<Vec<TokenTree>> {
     let mut out = Vec::new();
     let mut current = Vec::new();
@@ -349,8 +328,6 @@ fn commas(t: &[TokenTree], angles: bool) -> Vec<Vec<TokenTree>> {
     out
 }
 
-// -- statements --------------------------------------------------------------------------
-
 fn block(b: &mut B, t: &[TokenTree], tail_returns: bool) -> Result<u32, Fail> {
     let depth = b.scope.len();
     let mut stmts = Vec::new();
@@ -367,7 +344,6 @@ fn block(b: &mut B, t: &[TokenTree], tail_returns: bool) -> Result<u32, Fail> {
     Ok(b.push(format!("::nga::ir::Node::Block(&[{}])", stmts.join(", "))))
 }
 
-/// Parses one statement, leaving `i` on whatever follows it.
 fn stmt(b: &mut B, t: &[TokenTree], i: &mut usize, tail_returns: bool) -> Result<u32, Fail> {
     let span = span_at(t, *i);
     match ident_at(t, *i).as_deref() {
@@ -479,9 +455,7 @@ fn stmt(b: &mut B, t: &[TokenTree], i: &mut usize, tail_returns: bool) -> Result
         _ => {
             let place_start = *i;
             let value = expr(b, t, i, 0, None)?;
-            // `=` alone is an assignment; `+=` and friends re-parse the place so the two copies
-            // are separate nodes. Every node has exactly one parent, which is what lets
-            // inference rewrite a literal's type in place.
+
             let compound = match t.get(*i) {
                 Some(TokenTree::Punct(p))
                     if p.spacing() == Spacing::Joint
@@ -495,9 +469,7 @@ fn stmt(b: &mut B, t: &[TokenTree], i: &mut usize, tail_returns: bool) -> Result
             if let Some(op) = compound {
                 *i += 2;
                 let rhs = expr(b, t, i, 0, None)?;
-                // The place is parsed twice, once to read and once to write. Two nodes, not one
-                // shared: every node has exactly one parent, which is what lets inference
-                // rewrite a literal's type in place.
+
                 let mut again = place_start;
                 let place = expr(b, t, &mut again, 0, None)?;
                 let value = b.push(format!(
@@ -514,7 +486,7 @@ fn stmt(b: &mut B, t: &[TokenTree], i: &mut usize, tail_returns: bool) -> Result
                     "::nga::ir::Node::Store {{ place: {value}, value: {rhs} }}"
                 )));
             }
-            // A trailing expression with no semicolon is the function's result.
+
             if tail_returns && *i >= t.len() {
                 return Ok(b.push(format!("::nga::ir::Node::Return({value})")));
             }
@@ -552,9 +524,6 @@ fn conditional(b: &mut B, t: &[TokenTree], i: &mut usize) -> Result<u32, Fail> {
     )))
 }
 
-// -- expressions -------------------------------------------------------------------------
-
-/// `want` is the `let` annotation, and the only thing that can type an array literal.
 fn expr(
     b: &mut B,
     t: &[TokenTree],
@@ -592,8 +561,7 @@ fn unary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> Res
         )));
     }
     if punct(t.get(*i), '*') {
-        // `*p` on a device pointer is the pointee, which is what a bare `Index`/`Field` of a
-        // pointer already means. The deref carries no node of its own.
+
         *i += 1;
         return unary(b, t, i, want);
     }
@@ -613,8 +581,7 @@ fn postfix(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
             match group_at(t, *i, Delimiter::Parenthesis) {
                 Some(args) => {
                     *i += 1;
-                    // `v.xyz()` is a swizzle, not a call. Rust has no multi-field access, so a
-                    // method is the only spelling that also compiles on the host.
+
                     if args.is_empty()
                         && (2..=4).contains(&name.len())
                         && name.chars().all(|c| "xyzw".contains(c))
@@ -657,7 +624,7 @@ fn postfix(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         if ident_at(t, *i).as_deref() == Some("as") {
             *i += 1;
             let start = *i;
-            // A cast target is one identifier; anything longer is not a shader type.
+
             *i += 1;
             let to = ir_ty(&t[start..*i])?;
             node = b.push(format!(
@@ -717,7 +684,6 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         _ => {}
     }
 
-    // A path: `f32x4::new`, `helper`, `module::helper`.
     let mut path = vec![name];
     while punct(t.get(*i), ':') && punct(t.get(*i + 1), ':') {
         let Some(segment) = ident_at(t, *i + 2) else {
@@ -735,10 +701,7 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
             list.push(expr(b, &arg, &mut j, 0, None)?.to_string());
         }
         let last = path.last().unwrap().clone();
-        // `f32x4::new(..)` builds a vector; `f32x4::splat(..)` is the intrinsic, and so is
-        // anything else in the table. Everything left is a call to another shader function.
-        // `f32x4::splat(x)` is a one-argument construction, not an intrinsic: the type is in the
-        // path and nowhere else, so it has to be read here or it is lost.
+
         if path.len() >= 2 && matches!(last.as_str(), "new" | "from_array" | "splat") {
             let ty = named_ty(&path[path.len() - 2], &mut Vec::new());
             return Ok(b.push(format!(
@@ -775,7 +738,6 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         return Ok(b.push(node));
     }
 
-    // `Name { field: value }`, unless we are in a condition, where the brace is a body.
     if !b.no_struct
         && let Some(fields) = group_at(t, *i, Delimiter::Brace)
     {
@@ -799,9 +761,6 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
         )));
     }
 
-    // Anything left is a Rust constant. Its value is not knowable here — a macro sees tokens,
-    // not values — so the node evaluates it at const-eval time instead, and a name that is not
-    // a constant at all fails as `rustc`'s own "cannot find value", which is the better error.
     let _ = span;
     Ok(b.push(format!(
         "::nga::ir::Node::Const(::nga::ir::Const::Float({} as f64))",
@@ -810,8 +769,7 @@ fn primary(b: &mut B, t: &[TokenTree], i: &mut usize, want: Option<String>) -> R
 }
 
 fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
-    // Strip a type suffix, not the first letter: `1e-4` is a float, and cutting at `e`
-    // used to turn it into the integer 1.
+
     const SUFFIXES: &[&str] = &[
         "usize", "isize", "u128", "i128", "f32", "f64", "f16", "u64", "i64", "u32", "i32", "u16",
         "i16", "u8", "i8",
@@ -829,7 +787,7 @@ fn literal_node(b: &mut B, text: String, span: Span) -> Result<u32, Fail> {
         let Ok(value) = stem.parse::<f64>() else {
             return Err((span, format!("`{text}` is not a shader literal")));
         };
-        // `{:?}` on an `f64` always prints a decimal point, which a Rust float literal needs.
+
         return Ok(b.push(format!(
             "::nga::ir::Node::Const(::nga::ir::Const::Float({value:?}))"
         )));
@@ -960,7 +918,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         return Err((name.span(), "expected a parameter list".into()));
     };
 
-    // The return type, then the body, which is always the last token.
     let mut ret = "::nga::ir::Ty::Void".to_string();
     let tail = &t[keyword + 3..];
     let Some(TokenTree::Group(body)) = tail.last() else {
@@ -982,8 +939,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         no_struct: false,
     };
 
-    // Parameters, and the same list again with the binding attributes stripped, because Rust
-    // itself will not accept `#[thread_id]` on a parameter.
     let mut params = Vec::new();
     let mut stripped: Vec<String> = Vec::new();
     let mut root_taken = false;
@@ -1033,7 +988,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         let ty_tokens = &arg[j + 2..];
         let ty = ir_ty(ty_tokens)?;
         let binding = binding.unwrap_or_else(|| {
-            // An unannotated pointer parameter of an entry point is the root, once.
+
             if !root_taken && stage != "::nga::ir::Stage::Helper" && ty.contains("Ty::Ptr") {
                 root_taken = true;
                 "::nga::ir::Binding::Root".into()
@@ -1108,8 +1063,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         )
     };
 
-    // The function itself, with parameter attributes gone. It is never called on the host, so
-    // everything in it is dead by construction.
     let signature = format!(
         "#[allow(dead_code, unused_variables, unused_mut, unused_parens, unused_assignments, non_snake_case)]
          {prefix} fn {name}({args}){arrow}",

@@ -122,7 +122,7 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
             recorder.compute().timestamp(&timers, 0);
         }
         let pass = Pass::new().color_texture(0, &target, Some([1.0, 0.0, 0.0, 1.0]));
-        // Both signs must select the same three valid vertices.
+
         let (first_index, vertex_offset) = if frame_index % 2 == 0 {
             (0, 1)
         } else {
@@ -171,7 +171,6 @@ fn indexed_draws_resource_ids_and_timestamp_reuse() -> Result<(), Box<dyn std::e
         }
     }
 
-    // Clear before the storage write so stale render output cannot satisfy the assertion.
     let mut frame = context.begin_frame()?;
     let recorder = frame.recorder();
     let pass = Pass::new().color_texture(0, &target, Some([1.0, 0.0, 0.0, 1.0]));

@@ -2,7 +2,6 @@ use minwin::*;
 use nga::*;
 use raster::{Data, Options, Vertex};
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
 mod raster {
     use nga::*;
@@ -19,9 +18,6 @@ mod raster {
         pub tint: f32x4,
     }
 
-    /// One specialization constant per field, numbered by field index — the same number
-    /// `Constants::values` pushes, so the host and the module cannot disagree about which is
-    /// which.
     #[derive(Constants)]
     pub struct Options {
         pub boost: bool,
@@ -55,10 +51,6 @@ mod raster {
         f32x4::new(c.x, c.y, c.z, input.alpha)
     }
 
-    /// The Metal original read `float4 dst [[color(0)]]` — a framebuffer fetch — and computed
-    /// screen blending itself. Desktop Vulkan has no framebuffer fetch, so this emits `src`
-    /// only and the screen formula is a fixed blend equation instead: `ONE`,
-    /// `ONE_MINUS_SRC_COLOR` is `src + dst * (1 - src)`, which is exactly screen.
     #[fragment]
     fn fragment_screen(input: VertexOut) -> f32x4 {
         let c = input.color * input.alpha;

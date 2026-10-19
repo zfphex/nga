@@ -10,7 +10,6 @@ struct Field {
     span: Span,
 }
 
-
 fn compile_error(span: Span, message: &str) -> TokenStream {
     let mut literal = Literal::string(message);
     literal.set_span(span);
@@ -114,33 +113,6 @@ fn parse_struct(tokens: &[TokenTree]) -> Result<(Ident, Vec<Field>), Fail> {
     Ok((name.clone(), fields))
 }
 
-
-/// A module of shader code: every `struct` in it is shared with the GPU, every `fn` is a shader
-/// function, and `ENTRIES` beside them lists the ones that are entry points.
-///
-/// A proc macro sees one item and can look nothing up, so a struct's field offsets have to be
-/// recorded where the struct is written — but the macro that records them does not have to be
-/// spelled there. This one is spelled once, on the module, and sees every item inside it:
-///
-/// ```ignore
-/// #[gpu_mod]
-/// mod triangle {
-///     use nga::*;
-///     pub struct Vertex { pub position: f32x3, pub color: f32x3 }
-///     #[vertex] fn vertex(root: Gpu<Data>, #[vertex_id] vid: u32) -> VertexOut { .. }
-///     #[fragment] fn fragment(input: VertexOut) -> f32x4 { .. }
-///     fn saturate(x: f32) -> f32 { .. }   // no stage attribute: a helper
-/// }
-/// ```
-///
-/// A `fn` carries `#[vertex]`, `#[fragment]`, `#[compute(x, y, z)]`, `#[object]`,
-/// `#[mesh(Vertex, vertices, primitives)]` or `#[tile(Imageblock)]` when it is an entry point
-/// and nothing when it is a helper. A `struct` that wants an alignment writes the `#[repr]` Rust
-/// already has, and the macro leaves it alone. `#[host]` on any item passes it through
-/// untouched, which is where a host-side type or helper goes.
-///
-/// The module has to be inline: `#[gpu_mod] mod name;` gives the macro a path and no body, and
-/// there is no stable way to read the file it names.
 #[proc_macro_attribute]
 pub fn gpu_mod(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_mod(attr, item.clone()) {
@@ -152,15 +124,13 @@ pub fn gpu_mod(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// One item and the attributes in front of it, up to the brace that closes it or the `;` that
-/// ends it. Attribute groups are brackets and a body is a brace, so the two never collide.
 fn items(body: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut i = 0;
     while i < body.len() {
         if punct(body.get(i), '#') {
-            // `#![allow(..)]` is the module's, not the next item's, so it stands alone.
+
             if punct(body.get(i + 1), '!') {
                 i += 3;
                 out.push(body[start..i].to_vec());
@@ -218,20 +188,16 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         }
     };
 
-    // Built as tokens rather than as text: a body's spans are what makes a type error in a
-    // shader point at the shader, and printing the module out and parsing it back loses them.
     let mut out = TokenStream::new();
     let mut entries: Vec<String> = Vec::new();
     let body: Vec<TokenTree> = body.stream().into_iter().collect();
     for item in items(&body) {
-        // `#![allow(..)]` and friends belong to the module, not to any item.
+
         if punct(item.first(), '#') && punct(item.get(1), '!') {
             out.extend(item);
             continue;
         }
 
-        // The attributes in front of the item: `#[host]` and the stage ones are ours, and
-        // everything else — `#[repr]`, a doc comment, `#[allow]` — belongs to the item.
         let mut kept: Vec<TokenTree> = Vec::new();
         let mut stage: Option<TokenStream> = None;
         let mut host = false;
@@ -330,8 +296,6 @@ fn expand_mod(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Fail>
         .collect())
 }
 
-/// The `DeviceAbi` impl, and the `#[repr(C)]` and `#[derive(Clone, Copy)]` a shared struct
-/// needs, unless `repr` is false because the struct already spells its own.
 fn expand_struct(item: TokenStream, repr: bool) -> Result<TokenStream, Fail> {
     let tokens: Vec<TokenTree> = item.clone().into_iter().collect();
     let (name, fields) = parse_struct(&tokens)?;

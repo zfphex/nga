@@ -1,17 +1,3 @@
-//! The Vulkan backend: `GpuFn` in, a SPIR-V module out. Binary, not assembly — the format is a
-//! flat stream of words and writing it directly is less code than printing text for someone
-//! else to assemble.
-//!
-//! Two decisions carry most of the file. Locals are `OpVariable`s in the `Function` storage
-//! class with `OpLoad`/`OpStore` around them, so nothing here builds SSA or places phi nodes;
-//! the driver's own mem2reg does that, and it is what glslang and DXC emit too. And control
-//! flow is structured because Rust's `if`/`while`/`loop` already are — the merge blocks fall
-//! out of the AST instead of being reconstructed from a graph.
-//!
-//! Layout needs no arranging either: `#[gpu_mod]` recorded the byte offset of every field
-//! from Rust, and those numbers become `OpMemberDecorate Offset` unchanged. That is what
-//! `-fvk-use-scalar-layout` used to buy from slangc.
-
 use crate::TypeAbi;
 use crate::ir::{
     self, BinOp, Builtin, Const, GpuFn, HandleKind, Intrinsic, NONE, Node, Prim, Stage, Ty, UnOp,
@@ -19,10 +5,9 @@ use crate::ir::{
 
 const MAGIC: u32 = 0x0723_0203;
 const VERSION: u32 = 0x0001_0500;
-/// Not a registered generator; the low half is a build number, which nothing reads.
+
 const GENERATOR: u32 = 0x00fa_0001;
 
-// Opcodes, in the order they are first used below.
 const OP_EXT_INST_IMPORT: u32 = 11;
 const OP_EXT_INST: u32 = 12;
 const OP_MEMORY_MODEL: u32 = 14;
@@ -141,7 +126,6 @@ const OP_KILL: u32 = 252;
 const OP_RETURN: u32 = 253;
 const OP_RETURN_VALUE: u32 = 254;
 
-// GLSL.std.450 instruction numbers.
 const GLSL_ROUND: u32 = 1;
 const GLSL_F_ABS: u32 = 4;
 const GLSL_S_ABS: u32 = 5;
@@ -181,7 +165,6 @@ const GLSL_CROSS: u32 = 68;
 const GLSL_NORMALIZE: u32 = 69;
 const GLSL_REFLECT: u32 = 71;
 
-// Storage classes.
 const UNIFORM_CONSTANT: u32 = 0;
 const INPUT: u32 = 1;
 const OUTPUT: u32 = 3;
@@ -189,7 +172,6 @@ const FUNCTION: u32 = 7;
 const PUSH_CONSTANT: u32 = 9;
 const PHYSICAL_STORAGE_BUFFER: u32 = 5349;
 
-// Decorations.
 const DEC_SPEC_ID: u32 = 1;
 const DEC_BLOCK: u32 = 2;
 const DEC_COL_MAJOR: u32 = 5;
@@ -209,7 +191,6 @@ fn inst(out: &mut Vec<u32>, op: u32, operands: &[u32]) {
     out.extend_from_slice(operands);
 }
 
-/// A literal string: null-terminated UTF-8, packed four bytes to a word, low byte first.
 fn string(text: &str) -> Vec<u32> {
     let mut bytes = text.as_bytes().to_vec();
     bytes.push(0);
@@ -239,8 +220,7 @@ struct M {
     function_types: Vec<(Vec<u32>, u32)>,
     strided: Vec<u32>,
     builtins: Vec<(Builtin, u32, u32)>,
-    /// The push constant block, the three descriptor arrays and their element types, each made
-    /// on first use. Zero means not yet.
+
     push: u32,
     textures: u32,
     storage: u32,
@@ -286,11 +266,6 @@ impl M {
         inst(&mut self.decorations, OP_DECORATE, &operands);
     }
 
-    // -- types --
-
-    /// A type as a value: no `Offset`, no `ArrayStride`. SPIR-V forbids explicit layout on
-    /// anything in the `Function` class, so a struct read out of device memory is a different
-    /// type id from the struct that lives there.
     fn ty(&mut self, ty: Ty) -> u32 {
         self.type_of(ty, false)
     }
@@ -299,7 +274,7 @@ impl M {
         if let Ty::PackedVec(p, n) = ty {
             return self.type_of(Ty::Vec(p, n), laid);
         }
-        // Only aggregates carry layout, so everything else has one id either way.
+
         let laid = laid && matches!(ty, Ty::Struct(_) | Ty::Array(..));
         if let Some((.., id)) = self
             .types
@@ -366,18 +341,15 @@ impl M {
                 id
             }
             Ty::Struct(abi) => self.structure(abi, laid),
-            // Whatever a device pointer points at is memory, so its pointee is always the
-            // laid-out form.
+
             Ty::Ptr { pointee, .. } => {
                 self.capability(5347);
                 self.extension("SPV_KHR_physical_storage_buffer");
                 self.ptr(PHYSICAL_STORAGE_BUFFER, *pointee)
             }
-            // A handle is eight bytes in a struct and an index into a descriptor array
-            // everywhere else. The image types themselves are the descriptor arrays' business.
+
             Ty::Handle(_) => self.ty(Ty::Scalar(Prim::U64)),
-            // Object stages are filtered above, but keeping the scalar representation here
-            // makes IR inspection and diagnostics total.
+
             Ty::ThreadgroupAtomicU32 => self.ty(Ty::U32),
             other => panic!("{other:?} has no SPIR-V type"),
         };
@@ -403,14 +375,13 @@ impl M {
             if !laid {
                 continue;
             }
-            // The whole of the layout contract, in one instruction per field: Rust said where
-            // this member is, and SPIR-V is told rather than asked.
+
             inst(
                 &mut self.decorations,
                 OP_MEMBER_DECORATE,
                 &[id, index as u32, DEC_OFFSET, field.offset as u32],
             );
-            // A matrix member needs its own two, and column-major is what the host writes.
+
             if let Ty::Mat(_, rows) = field.ty {
                 inst(
                     &mut self.decorations,
@@ -432,9 +403,6 @@ impl M {
         id
     }
 
-    /// A pointer type, by pointee type rather than id, so a device one can be told how far
-    /// apart its elements are. `OpPtrAccessChain` — the only pointer arithmetic SPIR-V has, and
-    /// what `p[i]` on a device pointer becomes — is invalid without that stride.
     fn ptr(&mut self, storage: u32, ty: Ty) -> u32 {
         let memory = storage == PHYSICAL_STORAGE_BUFFER || storage == PUSH_CONSTANT;
         let pointee = self.type_of(ty, memory);
@@ -459,8 +427,6 @@ impl M {
         self.pointers.push((storage, pointee, id));
         id
     }
-
-    // -- constants --
 
     fn constant(&mut self, ty: Ty, bits: u64) -> u32 {
         let type_id = self.ty(ty);
@@ -491,7 +457,6 @@ impl M {
         id
     }
 
-    /// The bit pattern a scalar of this type takes for a literal.
     fn literal(&mut self, ty: Ty, value: Const) -> u32 {
         let bits = match (ty, value) {
             (_, Const::Bool(b)) => b as u64,
@@ -506,7 +471,6 @@ impl M {
     }
 }
 
-/// IEEE half, for the one place `f16` reaches a constant. Ties round to even like the hardware.
 fn half(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -520,8 +484,6 @@ fn half(value: f32) -> u16 {
     }
     sign | ((exponent as u16) << 10) | (mantissa >> 13) as u16
 }
-
-// -- the module ---------------------------------------------------------------------------
 
 pub fn module(entries: &[&'static GpuFn]) -> Vec<u8> {
     let words = words(entries);
@@ -591,8 +553,7 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
     };
     m.glsl = m.id();
     m.capability(1);
-    // Addresses are the whole model here: every root pointer is a device address and every
-    // struct a shader walks is reached through one.
+
     m.capability(5347);
     m.extension("SPV_KHR_physical_storage_buffer");
 
@@ -631,8 +592,7 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
     let mut operands = vec![m.glsl];
     operands.extend(string("GLSL.std.450"));
     inst(&mut out, OP_EXT_INST_IMPORT, &operands);
-    // Logical addressing for everything the module declares, physical for the pointers it is
-    // handed. `PhysicalStorageBuffer64` is the only combination Vulkan allows here.
+
     inst(&mut out, OP_MEMORY_MODEL, &[5348, 1]);
     out.extend(m.entry_points);
     out.extend(m.execution_modes);
@@ -643,40 +603,32 @@ pub fn words(entries: &[&'static GpuFn]) -> Vec<u32> {
     out
 }
 
-// -- functions ----------------------------------------------------------------------------
-
 struct W<'a> {
     f: &'a GpuFn,
     types: ir::Types,
-    /// The `OpVariable` backing each local.
+
     locals: Vec<u32>,
-    /// The value of each parameter: an `OpFunctionParameter`, or a load from a global.
+
     params: Vec<u32>,
-    /// Where `break` and `continue` go, innermost last.
+
     loops: Vec<(u32, u32)>,
-    /// The globals this entry point touched, for its interface list.
+
     interface: Vec<u32>,
-    /// One id per specialization constant, by parameter and field index.
+
     constants: Vec<(u32, u32, u32)>,
-    /// Set for an entry point, whose `return` writes to output variables first.
+
     outputs: Vec<(u32, u32)>,
-    /// Whether the block being written already has its terminator. A basic block has exactly
-    /// one, at the end, and `return` in the middle of a Rust body would otherwise produce two.
+
     terminated: bool,
     body: Vec<u32>,
     ids: &'a [(&'static GpuFn, u32)],
 }
 
-/// The storage class is part of the answer: the member a vertex stage writes as `Position` is
-/// the one a fragment stage reads as `FragCoord`, and Vulkan rejects either in the other's
-/// place.
 fn builtin_number(b: Builtin, storage: u32) -> u32 {
     match b {
         Builtin::Position if storage == INPUT => 15,
         Builtin::Position => 0,
-        // `VertexIndex` and `InstanceIndex`, not the GL-style `VertexId`/`InstanceId`, which
-        // Vulkan does not allow. These are the ones that count from the draw's own base, which
-        // is also what Metal's `[[vertex_id]]` gives.
+
         Builtin::VertexId => 42,
         Builtin::InstanceId => 43,
         Builtin::BaseInstance => 4425,
@@ -690,7 +642,6 @@ fn builtin_number(b: Builtin, storage: u32) -> u32 {
     }
 }
 
-/// The builtin's own type, which is not always the one the parameter asks for.
 fn builtin_ty(b: Builtin) -> Ty {
     match b {
         Builtin::Position => Ty::Vec(Prim::F32, 4),
@@ -706,8 +657,7 @@ fn builtin_ty(b: Builtin) -> Ty {
 }
 
 fn builtin_variable(m: &mut M, b: Builtin, storage: u32) -> u32 {
-    // Keyed by storage class as well as number: `Position` written by a vertex stage and
-    // `FragCoord` read by a fragment one are the same builtin and two different variables.
+
     if let Some((.., id)) = m
         .builtins
         .iter()
@@ -734,8 +684,6 @@ fn builtin_variable(m: &mut M, b: Builtin, storage: u32) -> u32 {
     id
 }
 
-/// The push constant block: one address and the two descriptor-array bases, matching
-/// `nga_push`. Made once and shared by every entry point.
 fn push_block(m: &mut M) -> u32 {
     if m.push != 0 {
         return m.push;
@@ -772,7 +720,7 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
     let types = ir::infer(f);
     let entry = f.stage != Stage::Helper;
     let ret = match entry {
-        // An entry point returns nothing; its result leaves through an output variable.
+
         true => Ty::Void,
         false => f.ret,
     };
@@ -827,8 +775,6 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
     let first = m.id();
     label(&mut w, first);
 
-    // Every `OpVariable` in the `Function` class has to be in the first block, so the locals
-    // are declared before anything else happens.
     for (index, _) in f.locals.iter().enumerate() {
         let ty = m.ty(w.types.locals[index]);
         let pointer = m.pointer(FUNCTION, ty);
@@ -869,8 +815,6 @@ fn function(m: &mut M, f: &'static GpuFn, id: u32, ids: &[(&'static GpuFn, u32)]
     }
 }
 
-/// Loads an entry point's parameters out of the globals they arrive in, and declares the
-/// outputs its `return` will write.
 fn entry_prologue(m: &mut M, w: &mut W) {
     let mut location = 0u32;
     for (index, param) in w.f.params.iter().enumerate() {
@@ -879,9 +823,7 @@ fn entry_prologue(m: &mut M, w: &mut W) {
                 let Ty::Struct(abi) = param.ty else {
                     panic!("`{}` is not a #[derive(Constants)] struct", param.name);
                 };
-                // Each field is one `OpSpecConstant`, decorated with the field's own index.
-                // Nothing composes them: a reference to `options.gamma` is the constant itself,
-                // so the driver still sees a specialization it can fold.
+
                 for (field_index, field) in abi.fields.iter().enumerate() {
                     let type_id = m.ty(field.ty);
                     let id = m.id();
@@ -925,7 +867,7 @@ fn entry_prologue(m: &mut M, w: &mut W) {
                 inst(&mut w.body, OP_LOAD, &[ty, loaded, variable]);
                 convert(m, w, loaded, builtin_ty(b), param.ty)
             }
-            // A fragment stage takes its varyings as a struct, one input variable per member.
+
             _ => match param.ty {
                 Ty::Struct(abi) => {
                     let mut members = Vec::new();
@@ -956,7 +898,6 @@ fn entry_prologue(m: &mut M, w: &mut W) {
         w.params.push(value);
     }
 
-    // Outputs, in the order `Return` will write them.
     let mut location = 0u32;
     match w.f.ret {
         Ty::Void => {}
@@ -966,7 +907,7 @@ fn entry_prologue(m: &mut M, w: &mut W) {
                 w.outputs.push((variable, m.ty(field.ty)));
             }
         }
-        // A vertex stage that returns a bare `f32x4` is returning clip space and nothing else.
+
         other => {
             let name = match w.f.stage {
                 Stage::Vertex => "position",
@@ -978,8 +919,6 @@ fn entry_prologue(m: &mut M, w: &mut W) {
     }
 }
 
-/// One varying. Interface members with reserved names become builtins; everything else takes
-/// the next location.
 fn stage_variable(
     m: &mut M,
     w: &mut W,
@@ -1003,8 +942,7 @@ fn stage_variable(
             let id = m.id();
             inst(&mut m.globals, OP_VARIABLE, &[pointer, id, storage]);
             m.decorate(id, DEC_LOCATION, &[*location]);
-            // An integer varying has nothing to interpolate, and a fragment stage that reads
-            // one without saying `Flat` is invalid rather than merely wrong.
+
             if storage == INPUT
                 && matches!(ty, Ty::Scalar(p) | Ty::Vec(p, _) if !matches!(p, Prim::F16 | Prim::F32))
             {
@@ -1021,9 +959,6 @@ fn stage_variable(
     id
 }
 
-/// The last block needs a terminator, and the source only writes one where it returns. A
-/// function whose result never arrives is unreachable rather than void, which is a distinction
-/// SPIR-V insists on.
 fn terminate(w: &mut W, entry: bool) {
     if w.terminated {
         return;
@@ -1034,8 +969,6 @@ fn terminate(w: &mut W, entry: bool) {
     }
     w.terminated = true;
 }
-
-// -- statements ---------------------------------------------------------------------------
 
 fn stmt(m: &mut M, w: &mut W, node: u32) {
     if node == NONE {
@@ -1199,7 +1132,7 @@ fn stmt(m: &mut M, w: &mut W, node: u32) {
                 let result = coerced(m, w, result, ret);
                 inst(&mut w.body, OP_RETURN_VALUE, &[result]);
             } else {
-                // An entry point's result goes to its output variables and the return is bare.
+
                 let ret = w.f.ret;
                 let result = coerced(m, w, result, ret);
                 for (index, (variable, ty)) in w.outputs.clone().iter().enumerate() {
@@ -1227,8 +1160,6 @@ fn stmt(m: &mut M, w: &mut W, node: u32) {
     }
 }
 
-/// A branch, unless the block is already finished — the `then` arm of an `if` that returns
-/// needs no jump to the merge block.
 fn branch(w: &mut W, target: u32) {
     if !w.terminated {
         inst(&mut w.body, OP_BRANCH, &[target]);
@@ -1241,10 +1172,6 @@ fn label(w: &mut W, id: u32) {
     w.terminated = false;
 }
 
-// -- places -------------------------------------------------------------------------------
-
-/// A pointer to somewhere a value lives, and the storage class it lives in, which is what
-/// decides whether a load needs the `Aligned` operand.
 #[derive(Clone, Copy)]
 struct Place {
     id: u32,
@@ -1252,9 +1179,6 @@ struct Place {
     storage: u32,
 }
 
-/// Rebuilds an aggregate at the other layout. The two type ids differ only in decorations, so
-/// the value has to be taken apart and put back together; there is no cast for it. Scalars and
-/// vectors have one id either way and pass straight through.
 fn relayout(m: &mut M, w: &mut W, id: u32, ty: Ty, laid: bool) -> u32 {
     let members: Vec<Ty> = match ty {
         Ty::Struct(abi) => abi.fields.iter().map(|f| f.ty).collect(),
@@ -1302,8 +1226,7 @@ fn load(m: &mut M, w: &mut W, place: Place) -> u32 {
     let ty = m.type_of(place.ty, memory(place.storage));
     let id = m.id();
     match place.storage {
-        // Every access through a device address needs its alignment stated. Without it the
-        // module is invalid, not merely slow.
+
         PHYSICAL_STORAGE_BUFFER => inst(
             &mut w.body,
             OP_LOAD,
@@ -1328,7 +1251,7 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
             let base_ty = w.types.nodes[base as usize];
             let ty = w.types.nodes[node as usize];
             let (pointer, storage) = match base_ty {
-                // A device pointer is already the address of the struct.
+
                 Ty::Ptr { .. } => (value(m, w, base), PHYSICAL_STORAGE_BUFFER),
                 _ => {
                     let place = place_of(m, w, base);
@@ -1354,7 +1277,7 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
             let ty = w.types.nodes[node as usize];
             let index = value(m, w, index);
             match base_ty {
-                // Pointer arithmetic, the one form `OpAccessChain` cannot express.
+
                 Ty::Ptr { .. } => {
                     let base = value(m, w, base);
                     let pointer_type = m.ptr(PHYSICAL_STORAGE_BUFFER, ty);
@@ -1391,8 +1314,6 @@ fn place_of(m: &mut M, w: &mut W, node: u32) -> Place {
     }
 }
 
-// -- expressions --------------------------------------------------------------------------
-
 fn signed(ty: Ty) -> bool {
     matches!(ty.prim(), Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64)
 }
@@ -1401,9 +1322,6 @@ fn floating(ty: Ty) -> bool {
     matches!(ty.prim(), Prim::F16 | Prim::F32)
 }
 
-/// A value at the type the surrounding operation needs, converting or broadcasting where the
-/// IR's own types fall short. SPIR-V has no implicit conversion at all, so this is not an
-/// optimisation.
 fn coerced(m: &mut M, w: &mut W, node: u32, want: Ty) -> u32 {
     let have = w.types.nodes[node as usize];
     let id = value(m, w, node);
@@ -1419,8 +1337,7 @@ fn convert(m: &mut M, w: &mut W, id: u32, have: Ty, want: Ty) -> u32 {
     if !convertible {
         return id;
     }
-    // A scalar meeting a vector broadcasts, which is the only implicit widening either
-    // language agrees on and the one Rust's operator overloads allow.
+
     if let (Ty::Scalar(_), Ty::Vec(p, n)) = (have, want) {
         let scalar = convert(m, w, id, have, Ty::Scalar(p));
         let ty = m.ty(want);
@@ -1441,7 +1358,7 @@ fn convert(m: &mut M, w: &mut W, id: u32, have: Ty, want: Ty) -> u32 {
         (false, false) if signed(want) => OP_S_CONVERT,
         (false, false) => OP_U_CONVERT,
     };
-    // A same-width signed/unsigned change is a reinterpretation, and `OpUConvert` refuses it.
+
     if !floating(have) && !floating(want) && have.size() == want.size() {
         inst(&mut w.body, 124, &[ty, out, id]);
         return out;
@@ -1450,10 +1367,6 @@ fn convert(m: &mut M, w: &mut W, id: u32, have: Ty, want: Ty) -> u32 {
     out
 }
 
-/// Whether a node names memory. A local does; so does anything reached from one, or through a
-/// device pointer. A parameter that is not a pointer is a value in a register and has no
-/// address at all, which is why `input.color` on a fragment's stage-in struct is an extract
-/// rather than an access chain.
 fn is_place(w: &W, node: u32) -> bool {
     match w.f.nodes[node as usize] {
         Node::Local(_) => true,
@@ -1477,8 +1390,7 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
                 let place = place_of(m, w, node);
                 return load(m, w, place);
             }
-            // A composite held in a register: `OpVectorExtractDynamic` is the only indexing
-            // SPIR-V offers without an address.
+
             let base = value(m, w, base);
             let index = value(m, w, index);
             let type_id = m.ty(ty);
@@ -1505,7 +1417,7 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
             }
             let base_ty = w.types.nodes[base as usize];
             match base_ty.deref() {
-                // A swizzle is a shuffle of a value, never a place.
+
                 Ty::Vec(..) | Ty::PackedVec(..) => {
                     let source = value(m, w, base);
                     let type_id = m.ty(ty);
@@ -1566,7 +1478,7 @@ fn value(m: &mut M, w: &mut W, node: u32) -> u32 {
             };
             let mut components: Vec<u32> =
                 args.iter().map(|&a| coerced(m, w, a, element)).collect();
-            // `f32x4::splat(x)` is one component standing for all of them.
+
             if let Ty::Vec(_, n) | Ty::PackedVec(_, n) = ty {
                 while components.len() < n as usize {
                     components.push(components[0]);
@@ -1695,16 +1607,10 @@ fn binary(m: &mut M, w: &mut W, node: u32, op: BinOp, lhs: u32, rhs: u32) -> u32
 fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u32 {
     let ty = w.types.nodes[node as usize];
 
-    // A portable counted batch uses the same producer on both backends. Vulkan consumes the
-    // Draw record that producer writes; Metal additionally turns this intrinsic into an ICB
-    // command. It has no Vulkan side effect, and deliberately does not evaluate its
-    // Metal-only Commands handle.
     if op == Intrinsic::CommandDraw {
         return 0;
     }
 
-    // The handle intrinsics come first: their arguments have types the arithmetic path below
-    // would try to make sense of.
     match op {
         Intrinsic::Sample
         | Intrinsic::SampleLevel
@@ -1729,8 +1635,7 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
     }
 
     if matches!(op, Intrinsic::Barrier | Intrinsic::ThreadgroupBarrier) {
-        // Workgroup scope. The general barrier also publishes device memory; the specialized
-        // form only synchronizes workgroup memory.
+
         let scope = m.constant(Ty::U32, 2);
         let memory = match op {
             Intrinsic::Barrier => 0x40 | 0x100,
@@ -1758,7 +1663,6 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
     let float = matches!(first, Ty::Void) || floating(first);
     let sign = !matches!(first, Ty::Void) && signed(first);
 
-    // Everything else takes its arguments at the result's type, which is what `infer` recorded.
     let element = match ty {
         Ty::Vec(p, _) if matches!(op, Intrinsic::Dot | Intrinsic::Length | Intrinsic::Distance) => {
             Ty::Scalar(p)
@@ -1817,7 +1721,7 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
         Intrinsic::Clamp if sign => glsl(m, w, GLSL_S_CLAMP, &a),
         Intrinsic::Clamp => glsl(m, w, GLSL_U_CLAMP, &a),
         Intrinsic::Mix => glsl(m, w, GLSL_F_MIX, &a),
-        // Rust reads `x.step(edge)`; GLSL takes the edge first.
+
         Intrinsic::Step => glsl(m, w, GLSL_STEP, &[a[1], a[0]]),
         Intrinsic::SmoothStep => glsl(m, w, GLSL_SMOOTH_STEP, &[a[1], a[2], a[0]]),
         Intrinsic::Length => glsl(m, w, GLSL_LENGTH, &a),
@@ -1883,7 +1787,7 @@ fn intrinsic(m: &mut M, w: &mut W, node: u32, op: Intrinsic, args: &[u32]) -> u3
 
 fn atomic(m: &mut M, w: &mut W, op: Intrinsic, args: &[u32]) -> u32 {
     let place = match w.types.nodes[args[0] as usize] {
-        // The pointer is the value here: `p.atomic_add(1)` on a device pointer.
+
         Ty::Ptr { .. } => Place {
             id: value(m, w, args[0]),
             ty: Ty::U32,
@@ -1910,9 +1814,6 @@ fn atomic(m: &mut M, w: &mut W, op: Intrinsic, args: &[u32]) -> u32 {
     id
 }
 
-/// The three descriptor arrays the device binds, matching the Vulkan half of the old prelude:
-/// sampled images at set 0, storage images at set 1, samplers at set 2, each at binding 0. A
-/// handle's low word is the index into one of them.
 fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
     m.capability(5302);
     m.extension("SPV_EXT_descriptor_indexing");
@@ -2004,7 +1905,6 @@ fn descriptor_array(m: &mut M, kind: HandleKind) -> (u32, u32) {
     (variable, element)
 }
 
-/// One descriptor out of an array, indexed by the handle's low word.
 fn descriptor(m: &mut M, w: &mut W, kind: HandleKind, handle: u32) -> u32 {
     let (array, element) = descriptor_array(m, kind);
     if !w.interface.contains(&array) {

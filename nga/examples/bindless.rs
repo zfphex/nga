@@ -2,7 +2,6 @@ use bindless::{Data, Material, Paint, Vertex};
 use minwin::*;
 use nga::*;
 
-/// The shader, in Rust. See `triangle.rs` for what `#[gpu_mod]` does with it.
 #[gpu_mod]
 mod bindless {
     use nga::*;
@@ -46,8 +45,6 @@ mod bindless {
         );
     }
 
-    /// `material` is an integer varying, so it is flat on both targets — that is not a choice
-    /// either language leaves open.
     pub struct VertexOut {
         pub position: f32x4,
         pub uv: f32x2,
@@ -106,8 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paint_pipeline = shaders.compute(bindless::PAINT)?;
 
     let heap = GpuHeap::new(&device, 64 * 1024 * 1024)?;
-    // One sampler plus one range of layers per quad. A heap costs descriptor bytes for the
-    // slots it is asked for, so this asks for what it uses rather than for the ceiling.
+
     let mut textures = ResourceHeap::new(&device, 1 + QUADS * LAYERS)?;
 
     let mut quads = Vec::new();
@@ -174,8 +170,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let texture = heap.alloc_texture(&desc)?;
             heap.upload(&texture, 0, &pixels)?;
 
-            // A painted texture is read and written in the same frame, so it stays in GENERAL.
-            // Metal needs no such distinction, because there is no layout to choose.
             let handle = match painted {
                 true => {
                     heap.transition(&texture, Usage::STORAGE);
@@ -205,8 +199,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let material_buffer = heap.alloc_slice(&materials)?;
 
-    // Every copy and transition above was recorded, not submitted. One flush lands the lot,
-    // where the old path drained the device once per texture.
     heap.flush()?;
 
     let mut ctx = Context::new(&device, &shaders, 64 * 1024, 1)?;

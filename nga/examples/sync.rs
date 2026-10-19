@@ -121,9 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Dispatch::x(COUNT),
                 )
                 .unwrap();
-            // Metal signals a fence here and the raster encoder waits on it. Vulkan has no
-            // cross-encoder fence inside one command buffer: a barrier on the queue is the
-            // whole mechanism, so the compute -> vertex handoff is one more `barrier`.
+
             compute.barrier(Stage::COMPUTE, Stage::VERTEX, Hazard::BUFFERS);
 
             let pass = Pass::new()

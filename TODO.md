@@ -1,3 +1,0 @@
-- **Vulkan mesh shaders.** `
-- **`execute_indirect`.** Metal can take an ICB execution range from GPU memory (`executeCommandsInBuffer:indirectBuffer:`). `IndirectCommands` replays a host-known range instead. `gpu_meshes` resets every slot so empty ones replay as nothing, one command per empty slot.
-- **Indexed indirect commands.** `IndirectCommands::draws(.., indexed: true)` builds the buffer. No shader in the tree encodes `draw_indexed_primitives`.

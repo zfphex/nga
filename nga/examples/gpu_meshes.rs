@@ -1,16 +1,3 @@
-//! Indirect command buffers: a compute shader encodes the entire render pass, picking the
-//! *pipeline* per object as well as the draw arguments.
-//!
-//! `gpu_driven` is the portable version of the same idea and shows where the line is:
-//! `draw_indirect_count` lets the GPU decide how many draws there are and what they draw, but
-//! all of them share the one pipeline and the one root pointer the host bound. Here every
-//! command carries its own, which is why some cubes come out solid and others wireframe with
-//! nothing on the CPU deciding which.
-//!
-//! Metal-only. Vulkan's nearest equivalent is `VK_NV_device_generated_commands`, which is not
-//! in the shared API, so `Feature::IndirectCommands` answers `false` there.
-//! `tests/icb.rs` is the headless half of this example.
-
 fn main() {
     #[cfg(target_vendor = "apple")]
     if let Err(error) = commands::run() {
@@ -167,8 +154,7 @@ mod commands {
 
     const SIDE: usize = 6;
     const OBJECTS: u32 = (SIDE * SIDE * SIDE) as u32;
-    /// The eight corners of a unit cube, as triangles then as lines. One vertex array serves
-    /// both pipelines; the encoded command picks the range and the primitive.
+
     fn cube() -> Vec<Vertex> {
         const CORNERS: [[f32; 3]; 8] = [
             [-1.0, -1.0, -1.0],
@@ -264,8 +250,6 @@ mod commands {
         let tri_count = 36u32;
         let line_count = 24u32;
 
-        // A cube per grid cell, alternating solid and wireframe by a cheap hash so the GPU has
-        // a genuine per-object pipeline choice to make.
         let mut objects = Vec::with_capacity(OBJECTS as usize);
         for index in 0..OBJECTS as usize {
             let (x, y, z) = (index % SIDE, index / SIDE % SIDE, index / (SIDE * SIDE));
@@ -312,8 +296,7 @@ mod commands {
             }
 
             window.draw(|win| {
-                // Before anything allocates: a live resize can run several times per frame, and
-                // each one hands the old depth target over to be freed later.
+
                 heap.retire(ctx.completed());
 
                 let (new_width, new_height) = win.scaled_size();
@@ -324,8 +307,7 @@ mod commands {
                         .unwrap();
                     resized = false;
                     if surface.width() > 0 && surface.height() > 0 {
-                        // The old depth target is still in flight, so it goes on the deferred
-                        // list rather than being freed under the GPU.
+
                         let stale = std::mem::replace(
                             &mut depth,
                             heap.alloc_texture(&TextureDesc::depth(
@@ -360,9 +342,7 @@ mod commands {
                 let rec = frame.recorder();
 
                 let compute = rec.compute();
-                // A slot the encode pass does not claim keeps whatever it last held, so the
-                // buffer is cleared first. A reset slot replays as nothing, which is what
-                // makes "execute everything" safe without a GPU-side count.
+
                 compute.reset(&commands, commands.all());
                 compute
                     .dispatch(
@@ -391,7 +371,7 @@ mod commands {
                     .depth(&depth, Some(1.0), false);
                 let raster = rec.raster(&pass);
                 raster.depth(&DepthState::new(CompareOp::LessEqual, true));
-                // Every command the shader wrote, pipeline choice included.
+
                 raster.execute(&commands, commands.all());
 
                 frame.submit(Some(&drawable)).unwrap();
