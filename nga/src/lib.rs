@@ -448,6 +448,12 @@ impl Dispatch {
             threads: [width, height, 1],
         }
     }
+
+    pub fn xyz(x: u32, y: u32, z: u32) -> DispatchThreads {
+        DispatchThreads {
+            threads: [x, y, z],
+        }
+    }
 }
 
 #[repr(C)]

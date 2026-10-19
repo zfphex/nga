@@ -830,6 +830,15 @@ impl HeapBuffer<'_> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Read the host-mapped contents of this buffer if available.
+    pub fn as_slice<T>(&self) -> Option<&[T]> {
+        if self.cpu.is_null() {
+            return None;
+        }
+        let count = self.len / size_of::<T>();
+        Some(unsafe { std::slice::from_raw_parts(self.cpu as *const T, count) })
+    }
 }
 
 pub struct HeapTexture<'heap> {
@@ -2217,6 +2226,18 @@ impl<'a> Raster<'a> {
     pub fn cull(&self, mode: Cull, front: Winding) {
         self.encoder.set_cull_mode(cull(mode));
         self.encoder.set_front_facing_winding(winding(front));
+    }
+
+    pub fn depth_bias(&self, bias: f32, slope_scale: f32, clamp: f32) {
+        self.encoder.set_depth_bias(bias, slope_scale, clamp);
+    }
+
+    pub fn depth_clip_mode(&self, clamp: bool) {
+        self.encoder.set_depth_clip_mode(if clamp {
+            minmetal::DepthClipMode::Clamp
+        } else {
+            minmetal::DepthClipMode::Clip
+        });
     }
 
     pub fn viewport(&self, view: Viewport, clip: Scissor) {

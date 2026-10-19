@@ -367,6 +367,21 @@ pub fn barrier() {}
 /// Ends a fragment invocation without writing. Diverges on a device, returns here.
 pub fn discard() {}
 
+#[inline]
+pub fn min<T: PartialOrd + Copy>(a: T, b: T) -> T {
+    if a < b { a } else { b }
+}
+
+#[inline]
+pub fn max<T: PartialOrd + Copy>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+
+#[inline]
+pub fn clamp<T: PartialOrd + Copy>(x: T, min_val: T, max_val: T) -> T {
+    if x < min_val { min_val } else if x > max_val { max_val } else { x }
+}
+
 macro_rules! sampled {
     ($($name:ident,)*) => {
         $(

@@ -1451,6 +1451,11 @@ impl HeapBuffer<'_> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Read the host-mapped contents of this buffer if available.
+    pub fn as_slice<T>(&self) -> Option<&[T]> {
+        None
+    }
 }
 
 pub struct HeapTexture<'heap> {
@@ -3956,6 +3961,13 @@ impl<'a> Raster<'a> {
                 .cmd_set_cull_mode(self.command_buffer, cull(mode));
             self.device
                 .cmd_set_front_face(self.command_buffer, winding(front));
+        }
+    }
+
+    pub fn depth_bias(&self, bias: f32, slope_scale: f32, clamp: f32) {
+        unsafe {
+            self.device
+                .cmd_set_depth_bias(self.command_buffer, bias, clamp, slope_scale);
         }
     }
 
